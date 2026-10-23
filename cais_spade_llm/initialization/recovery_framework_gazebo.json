@@ -1232,6 +1232,7 @@
         "scope": "resource",
         "domain": [
           "idle",
+          "printing",
           "completed"
         ]
       }
@@ -1736,7 +1737,7 @@
     }
   },
   "resource_programs": {
-    "revision": 5,
+    "revision": 6,
     "resources": {
       "ur5e-1": {
         "functions": {
@@ -10120,7 +10121,8 @@
                   "op": "start_job"
                 }
               ],
-              "entry_state": "loaded"
+              "entry_state": "loaded",
+              "success_state": "running"
             }
           },
           "pause_job": {
@@ -10132,7 +10134,9 @@
                   "id": "pause_job",
                   "op": "pause_job"
                 }
-              ]
+              ],
+              "entry_state": "running",
+              "success_state": "paused"
             }
           },
           "resume_job": {
@@ -10144,7 +10148,9 @@
                   "id": "resume_job",
                   "op": "resume_job"
                 }
-              ]
+              ],
+              "entry_state": "any",
+              "success_state": "running"
             }
           },
           "stop_job": {
@@ -10156,21 +10162,9 @@
                   "id": "stop_job",
                   "op": "stop_job"
                 }
-              ]
-            }
-          },
-          "machine_part": {
-            "function_name": "trim_part",
-            "status": "implemented",
-            "program": {
-              "entry_state": "loaded",
-              "success_state": "completed",
-              "steps": [
-                {
-                  "id": "process",
-                  "op": "start_job"
-                }
-              ]
+              ],
+              "entry_state": "any",
+              "success_state": "stopped"
             }
           }
         },
@@ -10221,7 +10215,8 @@
                   "op": "start_job"
                 }
               ],
-              "entry_state": "loaded"
+              "entry_state": "loaded",
+              "success_state": "running"
             }
           },
           "pause_job": {
@@ -10233,7 +10228,9 @@
                   "id": "pause_job",
                   "op": "pause_job"
                 }
-              ]
+              ],
+              "entry_state": "running",
+              "success_state": "paused"
             }
           },
           "resume_job": {
@@ -10245,7 +10242,9 @@
                   "id": "resume_job",
                   "op": "resume_job"
                 }
-              ]
+              ],
+              "entry_state": "any",
+              "success_state": "running"
             }
           },
           "stop_job": {
@@ -10257,21 +10256,9 @@
                   "id": "stop_job",
                   "op": "stop_job"
                 }
-              ]
-            }
-          },
-          "machine_part": {
-            "function_name": "trim_part",
-            "status": "implemented",
-            "program": {
-              "entry_state": "loaded",
-              "success_state": "completed",
-              "steps": [
-                {
-                  "id": "process",
-                  "op": "start_job"
-                }
-              ]
+              ],
+              "entry_state": "any",
+              "success_state": "stopped"
             }
           }
         },
@@ -10986,120 +10973,6 @@
                 "Nominal effects are committed only by the existing task acknowledgement."
               ]
             }
-          },
-          "move_to_location": {
-            "function_name": "move_to_location",
-            "status": "implemented",
-            "program": {
-              "entry_state": "idle",
-              "success_state": "idle",
-              "part_in_state": "",
-              "required_context_keys": [],
-              "context_mapping": {},
-              "part_transition": null,
-              "entry_guards": [
-                {
-                  "predicate": "bound_task",
-                  "args": {},
-                  "message": "",
-                  "description": "Fresh KMR observations and saved scene revision",
-                  "condition": {}
-                }
-              ],
-              "steps": [
-                {
-                  "id": "transport",
-                  "op": "move_base",
-                  "executor": "primitive",
-                  "params": {
-                    "target_pose": {
-                      "$state": "base_target_pose",
-                      "path": []
-                    },
-                    "waypoints": {
-                      "$state": "base_waypoints",
-                      "path": []
-                    }
-                  },
-                  "store_as": "transport",
-                  "exposed": true,
-                  "public_params": null,
-                  "note": "",
-                  "when": [],
-                  "dry_run_output": null,
-                  "continue_on_failure": false,
-                  "failure_observations": {},
-                  "physical_position_required": false
-                }
-              ],
-              "effects": [],
-              "success_response": {},
-              "dry_run_description": "",
-              "dry_run_duration": 5.0,
-              "failure_part": "",
-              "notes": [
-                "Coordinate movement updates measured base pose and only a matched named location."
-              ]
-            },
-            "variants": {
-              "carrying": {
-                "entry_state": "carrying",
-                "success_state": "carrying",
-                "part_in_state": "",
-                "required_context_keys": [],
-                "context_mapping": {},
-                "part_transition": null,
-                "entry_guards": [
-                  {
-                    "predicate": "bound_task",
-                    "args": {},
-                    "message": "",
-                    "description": "Fresh KMR observations and saved scene revision",
-                    "condition": {}
-                  }
-                ],
-                "steps": [
-                  {
-                    "id": "transport",
-                    "op": "move_base",
-                    "executor": "primitive",
-                    "params": {
-                      "target_pose": {
-                        "$state": "base_target_pose",
-                        "path": []
-                      },
-                      "waypoints": {
-                        "$state": "base_waypoints",
-                        "path": []
-                      },
-                      "transform": {
-                        "$state": "previous",
-                        "path": [
-                          "grasp_transform"
-                        ]
-                      }
-                    },
-                    "store_as": "transport",
-                    "exposed": true,
-                    "public_params": null,
-                    "note": "",
-                    "when": [],
-                    "dry_run_output": null,
-                    "continue_on_failure": false,
-                    "failure_observations": {},
-                    "physical_position_required": false
-                  }
-                ],
-                "effects": [],
-                "success_response": {},
-                "dry_run_description": "",
-                "dry_run_duration": 5.0,
-                "failure_part": "",
-                "notes": [
-                  "Coordinate movement updates measured base pose and only a matched named location."
-                ]
-              }
-            }
           }
         },
         "primitives": {
@@ -11261,6 +11134,14 @@
               "success_state": "belt_stopped",
               "steps": [
                 {
+                  "id": "observe",
+                  "op": "detect_parts"
+                },
+                {
+                  "id": "targets",
+                  "op": "compute_transport_targets"
+                },
+                {
                   "id": "transport",
                   "op": "move_relative",
                   "params": {
@@ -11272,9 +11153,17 @@
           }
         },
         "primitives": {
+          "detect_parts": {
+            "status": "executable",
+            "recovery_selectable": true
+          },
+          "compute_transport_targets": {
+            "status": "executable",
+            "recovery_selectable": true
+          },
           "move_relative": {
             "status": "executable",
-            "recovery_selectable": false
+            "recovery_selectable": true
           }
         }
       },
@@ -11288,6 +11177,14 @@
               "success_state": "occupied downstream zone",
               "steps": [
                 {
+                  "id": "observe",
+                  "op": "detect_parts"
+                },
+                {
+                  "id": "targets",
+                  "op": "compute_transport_targets"
+                },
+                {
                   "id": "transport",
                   "op": "move_relative",
                   "params": {
@@ -11299,9 +11196,17 @@
           }
         },
         "primitives": {
+          "detect_parts": {
+            "status": "executable",
+            "recovery_selectable": true
+          },
+          "compute_transport_targets": {
+            "status": "executable",
+            "recovery_selectable": true
+          },
           "move_relative": {
             "status": "executable",
-            "recovery_selectable": false
+            "recovery_selectable": true
           }
         }
       },
@@ -11311,8 +11216,8 @@
             "function_name": "print_part",
             "status": "planned",
             "program": {
-              "entry_state": "output absent",
-              "success_state": "output present",
+              "entry_state": "idle",
+              "success_state": "printing",
               "availability_note": "The current Gazebo scene starts with all supported printer outputs present; no printing executor is bound.",
               "steps": []
             }

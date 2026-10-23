@@ -134,7 +134,8 @@ def checkpoint(context, configuration: dict) -> dict | None:
                 or any(task.get("resource_id") == "ur5e-1" for task in context.pending_tasks.values())):
             return None
         records = {}
-        for rid, name in (("M1", "machine_part"), ("ur5e-1", "pick_approach")):
+        # M1's last acknowledgement is the observed completion of its job.
+        for rid, name in (("M1", "complete_job"), ("ur5e-1", "pick_approach")):
             record = next((row for row in reversed(context.transitions)
                            if row["acknowledgement"]["resource_id"] == rid), None)
             task = record["acknowledgement"] if record is not None else {}
@@ -150,8 +151,8 @@ def checkpoint(context, configuration: dict) -> dict | None:
                 or approach["before"]["M1"].get("part_name") != part):
             return None
         return {"task_id": approach["acknowledgement"]["task_id"], "part_name": part, "custodian": "M1",
-                "processing_observations": deepcopy(records["machine_part"]["observations"]),
-                "machine_part": deepcopy(records["machine_part"]), "pick_approach": deepcopy(approach)}
+                "processing_observations": deepcopy(records["complete_job"]["observations"]),
+                "complete_job": deepcopy(records["complete_job"]), "pick_approach": deepcopy(approach)}
     if scenario == "Part slippage" and configuration.get("checkpoint") == "after_both_pickups_before_place":
         evidence = _slippage_pickups(context, configuration)
         if evidence is None or any(
@@ -180,7 +181,7 @@ def holds_task(context, configuration: dict | None, task: dict) -> bool:
         rid = task["resource_id"]
         return rid in parts and acknowledged_pickup(context, rid, parts[rid]) is not None
     if (configuration and configuration["scenario"] == "Machining breakdown during part processing"
-            and configuration.get("checkpoint") == "during_processing" and task["event_name"] == "machine_part"):
+            and configuration.get("checkpoint") == "during_processing" and task["event_name"] == "start_job"):
         machines = context.inputs["scene"]["machines"]
         return any(context.resources[row["resource_id"]].valuation.get("resource_state") != "loaded"
                    or context.resources[row["handling_robot"]].valuation.get("held_part") is not None

@@ -246,7 +246,7 @@ def _verify_robot_breakdown_capture(captured: dict) -> None:
             or captured['part_tracker'][part].get('location') != 'M1'
             or 'ur5e-1' in captured.get('unavailable_resources', [])):
         raise ValueError('Robot breakdown must retain a failed empty-gripper approach and the completed part at M1')
-    for rid, name in (('M1', 'machine_part'), ('ur5e-1', 'pick_approach')):
+    for rid, name in (('M1', 'complete_job'), ('ur5e-1', 'pick_approach')):
         record = failure.get(name, {})
         task = record.get('acknowledgement', {})
         if (task.get('resource_id') != rid or task.get('event_name') != name

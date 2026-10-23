@@ -207,23 +207,33 @@ def build_environment_models(
 
 
 def _declare_machine_jobs(models: dict, scene: dict) -> None:
-    """Add public job-control declarations only to versioned machine models."""
-    from cais_spade_llm.resources.machine.machine_jobs import MACHINE_PRIMITIVES
+    """Declare job control on versioned machine models as states of the one machine automaton.
 
+    A job runs, pauses, stops or completes the machine's loaded part, so those are the machine's own
+    states. Each part keeps its job's state as a part condition, so a job paused or stopped on one part
+    stays with that part while the machine processes another. Completion is observed, not commanded, so
+    machining is a commanded ``start_job`` followed by the observed ``complete_job``; the combined
+    ``machine_part`` event is removed. The machine assigns a started job its identity.
+    """
     for machine in scene["machines"]:
-        if machine.get("simulation_process", {}).get("job_control", {}).get("version") != 1:
+        job_control = machine.get("simulation_process", {}).get("job_control", {})
+        if job_control.get("version") != 1:
             continue
         rid, selected = machine["resource_id"], machine["selected_program"]
         model = models[rid]
-        tasks._variable(model, "job_state", [None, "running", "paused", "stopped", "interrupted", "completed"], None)
+        model["events"] = [event for event in model["events"] if event["event_name"] != "machine_part"]
+        model["state_variables"]["resource_state"]["domain"] = [
+            "idle", "loaded", "running", "paused", "stopped", "completed"]
         tasks._variable(model, "selected_program", list(machine["program_options"]), selected)
-        model["state_variables"]["active_job"] = {"scope": "resource", "type": ["string", "null"]}
-        model["current_valuation"]["active_job"] = None
+        tasks._variable(model, "job_state", [None, "running", "paused", "stopped", "completed"], None, scope="part")
+        # An interrupted job is observed, never commanded: it is the machine's fault state.
+        model["fault_states"] = ["interrupted"]
+        # A part whose job paused or stopped may be unloaded like a completed one; it keeps its job state.
         access_events = [event['event_id'] for event in model['events']
             if event['event_name'] in {'pick_approach', 'pick_grasp', 'pick_part'}
             and event['guards'].get('resource_state') == {'equals': 'completed'}]
         for identifier in access_events:
-            for job_state in ('paused', 'stopped'):
+            for state in ('paused', 'stopped'):
                 event_id = max(event['event_id'] for peer in models.values() for event in peer['events']) + 1
                 for owner, peer in models.items():
                     original = next((event for event in peer['events'] if event['event_id'] == identifier), None)
@@ -232,32 +242,41 @@ def _declare_machine_jobs(models: dict, scene: dict) -> None:
                     event = deepcopy(original)
                     event['event_id'] = event_id
                     if owner == rid:
-                        event['guards'].update(resource_state={'equals': 'loaded'},
-                                               job_state={'equals': job_state}, active_job={'equals': None})
+                        event['guards']['resource_state'] = {'equals': state}
+                    source = event['capability_transition']['source']
+                    if f"{rid}.resource_state" in source:
+                        source[f"{rid}.resource_state"] = state
                     peer['events'].append(event)
-        for name in MACHINE_PRIMITIVES:
-            bindings = {"resource_id": rid}
-            parameters = {}
-            guards = {}
-            updates = {}
-            if name == "select_program":
-                parameters["program"] = {"required": True, "type": "string", "domain": list(machine["program_options"])}
-                guards["active_job"] = {"equals": None}
-                updates["selected_program"] = {"set_from_param": "program"}
-            else:
+        bindings = {"resource_id": rid}
+        tasks._event(models, "select_program", bindings, {rid: {"resource_state": {"not_equals": "running"}}},
+                     {rid: {"selected_program": {"set_from_param": "program"}}},
+                     parameters={"program": {"required": True, "type": "string",
+                                             "domain": list(machine["program_options"])}},
+                     capability=({}, {}))
+        # (event, machine state before, the part's job state before, both after)
+        transitions = [("start_job", "loaded", None, "running"), ("start_job", "loaded", "completed", "running"),
+                       ("pause_job", "running", None, "paused"), ("resume_job", "paused", None, "running"),
+                       ("stop_job", "running", None, "stopped"), ("stop_job", "paused", None, "stopped"),
+                       ("complete_job", "running", None, "completed")]
+        if job_control.get("resume_after_reload") is True:
+            transitions.append(("resume_job", "loaded", "paused", "running"))
+        for name, before, job_before, after in transitions:
+            parameters = {"part_name": deepcopy(PART_PARAMETER)}
+            if name not in {"start_job", "complete_job"}:
                 parameters["job_id"] = {"required": True, "type": "string"}
-                target = {"start_job": "running", "pause_job": "paused", "resume_job": "running", "stop_job": "stopped"}[name]
-                updates["job_state"] = {"set": target}
-                updates["active_job"] = {"set_from_param": "job_id"} if target == "running" else {"set": None}
-                if name in {"start_job", "resume_job"}:
-                    guards["active_job"] = {"equals": None}
-                if name == "start_job":
-                    parameters.update(part_name=deepcopy(PART_PARAMETER), process={"equals": "trim"},
-                                      result={"required": True, "type": "string"})
-                    guards["part_name"] = {"equals_from_param": "part_name"}
-                    guards["resource_state"] = {"equals": "loaded"}
-            tasks._event(models, name, bindings, {rid: guards}, {rid: updates},
-                         parameters=parameters, capability=({}, {}))
+            if name in {"start_job", "complete_job"}:
+                parameters.update(process={"equals": "trim"}, result={"required": True, "type": "string"})
+            guards = {"resource_state": {"equals": before}, "part_name": {"equals_from_param": "part_name"}}
+            if name == "start_job" or job_before is not None:
+                guards["job_state"] = {"equals": job_before}
+            # The part stays at the machine while the machine's state changes around it.
+            tasks._event(models, name, bindings, {rid: guards},
+                         {rid: {"resource_state": {"set": after}, "job_state": {"set": after}}},
+                         parameters=parameters,
+                         capability=({"part_location": rid, f"{rid}.resource_state": before},
+                                     {"part_location": rid, f"{rid}.resource_state": after}))
+            if name == "complete_job":
+                model["events"][-1]["controllable"] = False
 
 
 def _append_resource_models(models: dict, scene: dict, registered: list, schema_version: int, program_revision: str) -> None:
@@ -312,7 +331,7 @@ def _declare_printer_state(models: dict[str, dict], configuration: dict) -> None
     declaration = configuration.get("state_variables", {}).get("resource_state")
     if declaration is None:
         return
-    if declaration != {"scope": "resource", "domain": ["idle", "completed"]}:
+    if declaration != {"scope": "resource", "domain": ["idle", "printing", "completed"]}:
         raise ValueError("Invalid 3D Printing Station resource_state declaration")
     printer = models["3D Printing Station"]
     printer["state_variables"]["resource_state"] = deepcopy(declaration)
@@ -322,11 +341,25 @@ def _declare_printer_state(models: dict[str, dict], configuration: dict) -> None
     next_id = max(event["event_id"] for model in models.values() for event in model["events"]) + 1
     for event in list(printer["events"]):
         if event["event_name"] == "print_part":
+            # Printing starts on a clear bed; the output and its process record appear only when the
+            # print is observed to complete, never by command.
+            completion = {key: deepcopy(value) for key, value in event.items() if key not in {
+                "program", "program_key", "program_status", "program_variants", "function_name"}}
             event["guards"]["resource_state"] = {"equals": "idle"}
             event["collection_guards"] = {
                 "output.{part_name}": {"all_other_equals": False}
             }
-            event["updates"]["resource_state"] = {"set": "completed"}
+            event["updates"] = {"resource_state": {"set": "printing"}}
+            event["product_effects"] = {"processCompleted": []}
+            # Starting a print changes no part yet; the declared output transition is the completion's.
+            source = deepcopy(event["capability_transition"]["source"])
+            event["capability_transition"] = {"source": source, "target": deepcopy(source)}
+            completion.update(
+                event_id=next_id, event_name="complete_job", controllable=False, participants=[printer["resource_id"]],
+                guards={"resource_state": {"equals": "printing"}, "output.{part_name}": {"equals": False}},
+                updates={"resource_state": {"set": "completed"}, "output.{part_name}": {"set": True}})
+            printer["events"].append(completion)
+            next_id += 1
         elif "output.{part_name}" in event["guards"]:
             event["guards"]["resource_state"] = {"equals": "completed"}
             if event["event_name"] != "pick_grasp":
@@ -355,10 +388,11 @@ def _declare_printer_state(models: dict[str, dict], configuration: dict) -> None
 def _check_printer_state(values: dict) -> None:
     if "resource_state" not in values:
         return
-    expected = "completed" if any(
+    # A present output means a completed print; an empty bed is idle or still printing.
+    expected = {"completed"} if any(
         value is True for field, value in values.items() if field.startswith("output.")
-    ) else "idle"
-    if values["resource_state"] != expected:
+    ) else {"idle", "printing"}
+    if values["resource_state"] not in expected:
         raise ValueError("3D Printing Station resource_state disagrees with output occupancy")
 
 
@@ -542,7 +576,7 @@ def _parameterized_event(
 
 def _declare_product_effects(event: dict, schema_version: int) -> None:
     event["product_effects"] = {"processCompleted": []}
-    if event["event_name"] == "machine_part":
+    if event["event_name"] in {"machine_part", "complete_job"}:
         event["parameter_bindings"]["process"] = {"equals": "trim"}
         event["parameter_bindings"]["result"] = {"required": True, "type": "string"}
         event["product_effects"]["processCompleted"] = [
@@ -634,6 +668,9 @@ def event_bindings(event: dict, part: str, desired: dict, requirements: list[dic
             params[name] = desired["target"]
         elif name in {"next_locations", "delivered_part"}:
             continue
+        elif not isinstance(desired.get(name, {}), dict):
+            # A command that causes a later observed effect takes the requirement's value directly.
+            params[name] = desired[name]
         else:
             return None
     return params
@@ -765,7 +802,7 @@ def feasibility(model: dict, task: dict, geometry: dict) -> tuple[str, list[str]
     status, reasons = _geometry_feasibility(model, geometry)
     if status == "INFEASIBLE":
         return status, reasons
-    if name == "machine_part":
+    if name in {"machine_part", "start_job"}:
         process_status, process_reasons = _machining_feasibility(model, params)
         if process_status == "INFEASIBLE":
             return process_status, process_reasons
@@ -803,7 +840,8 @@ def owners(models: dict, valuation: dict, products: dict, product_name: str) -> 
             # A fault is an uncontrollable event into a declared fault state;
             # models recorded before that declaration omit it from their domain.
             if not check_value(declaration, value, products) and not (
-                field == "resource_state" and value in declared_fault_states()
+                field == "resource_state"
+                and (value in declared_fault_states() or value in model.get("fault_states", ()))
             ):
                 raise ValueError(f"Invalid resource value: {rid}.{field}")
             part = _custody_part(rid, field, value, product_name)
@@ -1025,7 +1063,9 @@ def project_transition(
             if result not in predicted[part]["processCompleted"]:
                 predicted[part]["processCompleted"].append(result)
     after_owners = owners(models, after, predicted, product_name)
-    expected = set(before_owners) | ({part} if task["event_name"] == "print_part" else set())
+    # Only an event that makes an output present introduces its part.
+    introduces = event["updates"].get("output.{part_name}") == {"set": True}
+    expected = set(before_owners) | ({part} if introduces else set())
     if set(after_owners) != expected:
         raise ValueError("Transition does not conserve part custody")
     for name, owner in after_owners.items():

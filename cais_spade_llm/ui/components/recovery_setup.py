@@ -390,7 +390,7 @@ def _render_failure_form(
                 resource
                 for resource in choices
                 if any(
-                    event["event_name"] == "machine_part" for event in models[resource]["events"]
+                    event["event_name"] in {"machine_part", "complete_job"} for event in models[resource]["events"]
                 )
             ]
         else:

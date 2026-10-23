@@ -2064,6 +2064,9 @@ def part_slippage_checker(tmp_path_factory):
     for name in ("initial_context.json", "mutex.json", "precedence.json", "safe.json"):
         shutil.copyfile(archived / name, directory / name)
     context = json.loads((directory / "initial_context.json").read_text())
+    from ppr_ap_migration import migrate_scene
+
+    migrate_scene(context["scene"])
     source = context["sources"]["predefined_safety"]
     source["sha256"] = hashlib.sha256((module["ROOT"] / source["path"]).read_bytes()).hexdigest()
     (directory / "initial_context.json").write_text(json.dumps(context))

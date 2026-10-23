@@ -39,8 +39,7 @@ def test_saved_catalog_covers_exact_resources_and_unused_executors(scene):
     }
     assert len(resources) == 12
     assert set(resources["KMR"]["functions"]) == {
-        "pick_approach", "pick_part", "move_to_resource", "place_approach",
-        "place_release", "move_to_location",
+        "pick_approach", "pick_part", "move_to_resource", "place_approach", "place_release",
     }
     assert set(resources["KMR"]["primitives"]) == robot | {"move_base"}
     for rid in ("ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4"):
@@ -55,15 +54,22 @@ def test_saved_catalog_covers_exact_resources_and_unused_executors(scene):
     assert {name: set(resources[name]["primitives"]) for name in ("M1", "M2", "Conveyor", "Buffer For Machined parts")} == {
         "M1": {"select_program", "start_job", "pause_job", "resume_job", "stop_job"},
         "M2": {"select_program", "start_job", "pause_job", "resume_job", "stop_job"},
-        "Conveyor": {"move_relative"}, "Buffer For Machined parts": {"move_relative"},
+        "Conveyor": {"detect_parts", "compute_transport_targets", "move_relative"},
+        "Buffer For Machined parts": {"detect_parts", "compute_transport_targets", "move_relative"},
     }
+    # Transport observes and computes its targets before it moves, and recovery may compose each step.
+    assert all(row["recovery_selectable"] for name in ("Conveyor", "Buffer For Machined parts")
+               for row in resources[name]["primitives"].values())
     assert resources["3D Printing Station"]["primitives"] == {}
     assert resources["3D Printing Station"]["functions"]["print_part"]["program"]["steps"] == []
     assert not resources["Storage"]["primitives"] and not resources["Exit"]["primitives"]
     assert not primitive_available(scene, "KMR", "dock", recovery=True)
     assert not primitive_available(scene, "ur5e-1", "snap_part_to_slot", recovery=True)
-    assert saved_workflow_program(scene, "M1", "machine_part")["steps"][0]["op"] == "start_job"
-    assert saved_workflow_program(scene, "Conveyor", "advance_conveyor")["steps"][0]["op"] == "move_relative"
+    # Machining is start_job then the observed complete_job, which has no saved function.
+    assert "machine_part" not in resources["M1"]["functions"]
+    assert saved_workflow_program(scene, "M1", "start_job")["steps"][0]["op"] == "start_job"
+    assert [step["op"] for step in saved_workflow_program(scene, "Conveyor", "advance_conveyor")["steps"]] == [
+        "detect_parts", "compute_transport_targets", "move_relative"]
 
 
 def test_place_insert_seats_assembly_part_before_release(scene):
@@ -198,11 +204,9 @@ def test_kmr_saved_handoffs_bind_previous_observations_and_reject_missing_output
 
 
 def test_every_kmr_base_controller_call_belongs_to_a_composed_move_base_step():
-    from cais_spade_llm.recovery_framework.kmr_tasks import KMR_LOCATION_TASK
-
     assert all(any(step.op == "move_base" for step in definition.program.steps)
                for definition in (KMR_TASKS["pick_approach"], KMR_TASKS["move_to_resource"],
-                                  *KMR_MOVE_VARIANTS.values(), KMR_LOCATION_TASK))
+                                  *KMR_MOVE_VARIANTS.values()))
     path = Path(__file__).resolve().parents[1] / "cais_spade_llm/recovery_framework/kmr_gazebo.py"
     tree = ast.parse(path.read_text())
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
@@ -274,7 +278,7 @@ def test_saved_transport_speed_is_used_and_cannot_exceed_scene_limit(scene):
     edited = deepcopy(scene)
     edited["resource_programs"]["resources"]["Conveyor"]["functions"]["advance_conveyor"] = function
     validate_resource_programs(edited)
-    assert saved_workflow_program(edited, "Conveyor", "advance_conveyor")["steps"][0]["params"] == {
+    assert saved_workflow_program(edited, "Conveyor", "advance_conveyor")["steps"][-1]["params"] == {
         "speed_mps": 1.0,
     }
     part_state = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=0.0)))
@@ -303,8 +307,10 @@ def test_saved_transport_speed_is_used_and_cannot_exceed_scene_limit(scene):
     runner.verify_transport_clearance = Mock()
     runner.confirm_arrival = Mock()
     runner.move_relative(**step["params"])
-    for operation in (runner.observe_belt_residents, runner.compute_shared_displacement,
-                      runner.verify_transport_clearance, runner.confirm_arrival):
+    # Observing the belt and computing its targets are their own primitives; move_relative only moves.
+    runner.observe_belt_residents.assert_not_called()
+    runner.compute_shared_displacement.assert_not_called()
+    for operation in (runner.verify_transport_clearance, runner.confirm_arrival):
         operation.assert_called_once_with()
     assert runner.state["speed"] == 1.0
     assert durations[0] > 1.0
@@ -323,18 +329,19 @@ def test_saved_composition_adds_supported_steps_and_executes_them_in_saved_order
         load_config=lambda filename: json.loads(Path(filename).read_text()),
         save_config=lambda filename, value: Path(filename).write_text(json.dumps(value)),
     )
-    function = deepcopy(scene["resource_programs"]["resources"]["KMR"]["functions"]["move_to_location"])
+    function = deepcopy(scene["resource_programs"]["resources"]["KMR"]["functions"]["move_to_resource"])
     function["program"]["steps"].insert(0, {
         "id": "read_parts", "op": "detect_parts", "params": {}, "when": [],
     })
     save_resource_program_edit(bridge, path, "KMR", resource_program_revision(scene),
-                               event_name="move_to_location", value=function)
+                               event_name="move_to_resource", value=function)
     saved = json.loads(path.read_text())
-    definition = saved_robot_definition(saved, "KMR", "move_to_location")
+    definition = saved_robot_definition(saved, "KMR", "move_to_resource")
     calls, records = [], []
+    transform = [0., 0., 0., 0., 0., 0., 1.]
     execute_composition(
-        "move_to_location", arguments={},
-        state={"base_target_pose": [0., 1., 0.], "base_waypoints": []},
+        "move_to_resource", arguments={},
+        state={"base_target_pose": [0., 1., 0.], "base_waypoints": [], "previous": {"grasp_transform": transform}},
         primitives={
             "detect_parts": lambda: calls.append("detect_parts") or {"parts": {}},
             "move_base": lambda **params: calls.append(("move_base", params)) or {"base_pose": [0., 1., 0.]},
@@ -342,7 +349,7 @@ def test_saved_composition_adds_supported_steps_and_executes_them_in_saved_order
         records=records, operations=[], now=lambda: 0., check=lambda: None,
         serialize=lambda value: value, definition=definition,
     )
-    assert calls == ["detect_parts", ("move_base", {"target_pose": [0., 1., 0.], "waypoints": []})]
+    assert calls == ["detect_parts", ("move_base", {"target_pose": [0., 1., 0.], "waypoints": [], "transform": transform})]
     assert [(row["step_id"], row["primitive"]) for row in records] == [
         (step.id, step.op) for step in definition.program.steps
     ]
@@ -356,7 +363,7 @@ def test_saved_composition_adds_supported_steps_and_executes_them_in_saved_order
     {"id": "extra", "op": "detect_parts", "params": {}, "continue_on_failure": True},
 ])
 def test_composition_edit_rejects_removed_commands_and_contract_changing_steps(scene, step):
-    scene["resource_programs"]["resources"]["KMR"]["functions"]["move_to_location"]["program"]["steps"].insert(0, step)
+    scene["resource_programs"]["resources"]["KMR"]["functions"]["move_to_resource"]["program"]["steps"].insert(0, step)
     with pytest.raises(ValueError):
         validate_resource_programs(scene)
 

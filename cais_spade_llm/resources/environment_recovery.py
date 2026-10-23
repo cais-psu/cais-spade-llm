@@ -5,10 +5,11 @@ from __future__ import annotations
 import math
 from copy import deepcopy
 from fractions import Fraction
-from itertools import combinations_with_replacement, product
+from itertools import product
 
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
 from cais_spade_llm.resources.environment_models import feasibility
+from cais_spade_llm.resources.machine.machine_jobs import machine_public_state
 from cais_spade_llm.resources.nominal_conveyor import conveyor_location_at
 from cais_spade_llm.resources.recovery_feasibility import derive_primitive_union
 
@@ -24,8 +25,7 @@ def environment_owner_snapshot(owner) -> dict:
     if record is None and worker is not None and hasattr(worker, 'read_machine_jobs'):
         record = worker.read_machine_jobs()
     if record:
-        from cais_spade_llm.resources.machine.machine_jobs import job_public_state
-        values.update(job_public_state(record))
+        values.update(machine_public_state(record, values))
     primitive = getattr(owner, '_primitive_state', {})
     for key, value in primitive.items():
         if key in values and recovery_validation_fingerprint(values[key]) != recovery_validation_fingerprint(value):
@@ -58,12 +58,9 @@ def environment_owner_evidence(owner) -> dict:
         failure = getattr(getattr(runtime, 'conveyor_fault', None), 'evidence', {})
         record = failure.get('checkpoint_processing_observations', failure.get('processing_observations', {})).get(owner.agent_name) or worker.read_machine_jobs()
         if record:
-            from cais_spade_llm.resources.machine.machine_jobs import job_public_state
             result['processing_observations'] = record
-            fields = job_public_state(record)
-            for key in ('snapshot', 'state'):
-                result[key].update(deepcopy(fields))
-            result['environment_valuation'][owner.agent_name].update(deepcopy(fields))
+            for values in (result['snapshot'], result['state'], result['environment_valuation'][owner.agent_name]):
+                values.update(machine_public_state(record, values))
     result['source'].update(run_id=context.run_id, revision=context.revision)
     result['execution_mode'] = getattr(runtime, 'setup', {}).get('execution_mode')
     result['unavailable_resources'] = sorted(getattr(context, 'unavailable_resources', []))
@@ -90,6 +87,9 @@ def environment_primitive_catalog(evidence: dict) -> list[dict]:
             function = getattr(KMRPrimitives, name, None)
             if function is not None:
                 row['params'], row['required_params'], row['description'] = _schema_properties_for_function(function)
+                from cais_spade_llm.function_analyzer import FunctionAnalyzer
+                row['description'] = ((FunctionAnalyzer._extract_yaml_frontmatter(function) or {}).get('description')
+                                      or row['description'])
         elif name == 'select_program':
             row['params'] = {'program': {'type': 'string'}}
             row['required_params'] = ['program']
@@ -143,7 +143,7 @@ def public_evaluation_support(entry: dict) -> dict:
     result = {'public_conditions': True} if fields else {}
     if model.get('resource_id') == 'KMR':
         names = {event.get('event_name') for event in supported}
-        operations = [name for name in ('move_to_location', 'pick_approach', 'pick_part',
+        operations = [name for name in ('pick_approach', 'pick_part',
                                        'place_approach', 'place_release') if name in names]
         if operations:
             result['additional_bindings'] = operations
@@ -266,6 +266,18 @@ def environment_recovery_descriptor(evidence: dict, snapshot: dict, *, resource_
 
     Completion acknowledgements remain composition obligations. Enumeration uses
     recorded identities and declared capability domains, never a recovery sequence.
+
+    Args:
+        evidence: The resource's recorded evidence with its environment model.
+        snapshot: The resource's recorded snapshot.
+        resource_jid: The resource's JID.
+
+    Returns:
+        The descriptor. ``events`` are the resource's own events. ``shared_events`` are the
+        events of other resources it takes part in: each holds only this resource's own guards
+        and updates, and this resource composes nothing for it. An event whose effects cover a
+        collection of parts keeps its parameters unbound, since what the collection holds
+        changes during recovery; it is bound against the projected valuation when checked.
     """
     rid = evidence.get('resource_id')
     model = deepcopy(evidence.get('environment_models', {}).get(rid, {}))
@@ -287,8 +299,7 @@ def environment_recovery_descriptor(evidence: dict, snapshot: dict, *, resource_
                     if row.get('resource_id') == rid), {})
     if machine.get('simulation_process', {}).get('job_control', {}).get('version') == 1:
         meanings = {
-            'active_job': 'Identity of the currently processing job, or null when none is processing. Retained jobs are separate records.',
-            'job_state': 'State of active_job when present, otherwise the last retained job.',
+            'job_state': "State of this part's job on this machine; the part keeps it when it is unloaded.",
             'selected_program': 'Currently selected declared program; installed tool and workholding are recorded separately.',
         }
         for field, description in meanings.items():
@@ -298,54 +309,20 @@ def environment_recovery_descriptor(evidence: dict, snapshot: dict, *, resource_
     for field in ('part_state', 'part_location'):
         if field not in variables:
             variables[field] = {'scope': 'part', 'domain': [], 'domain_complete': False}
-    events, unresolved, assignments = [], [], 0
+    events, shared_events, unresolved, assignments = [], [], [], 0
     for declared in model.get('events', []):
-        if declared.get('parameter_bindings', {}).get('resource_id', {}).get('equals') != rid:
-            continue
+        owned = declared.get('parameter_bindings', {}).get('resource_id', {}).get('equals') == rid
+        target = events if owned else shared_events
         if declared.get('collection_effects'):
-            from cais_spade_llm.resources.nominal_conveyor import (
-                CONVEYOR_LOCATIONS, conveyor_parts, conveyor_advance_parameters,
-            )
-            if (rid != 'Conveyor' or declared.get('event_name') != 'advance_conveyor'
-                    or declared['collection_effects'].get('validation_source') != 'cais_spade_llm.resources.nominal_conveyor'):
+            if declared['collection_effects'].get('validation_source') != 'cais_spade_llm.resources.nominal_conveyor':
                 unresolved.append({'reason': 'Unsupported owner collection effect declaration'})
                 continue
-            try:
-                residents = conveyor_parts(model, snapshot)
-            except (KeyError, ValueError) as exc:
-                unresolved.append({'reason': str(exc)})
-                continue
-            delivery = declared['parameter_bindings']['delivered_part']
-            delivered = delivery['equals'] if 'equals' in delivery else (residents[0] if residents else None)
-            remaining = [part for part in residents if part != delivered]
-            for indices in combinations_with_replacement(range(len(CONVEYOR_LOCATIONS)), len(remaining)):
-                assignments += 1
-                if assignments > 4096:
-                    unresolved.append({'reason': 'Environment parameter assignment limit reached'})
-                    break
-                targets = dict(zip(remaining, (CONVEYOR_LOCATIONS[i] for i in reversed(indices)), strict=True))
-                try:
-                    calculated = conveyor_advance_parameters(model, snapshot, targets, delivered)
-                except ValueError:
-                    continue
-                event = deepcopy(declared)
-                bindings = {name: deepcopy(row['equals']) for name, row in declared['parameter_bindings'].items() if 'equals' in row}
-                bindings.update(next_locations=targets, delivered_part=delivered)
-                event['parameter_bindings'] = {name: {'equals': value} for name, value in bindings.items()}
-                event['guards'] = {}
-                for field, guard in declared.get('guards', {}).items():
-                    for name, value in bindings.items():
-                        field = field.replace('{' + name + '}', str(value))
-                    event['guards'][field] = deepcopy(guard)
-                event['updates'] = {field.removeprefix('next_'): {'set': deepcopy(value)} for field, value in calculated.items()}
-                event['primitive_support'] = [dict(deepcopy(step), primitive=step['op']) for step in declared['program']['steps']]
-                event['composition_contract'] = {'event_id': declared['event_id'], 'parameter_bindings': bindings,
-                    'completion_evidence': deepcopy(declared.get('completion_evidence', {})),
-                    'participants': deepcopy(declared['participants']), 'product_effects': deepcopy(declared['product_effects']),
-                    'source_model_fingerprint': recovery_validation_fingerprint(model),
-                    'source_snapshot_fingerprint': recovery_validation_fingerprint(snapshot),
-                    'collection_effects': deepcopy(declared['collection_effects'])}
-                events.append(event)
+            event = _owned_event(declared, {}, model) if owned else _shared_event(declared)
+            event['collection_binding'] = 'projected_valuation'
+            event['composition_contract'] = (dict(event['composition_contract'],
+                                                  collection_effects=deepcopy(declared['collection_effects']))
+                                             if owned else None)
+            target.append(event)
             continue
         choices = {name: (None if name == 'job_id' and declared['event_name'] == 'start_job'
                          else _binding_values(name, row, model, evidence))
@@ -357,7 +334,7 @@ def environment_recovery_descriptor(evidence: dict, snapshot: dict, *, resource_
                 unresolved.append({'reason': 'Environment parameter assignment limit reached'})
                 break
             bindings = dict(zip(finite, values, strict=True))
-            event = deepcopy(declared)
+            event = _owned_event(declared, bindings, model) if owned else _shared_event(declared)
             event['parameter_bindings'] = {name: ({'equals': deepcopy(bindings[name])} if name in bindings else deepcopy(row))
                                            for name, row in declared['parameter_bindings'].items()}
             for section in ('guards', 'updates'):
@@ -366,25 +343,37 @@ def environment_recovery_descriptor(evidence: dict, snapshot: dict, *, resource_
                     for name, bound in bindings.items():
                         field = field.replace('{' + name + '}', str(bound))
                     event[section][field] = deepcopy(value)
-            event['primitive_support'] = [dict(deepcopy(step), primitive=step['op'])
-                                          for step in declared.get('program', {}).get('steps', [])]
-            event['composition_contract'] = {'event_id': declared['event_id'],
-                'parameter_bindings': deepcopy(bindings), 'completion_evidence': deepcopy(declared.get('completion_evidence', {})),
-                'participants': deepcopy(declared.get('participants', [])),
-                'product_effects': deepcopy(declared.get('product_effects', {})),
-                'source_model_fingerprint': recovery_validation_fingerprint(model)}
-            events.append(event)
+            target.append(event)
         if assignments > 4096:
             break
     descriptor = {'resource_id': rid, 'resource_jid': resource_jid,
         'resource_type': evidence.get('resource_type'), 'state_variables': variables,
         'current_valuation': {field: deepcopy(snapshot[field]) for field in variables if field in snapshot},
-        'events': events, 'primitive_catalog': environment_primitive_catalog(evidence),
+        'events': events, 'shared_events': shared_events, 'primitive_catalog': environment_primitive_catalog(evidence),
         'model_complete': not unresolved, 'unresolved_declarations': unresolved,
         'source_model_fingerprint': recovery_validation_fingerprint(model),
         'primitive_support_semantics': 'successor_primitive_union', 'validation_contract_version': 2}
     descriptor['descriptor_fingerprint'] = recovery_validation_fingerprint(descriptor)
     return descriptor
+
+
+def _owned_event(declared: dict, bindings: dict, model: dict) -> dict:
+    """Copy one of the resource's own events with the primitives its program composes."""
+    event = deepcopy(declared)
+    event['primitive_support'] = [dict(deepcopy(step), primitive=step['op'])
+                                  for step in declared.get('program', {}).get('steps', [])]
+    event['composition_contract'] = {'event_id': declared['event_id'],
+        'parameter_bindings': deepcopy(bindings), 'completion_evidence': deepcopy(declared.get('completion_evidence', {})),
+        'participants': deepcopy(declared.get('participants', [])),
+        'product_effects': deepcopy(declared.get('product_effects', {})),
+        'source_model_fingerprint': recovery_validation_fingerprint(model)}
+    return event
+
+
+def _shared_event(declared: dict) -> dict:
+    """Copy another resource's event without the actor's program, which this resource never runs."""
+    return {key: deepcopy(value) for key, value in declared.items()
+            if key not in {'program', 'program_key', 'program_status', 'program_variants', 'function_name'}}
 
 
 def _result(status: str, reason: str, evidence: dict, snapshot: dict, **facts) -> dict:
@@ -540,8 +529,7 @@ def _machine_command_projection(evidence: dict, snapshot: dict, primitive: str, 
     if not record:
         raise ValueError('NEEDS_CONTEXT: processing_observations/' + rid)
     params = deepcopy(params)
-    from cais_spade_llm.resources.machine.machine_jobs import job_public_state
-    for field, value in job_public_state(record).items():
+    for field, value in machine_public_state(record, snapshot).items():
         if field in snapshot and snapshot[field] != value:
             raise ValueError('NEEDS_CONTEXT: processing observation differs from projected ' + field)
     if primitive == 'start_job':

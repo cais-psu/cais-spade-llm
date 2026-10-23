@@ -549,43 +549,6 @@ def route_between(scene: dict, part: str | None, source: str, target: str) -> li
     raise ValueError(f'No configured KMR route from {source} to {target}')
 
 
-def coordinate_parameters(bindings: dict, scene: dict) -> tuple[dict, dict]:
-    """Bind a requested named destination to its declared docking coordinates.
-
-    Args:
-        bindings: The proposed contributor's parameters, never a previous task.
-        scene: The captured owner configuration.
-
-    Returns:
-        Independent parameter values and their declaration sources. This does
-        not select a destination, calculate a route, or establish arrival.
-    """
-    parameters, sources = deepcopy(bindings), {}
-    location = bindings.get('observed_resource_location')
-    if location is not None:
-        try:
-            declaration, reference = recorded_location(scene, location)
-        except KeyError as exc:
-            raise ValueError('KMR requested location lacks one declared docking pose: ' + str(location)) from exc
-        pose = declaration.get('KMR_docking_pose')
-        reference += '/KMR_docking_pose'
-        if not _vector(pose, 6):
-            raise ValueError('KMR requested location lacks one declared docking pose: ' + str(location))
-        for name, value in zip(('x', 'y', 'yaw'), (pose[0], pose[1], pose[5]), strict=True):
-            if name not in parameters:
-                parameters[name] = value
-                sources[name] = {'ref': reference, 'value': value, 'resource_location': location}
-        # Use the same named-destination test as move_base. Supplied coordinates
-        # are preserved, including explicit null; conflicting values are errors.
-        values = [parameters[name] for name in ('x', 'y', 'yaw')]
-        if (not _vector(values, 3) or math.dist(values[:2], pose[:2]) > .001
-                or abs(math.atan2(math.sin(values[2] - pose[5]), math.cos(values[2] - pose[5]))) > .001):
-            raise ValueError('KMR coordinate parameters conflict with the declared destination: ' + str(location))
-    if not _vector([parameters.get(name) for name in ('x', 'y', 'yaw')], 3):
-        raise ValueError('KMR coordinate movement requires finite x, y, yaw or a declared named destination')
-    return parameters, sources
-
-
 def prepare_kmr_primitive_parameters(*, task: dict, recovery_des_model: dict,
                                      recovery_snapshot: dict, resource_evidence: dict,
                                      resource_jid: str) -> dict:
@@ -634,10 +597,6 @@ def prepare_kmr_primitive_parameters(*, task: dict, recovery_des_model: dict,
                                next(row['KMR_docking_pose'] for row in scene['machines'] if row['resource_id'] == target))
                 state['base_target_pose'] = [destination[0], destination[1], destination[5]]
                 state['base_waypoints'] = route_between(scene, part, source, target)[1:-1]
-            elif transition['event_name'] == 'move_to_location':
-                resolved_bindings, binding_sources = coordinate_parameters(bindings, scene)
-                state['base_target_pose'] = [resolved_bindings[key] for key in ('x', 'y', 'yaw')]
-                state['base_waypoints'] = []
             attachment = evidence.get('attachment') or {}
             if 'held_part' in snapshot and snapshot['held_part'] is None and attachment.get('attached') is not True:
                 evidence.setdefault('parameter_applicability', {}).setdefault('move_base', {})['transform'] = {
@@ -672,16 +631,6 @@ def prepare_kmr_primitive_parameters(*, task: dict, recovery_des_model: dict,
                 name not in bindings or 'equals' not in declaration or
                 recovery_validation_fingerprint(declaration['equals']) == recovery_validation_fingerprint(bindings[name])
                 for name, declaration in event.get('parameter_bindings', {}).items())]
-        for event in descriptor['events']:
-            if (resource_evidence.get('endpoint_evidence_policy_version') in (1, 2)
-                    and event['event_name'] == 'move_to_location' and snapshot.get('held_part') is not None):
-                steps = event.get('program_variants', {}).get('carrying', {}).get('steps', [])
-                original = event.get('primitive_support', [])
-                if (steps and [(row['id'], row['op']) for row in steps]
-                        == [(row['id'], row['primitive']) for row in original]):
-                    # The carrying variant adds the owner's attachment argument;
-                    # it does not change the independently derived primitive set.
-                    event['primitive_support'] = [dict(deepcopy(row), primitive=row['op']) for row in steps]
         prepared = prepare_resource_primitive_parameters(task=task, recovery_des_model=descriptor,
             recovery_snapshot=recovery_snapshot, resource_evidence=evidence, resource_jid=resource_jid,
             calculated_step_outputs=outputs)

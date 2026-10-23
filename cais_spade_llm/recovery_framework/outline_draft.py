@@ -24,7 +24,8 @@ from cais_spade_llm.recovery_framework.evaluation_capture import sha256_file, wr
 from cais_spade_llm.recovery_framework.offline_recovery import SavedRecoveryProduct
 from cais_spade_llm.recovery_framework.part_slippage_recovery import _prompt_safety_rules
 from cais_spade_llm.recovery_framework.recovery_observations import RECORDS
-from cais_spade_llm.resources.machine.machine_jobs import public_processing_observations
+from cais_spade_llm.resources.environment_recovery import environment_recovery_descriptor
+from cais_spade_llm.resources.machine.machine_jobs import machine_public_state, public_processing_observations
 
 logger = logging.getLogger(__name__)
 
@@ -120,15 +121,20 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
             "resource_jid", "resource_type", "recovery_snapshot", "static_capabilities",
             "recovery_adapter", "pending_tasks", "capability_evidence",
         ) if key in entry}
-        row["recovery_des_model"] = deepcopy(entry.get("recovery_des_model") or {})
+        evidence = entry.get("resource_evidence") or {}
+        owner_model = (evidence.get("environment_models") or {}).get(evidence.get("resource_id")) or {}
+        # Only a robot's model is its own recorded declaration; other models derive from the plant model
+        # and the recorded evidence, so they are derived again with the current plant semantics.
+        if entry.get("resource_type") != "robot" and owner_model and isinstance(evidence.get("snapshot"), dict):
+            row["recovery_des_model"] = environment_recovery_descriptor(evidence, evidence["snapshot"], resource_jid=jid)
+        else:
+            row["recovery_des_model"] = deepcopy(entry.get("recovery_des_model") or {})
         variables = row["recovery_des_model"].get("state_variables", {})
         if "active_job" in variables:
             variables["active_job"]["private"] = True
         for declaration in variables.values():
             if "active_job" in declaration.get("description", ""):
                 declaration.pop("description")
-        evidence = entry.get("resource_evidence") or {}
-        owner_model = (evidence.get("environment_models") or {}).get(evidence.get("resource_id")) or {}
         if owner_model.get("events"):
             # The owner's declared events state, for example, where another resource's placement puts a part.
             row["environment_model_events"] = deepcopy(owner_model["events"])
@@ -141,11 +147,11 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
             continue
         public = _public(public_processing_observations(record))
         entry.setdefault("static_capabilities", {})["processing_observations"] = public
-        fields = {key: public[key] for key in ("job_state", "selected_program")}
-        entry.setdefault("recovery_snapshot", {}).update(fields)
+        snapshot = entry.setdefault("recovery_snapshot", {})
+        snapshot.update(machine_public_state(record, snapshot))
         for row in prepared["llm_input"].get("observed_runtime_state", {}).get("resources", []):
             if row.get("resource_jid") == jid:
-                row.update(fields)
+                row.update(machine_public_state(record, row))
     prepared["saved_pending_nodes"] = deepcopy(observations.get("pending_nodes", []))
     prepared["diagnostic_regions"] = _public(
         observations.get("physical_evidence", {}).get("geometry", {}).get("regions", {}))

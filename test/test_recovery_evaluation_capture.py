@@ -306,7 +306,7 @@ def test_capture_verification_requires_exact_reconciled_checkpoint(scenario, mon
 def _robot_breakdown_capture_record():
     part = 'KET4_Square_4mm'
     records = {}
-    for rid, name in (('M1', 'machine_part'), ('ur5e-1', 'pick_approach')):
+    for rid, name in (('M1', 'complete_job'), ('ur5e-1', 'pick_approach')):
         records[name] = {'acknowledgement': {'resource_id': rid, 'event_name': name,
             'run_id': 'owned-run', 'task_id': name, 'evidence': 'resource',
             'parameters': {'part_name': part, 'origin_resource_location': 'M1'}},

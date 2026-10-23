@@ -278,7 +278,7 @@ def _validate_failure(failure: Any, models: dict, parts: list[str], permitted: l
     if scenario == "ur5e-1 breakdown" and rid != "ur5e-1":
         raise ValueError("ur5e-1 breakdown requires ur5e-1")
     if scenario == "Machining breakdown during part processing" and not any(
-        event["event_name"] == "machine_part" for event in models[rid]["events"]
+        event["event_name"] in {"machine_part", "complete_job"} for event in models[rid]["events"]
     ):
         raise ValueError("Machining breakdown requires a configured machining resource")
     if scenario != "Part slippage":

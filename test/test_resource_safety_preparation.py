@@ -170,6 +170,11 @@ def test_additional_model_keeps_existing_parameterized_inventory_declarations(co
 
 
 def _effects(*, primitive, params, evidence, start_time, end_time, configuration):
+    # Transport observes its parts and computes their targets before it moves; neither step moves anything.
+    if primitive in {'detect_parts', 'compute_transport_targets'} and configuration['primitive'] == 'move_relative':
+        if params:
+            raise ValueError('Unsupported transport read parameters')
+        return {'trajectory': None, 'base_trajectory': None, 'part_trajectories': {}, 'transfers': [], 'resource_updates': {}}
     if primitive != configuration['primitive']:
         raise ValueError('Unknown owner action')
     if configuration.get('joint_names'):
@@ -452,7 +457,17 @@ def test_buffer_declared_zone_update_and_part_motion_need_no_gripper(controller)
     params['part_name'] = part
     declaration = {'event_id': event['event_id'], 'event_name': event['event_name'], 'parameters': params}
     case['snapshot']['resources'][rid].update(zone_1_part=part, zone_2_part=None)
-    case['programs'][0]['step_results'][0]['model_evidence']['resource_updates'] = {'zone_1_part': None, 'zone_2_part': part}
+    # The Buffer observes the part and computes its target before it moves it.
+    program = case['programs'][0]
+    move = program['step_results'][0]
+    reads = [{'step_index': index, 'primitive': name, 'resolved_params': {}, 'start_time': 0, 'end_time': 0,
+              'model_evidence': {'frame': 'world', 'primitive_contract': rid, 'part_trajectories': {}},
+              'source': {'outline_id': 'equipment_case', 'step_index': index}}
+             for index, name in enumerate(('detect_parts', 'compute_transport_targets'))]
+    move.update(step_index=2, source={'outline_id': 'equipment_case', 'step_index': 2})
+    program.update(primitive_steps=[*({'primitive': row['primitive'], 'params': {}} for row in reads), *program['primitive_steps']],
+                   step_results=[*reads, move])
+    move['model_evidence']['resource_updates'] = {'zone_1_part': None, 'zone_2_part': part}
     models[rid] = replace(models[rid], configuration={**models[rid].configuration, 'state_variables': model['state_variables']})
     case['task_evidence'] = {'complete': True, 'source_kind': 'synthetic', 'horizon': [0, 1],
         'events': [{'task_id': 'test_buffer_transfer', 'resource_id': rid, 'function': 'advance_part',

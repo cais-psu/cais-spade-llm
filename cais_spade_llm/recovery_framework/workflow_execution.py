@@ -521,7 +521,7 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
                     _validate_robot_completion,
                     validate_start=_validate_start,
                 )
-            elif event_name == "machine_part" and getattr(agent, "workflow_worker", None):
+            elif event_name in {"machine_part", "complete_job"} and getattr(agent, "workflow_worker", None):
                 actor.bind_executor(
                     event_name,
                     _worker_executor(runtime, agent),
@@ -546,7 +546,6 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
                 "move_to_resource",
                 "place_approach",
                 "place_release",
-                "move_to_location",
             }:
                 actor.bind_executor(
                     event_name,
@@ -761,8 +760,11 @@ def _validate_machine_completion(task: dict, evidence: dict) -> bool:
     observations = evidence.get("observations", {})
     record = observations.get("processing_observations")
     if record is not None:
-        completed = [job for job in record.get("jobs", {}).values()
-                     if job.get("task_id") == task["task_id"]]
+        jobs = list(record.get("jobs", {}).values())
+        # An observed completion belongs to the part's latest job, which an earlier start_job named.
+        completed = ([job for job in jobs if job.get("part_name") == task["parameters"].get("part_name")][-1:]
+                     if task["event_name"] == "complete_job"
+                     else [job for job in jobs if job.get("task_id") == task["task_id"]])
         if len(completed) != 1:
             return False
         job = completed[0]
@@ -789,19 +791,6 @@ def _validate_transport_completion(task: dict, evidence: dict) -> bool:
     )
 
 
-def _kmr_arrived(parameters: dict, observations: dict) -> bool:
-    """Require the measured base at the commanded coordinates with the arm stowed for travel."""
-    pose = observations.get("base_pose")
-    if (not isinstance(pose, list) or len(pose) != 3
-            or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in pose)):
-        return False
-    yaw_error = math.atan2(math.sin(pose[2] - parameters["yaw"]), math.cos(pose[2] - parameters["yaw"]))
-    located = ("observed_resource_location" not in parameters
-               or observations.get("resource_location") == parameters["observed_resource_location"])
-    return (math.dist(pose[:2], (parameters["x"], parameters["y"])) <= .005 and abs(yaw_error) <= .035
-            and observations.get("arm_parked") is True and located)
-
-
 def _validate_kmr_completion(task: dict, evidence: dict, scene: dict | None = None) -> bool:
     """Require observed function effects and the pinned primitive step trace."""
     observations = evidence.get("observations", evidence)
@@ -813,8 +802,6 @@ def _validate_kmr_completion(task: dict, evidence: dict, scene: dict | None = No
         if name == "move_to_resource" and observations.get("attached") is False:
             variant = ("empty_return" if task["parameters"].get("target_resource") == "Storage"
                        else "empty")
-        if name == "move_to_location" and observations.get("attached") is True:
-            variant = "carrying"
         expected = saved_robot_definition(scene, "KMR", name, variant=variant).program.steps
         records = observations.get("primitive_results")
         if (not isinstance(records, list)
@@ -829,8 +816,6 @@ def _validate_kmr_completion(task: dict, evidence: dict, scene: dict | None = No
                 and home.get("gripper_open") is True and observations.get("attached") is False
                 and observations.get("part_name") is None):
             return False
-    if task["event_name"] == "move_to_location" and not _kmr_arrived(task["parameters"], observations):
-        return False
     if task["event_name"] in {"pick_approach", "place_approach"}:
         if observations.get("approach_observed") is not True:
             return False

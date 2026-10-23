@@ -138,12 +138,19 @@ class WorkflowPrimitiveRunner:
     def execute(self) -> dict[str, Any]:
         """Run only the ordered implemented primitives for the bound event."""
         event_name = self.task["event_name"]
-        program = (saved_workflow_program(self.scene, self.task["resource_id"], event_name)
-                   if "resource_programs" in self.scene else workflow_task_program(event_name))
+        if event_name == "complete_job":
+            # An observed completion commands nothing; the worker observes the running job until it ends.
+            program = {"status": "implemented", "steps": [{"id": "observe", "op": "observe_completion"}]}
+        else:
+            program = (saved_workflow_program(self.scene, self.task["resource_id"], event_name)
+                       if "resource_programs" in self.scene else workflow_task_program(event_name))
         if not program or program["status"] != "implemented":
             raise ValueError(f"Unsupported workflow Gazebo event: {event_name}")
         primitives = {
+            "observe_completion": self.await_job_completion,
             "dwell": self.dwell,
+            "detect_parts": self.detect_parts,
+            "compute_transport_targets": self.compute_transport_targets,
             "move_relative": self.move_relative,
         }
         from cais_spade_llm.resources.machine.machine_jobs import MACHINE_PRIMITIVES
@@ -256,15 +263,16 @@ class WorkflowPrimitiveRunner:
         self._poll_machine_control()
 
     def machine_command(self, primitive: str) -> None:
-        """Acknowledge job commands; machine_part waits for observed completion."""
+        """Acknowledge a job command; the machine names a job it starts after the task that started it."""
         from cais_spade_llm.resources.machine.machine_jobs import MachineJobs
 
         if self.machine_jobs is None:
             machine = next(row for row in self.scene["machines"] if row["resource_id"] == self.task["resource_id"])
             self.machine_jobs = MachineJobs(machine, self.task["run_id"], self.request.get("machine_jobs"))
         params = deepcopy(self.params)
-        if self.task["event_name"] == "machine_part":
-            params.update(job_id=self.task["task_id"], task_id=self.task["task_id"])
+        if primitive == "start_job":
+            params.setdefault("job_id", self.task["task_id"])
+            params.setdefault("task_id", self.task["task_id"])
         job = self.machine_jobs.record["jobs"].get(params.get("job_id"), {})
         part = params.get("part_name", job.get("part_name"))
         needs_observation = primitive != 'select_program' and not (
@@ -274,9 +282,16 @@ class WorkflowPrimitiveRunner:
             command_id=self.task["task_id"], now=self.current_clock(), observations=observations)
         self._save_jobs()
         self.observations = {"command": acknowledgement, "processing_observations": self.machine_jobs.snapshot()}
-        if self.task["event_name"] != "machine_part":
-            return
-        job_id = params["job_id"]
+
+    def await_job_completion(self) -> None:
+        """Observe the job of the task's part until it completes, failing if it stops or is interrupted."""
+        if self.machine_jobs is None:
+            raise ValueError("No machine job record to observe")
+        part = self.params.get("part_name")
+        job_id = next((identity for identity, row in reversed(list(self.machine_jobs.record["jobs"].items()))
+                       if row.get("part_name") == part), None)
+        if job_id is None:
+            raise ValueError("No recorded job for the part to observe")
         interval = self.machine_jobs.machine["simulation_process"]["observation_interval_sec"]
         while True:
             self.tick_machine()
@@ -602,14 +617,26 @@ class WorkflowPrimitiveRunner:
         start, end = self.wait_simulation(self.state["duration"], transport)
         self.state.update(started_sim=start, completed_sim=end)
 
-    def move_relative(self, speed_mps: float | None = None) -> None:
-        """Move the selected Gazebo part entities by the guarded displacement."""
+    def detect_parts(self) -> None:
+        """Observe the parts this transport moves: every belt resident, or the part in the source zone."""
         if self.task["resource_id"] == "Conveyor":
             self.observe_belt_residents()
-            self.compute_shared_displacement()
         else:
             self.observe_zone_part()
+
+    def compute_transport_targets(self) -> None:
+        """Resolve where the observed parts arrive and the motion profile that takes them there."""
+        if "initial_x" not in self.state:
+            raise ValueError("compute_transport_targets needs the observed parts")
+        if self.task["resource_id"] == "Conveyor":
+            self.compute_shared_displacement()
+        else:
             self.compute_downstream_motion()
+
+    def move_relative(self, speed_mps: float | None = None) -> None:
+        """Move the observed Gazebo part entities to their computed targets once the robots are clear."""
+        if "target_x" not in self.state:
+            raise ValueError("move_relative needs computed transport targets")
         self.verify_transport_clearance()
         if speed_mps is not None:
             configured = float(self.scene[self.task["resource_id"]]["simulation_transport"]["speed_mps"])

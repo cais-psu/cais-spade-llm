@@ -85,7 +85,11 @@ class EnvironmentAdmission:
                 task = record["acknowledgement"]
                 before_states = deepcopy(self.monitor.current_states)
                 action = self.grants.pop(task["task_id"], None)
-                if action is None:
+                # An observed event commands nothing, so it is acknowledged without a grant.
+                model = (getattr(self.context, "models", None) or {}).get(task["resource_id"]) or {}
+                observed = any(event.get("event_id") == task.get("event_id") and event.get("controllable") is False
+                               for event in model.get("events", []))
+                if action is None and not observed:
                     self.invalid_reason = "acknowledgement_without_admission"
                     self.components.clear()
                 labels = action.labels if action else frozenset(self.monitor._map_task_to_aps(

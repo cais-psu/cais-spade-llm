@@ -223,9 +223,10 @@ def nominal_capability_graph(model: dict, models: dict | None = None) -> dict:
     transitions = [_graph_transition(event, local) for event in _capability_events(model, models)]
     for row in transitions:
         actor = row["event"]["parameter_bindings"]["resource_id"]["equals"]
+        # An uncontrollable event, such as an observed completion, is a transition with no function.
         row["function_contract"] = (
             validated_function_contract(models, row["event"]["event_id"])
-            if full_models_supplied and actor in models
+            if full_models_supplied and actor in models and row["event"].get("controllable") is not False
             and set(row["event"].get("participants", [])) <= set(models)
             else None
         )
@@ -355,14 +356,14 @@ def nominal_function_graph(model: dict, models: dict) -> dict:
         return node_ids[state]
 
     for event in sorted(model["events"], key=lambda row: row["event_id"]):
+        if event.get("controllable") is False:
+            continue
         contract = validated_function_contract(models, event["event_id"])
         if contract["resource_id"] != resource_id:
             continue
         candidates = [("", event["program"]), *sorted(event.get("program_variants", {}).items())]
         guard = event["guards"].get("resource_state", {}).get("equals")
         update = event["updates"].get("resource_state", {}).get("set")
-        if resource_id == "3D Printing Station" and event["event_name"] == "print_part":
-            guard, update = None, None
         for variant, program in candidates:
             entry_state = program.get("entry_state")
             success_state = program.get("success_state")

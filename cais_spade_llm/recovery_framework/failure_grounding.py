@@ -207,7 +207,12 @@ def detect_signals(raw: dict, expected: dict, settings: dict) -> list[dict]:
     for rid, jobs in raw["machine_jobs"].items():
         for job in jobs:
             if job["job_state"] in settings["job_states_not_completed"] and job["process_completed"] is False:
-                signals.append({"rule": "A2", "signal": "task_outcome", "resource_id": rid, "task_id": job["task_id"],
+                # The interrupted work is the pending observed completion of this job, when one is recorded.
+                task_id = next((node["id"] for node in raw["pending_nodes"]
+                                if node.get("function_name") == "complete_job"
+                                and node.get("params", {}).get("part_name") == job["part_name"]
+                                and _names_resource(node, rid, settings)), job["task_id"])
+                signals.append({"rule": "A2", "signal": "task_outcome", "resource_id": rid, "task_id": task_id,
                                 "part_name": job["part_name"], "evidence": raw["sources"]["machine_jobs"],
                                 "values": {key: job[key] for key in ("job_state", "processing_fraction")}})
     for rid, reason in raw["controller_faults"].items():

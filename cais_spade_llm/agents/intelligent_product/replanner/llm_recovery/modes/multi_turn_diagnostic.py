@@ -320,9 +320,13 @@ def _locate_by_pose(task: dict, session: dict, prepared: dict) -> list[dict]:
 
 
 def _apply_neighbor_end_state(task: dict, session: dict) -> list[dict]:
-    """Apply the changes the event states for other resources its part's move affects, as the LLM's values."""
+    """Apply the changes the event states for other resources its part's move affects.
+
+    A recovery event's values are the LLM's; a nominal step's come from those resources' own copies of it.
+    """
     from . import multi_turn
 
+    by = "model" if task.get("candidate_source") == "nominal_connection" else "LLM"
     changes, owner_unknown = [], session.setdefault("diagnostic_unknown_owner_fields", {})
     part = session.get("symbolic_parts", {}).get(task.get("part_name"), {})
     for jid, values in (task.get("neighbor_end_state") or {}).items():
@@ -335,7 +339,7 @@ def _apply_neighbor_end_state(task: dict, session: dict) -> list[dict]:
                     part[key] = jid if holds else None
         if jid in owner_unknown:
             owner_unknown[jid] = [name for name in owner_unknown[jid] if name not in values]
-        changes += [{"entity": jid, "variable": name, "value": deepcopy(value), "by": "LLM"}
+        changes += [{"entity": jid, "variable": name, "value": deepcopy(value), "by": by}
                     for name, value in values.items()]
     return changes
 
@@ -410,8 +414,9 @@ def machine_jobs(jid: str, session: dict, prepared: dict) -> list[dict]:
 def _project_machine_jobs(task: dict, session: dict, prepared: dict) -> None:
     """Apply a stated job_state to the job it belongs to.
 
-    A resource's declared job_state is the state of the job of the part it holds, or else of its last
-    retained job, so the stated value changes that job and leaves the others as they are.
+    A job's state is a condition of its part, so the stated value changes the job of the event's part
+    and leaves the others as they are. A model that declares job_state on the resource means the job of
+    the part it holds, or else its last retained job.
     """
     stated = {task["resource_jid"]: task["expected_end_state"], **(task.get("neighbor_end_state") or {})}
     for jid, values in stated.items():
@@ -419,7 +424,9 @@ def _project_machine_jobs(task: dict, session: dict, prepared: dict) -> None:
         if values.get("job_state") is None:
             continue
         jobs = session.setdefault("diagnostic_machine_jobs", {}).setdefault(jid, deepcopy(machine_jobs(jid, session, prepared)))
-        part = session.get("symbolic_resources", {}).get(jid, {}).get("part_name")
+        declared = session.get("recovery_des_models", {}).get(jid, {}).get("state_variables", {}).get("job_state", {})
+        part = (task.get("part_name") if declared.get("scope") == "part"
+                else session.get("symbolic_resources", {}).get(jid, {}).get("part_name"))
         job = next((row for row in jobs if row["part_name"] == part), None) if part else (jobs[-1] if jobs else None)
         if job is None and part:
             job = {"part_name": part}
@@ -724,8 +731,9 @@ def declare_derived_conditions(prepared: dict, primitive_catalogs: dict[str, lis
 
     A resource's conditions are the variables its model and its primitives declare (paper
     assumption A.2). Two are added by the same rule for every resource:
-    - ``pose``: the position a primitive's declared ``current_pose`` effect sets, with that effect's
-      fields; failing that, the free numeric inputs of a declared event that sets its location;
+    - ``pose``: the position a primitive's declared ``base_pose`` effect sets (a resource that moves its
+      base, which that pose then locates), else its declared ``current_pose`` effect, with that effect's
+      fields; failing both, the free numeric inputs of a declared event that sets its location;
     - ``processCompleted``: a part's process record, on a resource with a declared event whose
       product effect adds to it.
     Each part's recorded process record is seeded into its part facts, so the projected state
@@ -745,17 +753,23 @@ def declare_derived_conditions(prepared: dict, primitive_catalogs: dict[str, lis
         model = entry.setdefault("recovery_des_model", {})
         variables = model.setdefault("state_variables", {})
         if "pose" not in variables:
-            fields = next((list(value) for row in primitive_catalogs.get(jid) or [] if isinstance(row, dict)
-                           for effect, rule in (row.get("effects") or {}).items()
-                           if effect == "current_pose" and isinstance(rule, dict)
-                           for value in rule.values()
-                           if isinstance(value, list) and value and all(isinstance(field, str) for field in value)), None)
-            source = "the current_pose effect of its primitives"
+            effects = [(effect, rule) for row in primitive_catalogs.get(jid) or [] if isinstance(row, dict)
+                       for effect, rule in (row.get("effects") or {}).items() if isinstance(rule, dict)]
+            fields, source, locates = None, "", False
+            for name, locating in (("base_pose", True), ("current_pose", False)):
+                fields = next((list(value) for effect, rule in effects if effect == name for value in rule.values()
+                               if isinstance(value, list) and value and all(isinstance(field, str) for field in value)), None)
+                if fields:
+                    source, locates = f"the {name} effect of its primitives", locating
+                    break
             if not fields:
                 fields, source = _coordinate_parameters(model), "the coordinate inputs of its declared events"
+                locates = bool(fields)
             if fields:
                 variables["pose"] = {"scope": "resource", "type": "object", "fields": fields,
                                      "description": f"position ({', '.join(fields)}), from {source}"}
+                if locates:
+                    variables["pose"]["locates_resource"] = True
                 added.setdefault(jid, []).append("pose")
         # Declared events default to an empty processCompleted effect, which leaves the record unchanged.
         if "processCompleted" not in variables and any(
@@ -1117,15 +1131,15 @@ def _owner_allows(declared: dict, owner: str, jid: str, part: str, state: dict, 
     return assumed
 
 
-def _neighbor_guards(jid: str, event: dict, part: str, state: dict, prepared: dict, resources: dict,
-                     part_row: dict, params: dict | None = None) -> list[dict] | None:
-    """Check what other resources' own declared events require of one event of ``jid``.
+def _neighbor_rows(jid: str, event: dict, part: str, state: dict, prepared: dict, resources: dict,
+                   part_row: dict, params: dict | None = None) -> list[tuple[str, dict, list[dict]]] | None:
+    """Find other resources' own copies of one event of ``jid`` whose guards hold on the projected state.
 
     A resource's declared events may name another resource as the actor of a joint event, such as the
     position a part must be at to be picked there. Such an event constrains ``jid``'s event of the same
     name at the same place and part. For each resource that declares such events, the guards on its own
     variables must hold on the projected state for at least one of them; the one needing the fewest
-    assumptions is recorded.
+    assumptions is chosen.
 
     Args:
         jid: The acting resource.
@@ -1138,23 +1152,63 @@ def _neighbor_guards(jid: str, event: dict, part: str, state: dict, prepared: di
         params: Recorded task parameters, when the event runs a recorded task.
 
     Returns:
-        The assumptions made, or None when another resource's declared events do not allow the event.
+        Each such resource with its chosen copy and the assumptions it needs, or None when another
+        resource's declared events do not allow the event.
     """
     from .multi_turn_outline_facts import _environment_model_events, resource_names
 
     names = resource_names(prepared)
-    assumed = []
+    chosen = []
     for owner, entry in prepared.get("recovery_resources", {}).items():
         declared = [row for row in _environment_model_events(entry)
                     if owner != jid and row.get("event_name") == event.get("event_name")
                     and (row.get("parameter_bindings", {}).get("resource_id") or {}).get("equals") == names.get(jid, jid)
                     and _same_place_and_part(row, event, jid, part, resources.get(jid, {}), part_row, params, names)]
-        allowed = [notes for row in declared if (notes := _owner_allows(
+        allowed = [(row, notes) for row in declared if (notes := _owner_allows(
             row, owner, jid, part, state, resources, part_row, params)) is not None]
         if declared and not allowed:
             return None
-        assumed += min(allowed, key=len, default=[])
-    return assumed
+        if allowed:
+            chosen.append((owner, *min(allowed, key=lambda item: len(item[1]))))
+    return chosen
+
+
+def _neighbor_guards(jid: str, event: dict, part: str, state: dict, prepared: dict, resources: dict,
+                     part_row: dict, params: dict | None = None) -> list[dict] | None:
+    """Return the assumptions other resources' copies of one event of ``jid`` need, or None when one forbids it."""
+    chosen = _neighbor_rows(jid, event, part, state, prepared, resources, part_row, params)
+    return None if chosen is None else [note for _, _, notes in chosen for note in notes]
+
+
+def _neighbor_end_state(chosen: list[tuple[str, dict, list[dict]]], jid: str, event: dict, part: str,
+                        resource_row: dict, part_row: dict, params: dict | None) -> dict:
+    """Bind the updates other resources' own copies of a nominal step declare, keyed by resource.
+
+    A joint event changes every participant, each by its own copy, so a nominal step changes those
+    resources as their models declare.
+    """
+    from . import multi_turn_outline_generation as generation
+
+    changes = {}
+    for owner, row, _ in chosen:
+        values = {}
+        for template, update in row.get("updates", {}).items():
+            if not isinstance(update, dict):
+                continue
+            if "set" in update:
+                value = update["set"]
+            elif "set_from_param" in update:
+                found, value = generation._recovery_event_parameter_value(
+                    event=event, parameter_name=update["set_from_param"], resource_jid=jid, part_name=part,
+                    resource_row=resource_row, part_row=part_row, parameters=params)
+                if not found:
+                    continue
+            else:
+                continue
+            values[template.replace("{part_name}", part)] = deepcopy(value)
+        if values:
+            changes[owner] = values
+    return changes
 
 
 def _recorded_task(jid: str, node: dict, state: dict, prepared: dict, resources: dict, part_rows: dict,
@@ -1169,7 +1223,7 @@ def _recorded_task(jid: str, node: dict, state: dict, prepared: dict, resources:
     event = _declared_event(model, node)
     if (event is None or not _public_guards_hold(event, variables, jid, part, resource_row, part_row, params)
             or not _parameters_resolve(event, jid, part, resource_row, part_row, params)
-            or (neighbors := _neighbor_guards(jid, event, part, state, prepared, resources, part_row, params)) is None):
+            or (chosen := _neighbor_rows(jid, event, part, state, prepared, resources, part_row, params)) is None):
         return None
     task = generation._recovery_event_instance_task(
         outline_id=f"NOMINAL_CONNECTION_{depth + 1}", resource_jid=jid, event=event,
@@ -1180,7 +1234,10 @@ def _recorded_task(jid: str, node: dict, state: dict, prepared: dict, resources:
         if isinstance(update, dict) and update.get("set_from_param") in params:
             task["expected_end_state"][name] = deepcopy(params[update["set_from_param"]])
     task.update(candidate_source="nominal_connection", task_id=node["id"],
-                diagnostic_assumptions=[*_bookkeeping_assumptions(event, variables, task), *neighbors])
+                diagnostic_assumptions=[*_bookkeeping_assumptions(event, variables, task),
+                                        *(note for _, _, notes in chosen for note in notes)])
+    if neighbor := _neighbor_end_state(chosen, jid, event, part, resource_row, part_row, params):
+        task["neighbor_end_state"] = neighbor
     return task
 
 
@@ -1196,9 +1253,8 @@ def _nominal_successors(state: dict, prepared: dict, actors: set[str], parts: se
         model = state.get("recovery_des_models", {}).get(jid, {})
         variables = model.get("state_variables", {})
         resource_row = resources.get(jid, {})
+        # Observed events, such as a job's completion, continue the plant as commanded ones do.
         for event in model.get("events", []):
-            if event.get("controllable") is False:
-                continue
             bindings = (sorted(parts) if generation._recovery_event_requires_part_binding(
                 event=event, state_variables=variables) else [""])
             for part in bindings:
@@ -1207,7 +1263,7 @@ def _nominal_successors(state: dict, prepared: dict, actors: set[str], parts: se
                 if (part and (event.get("parameter_bindings", {}).get("part_name") or {}).get("equals", part) != part
                         or not _public_guards_hold(event, variables, jid, part, resource_row, part_row)
                         or not _parameters_resolve(event, jid, part, resource_row, part_row)
-                        or (neighbors := _neighbor_guards(jid, event, part, state, prepared, resources, part_row)) is None):
+                        or (chosen := _neighbor_rows(jid, event, part, state, prepared, resources, part_row)) is None):
                     continue
                 task = generation._recovery_event_instance_task(
                     outline_id=f"NOMINAL_CONNECTION_{depth + 1}", resource_jid=jid, event=event,
@@ -1216,7 +1272,10 @@ def _nominal_successors(state: dict, prepared: dict, actors: set[str], parts: se
                 if task is not None and not any(jids.get(end.get(field), end.get(field)) in faulted
                                                 for field in ("part_location", "resource_location")):
                     task.update(candidate_source="nominal_connection",
-                                diagnostic_assumptions=[*_bookkeeping_assumptions(event, variables, task), *neighbors])
+                                diagnostic_assumptions=[*_bookkeeping_assumptions(event, variables, task),
+                                                        *(note for _, _, notes in chosen for note in notes)])
+                    if neighbor := _neighbor_end_state(chosen, jid, event, part, resource_row, part_row, None):
+                        task["neighbor_end_state"] = neighbor
                     tasks.append(task)
     # The interrupted tasks keep their recorded parameters, so nominal work can redo them.
     for jid, node in _replaced_work(prepared):

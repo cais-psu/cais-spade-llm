@@ -780,7 +780,9 @@ def test_resource_rows_state_set_family_entries_without_function_names():
         "recovery_des_models": {"conveyor": {"state_variables": variables}}}
     row = facts._resource_row("conveyor", {"recovery_resources": {"conveyor": {"resource_type": "resource"}}}, session,
                               {"conveyor": "Conveyor"})
-    assert row == "Conveyor (resource)  unknown; belt_stopped true; part_location: gear loading_position_1; inventory: peg"
+    # A resource that declares no resource_state shows no state word, and a family shows its name pattern.
+    assert row == ("Conveyor (resource); belt_stopped true; part_location.<part name>: gear loading_position_1; "
+                   "inventory.<part name>: peg")
 
 
 def test_a_reachable_place_states_where_its_own_events_put_a_part_placed_there():
@@ -1100,6 +1102,10 @@ def test_a_place_s_declared_guards_hold_nominal_picks_until_its_own_events_bring
     assert [(task["resource_jid"], task["event_name"], task.get("part_name")) for task in connection] == [
         ("arm_a", "move_home", None), ("buffer", "advance_part", "peg"), ("arm_a", "pick_approach", "peg"),
         ("arm_a", "pick_grasp", "peg")]
+    # A joint step changes the buffer by the buffer's own copy of it, so the zone it leaves is cleared by the model.
+    assert connection[-1]["neighbor_end_state"] == {"buffer": {"zone_2_part": None}}
+    assert ("buffer", "zone_2_part", None, "model") in [
+        (row["entity"], row["variable"], row["value"], row["by"]) for row in connection[-1]["condition_changes"]]
 
 
 def test_a_new_state_name_does_not_clear_a_reported_fault(shared_cell, tmp_path):
@@ -1308,6 +1314,24 @@ def test_a_choice_by_index_accepts_candidates_that_share_a_label(captured):
     assert status == "need_next_task" and session["accepted_outline_prefix"][0]["event_name"] == second["event_name"]
 
 
+def test_a_base_motion_primitive_locates_a_mobile_resource_by_its_pose():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_facts import (
+        _coordinate_parameters,
+    )
+    from cais_spade_llm.function_analyzer import FunctionAnalyzer
+    from cais_spade_llm.recovery_framework.kmr_primitives import KMRPrimitives
+
+    # The KMR declares where move_base takes its base; no declared event shortcuts the travel.
+    effects = FunctionAnalyzer._extract_yaml_frontmatter(KMRPrimitives.move_base)["effects"]
+    prepared = {"recovery_resources": {"KMR": {"recovery_des_model": {"state_variables": {}, "events": []}}},
+                "llm_input": {}}
+    assert multi_turn_diagnostic.declare_derived_conditions(
+        prepared, {"KMR": [{"name": "move_base", "effects": effects}]}) == {"KMR": ["pose"]}
+    model = prepared["recovery_resources"]["KMR"]["recovery_des_model"]
+    assert model["state_variables"]["pose"]["fields"] == ["x", "y", "yaw"]
+    assert model["state_variables"]["pose"]["locates_resource"] is True
+    assert _coordinate_parameters(model) == ["x", "y", "yaw"]
+
 def test_conditions_come_from_each_resources_model_and_primitives():
     cartesian = {"name": "move_cartesian", "effects": {"current_pose": {"pose_absolute_from_params": ["x", "y", "z"]}}}
     mover_event = {"event_name": "move_to_location", "updates": {"resource_location": {"set_from_param": "observed"}},
@@ -1513,16 +1537,16 @@ def test_a_part_s_own_entry_on_a_place_reads_not_stated_until_the_event_states_i
     unstated, stated = (multi_turn.build_multi_turn_session_seed(prepared) for _ in range(2))
     # An empty record is shown with the values it can take, so a part move's change is in view.
     assert facts._resource_row("belt", prepared, unstated, names).endswith(
-        "part_location: none (values loading_position_1, loading_position_2)")
+        "part_location.<part name>: none (values loading_position_1, loading_position_2)")
     load = event("peg_on_belt", "arm_a", "peg", resource_state="placed", held_part=None, part_state="ready",
                  part_location="belt")
     _apply([load], unstated, prepared)
     _apply([{**load, "neighbor_end_state": {"belt": {"part_location.peg": "loading_position_1"}}}], stated, prepared)
     # Unstated, the peg's own entry reads "not stated" instead of keeping its old empty value.
     assert "part_location.peg" in unstated["diagnostic_unknown_owner_fields"]["belt"]
-    assert "part_location: peg not stated" in facts._resource_row("belt", prepared, unstated, names)
+    assert "part_location.<part name>: peg not stated" in facts._resource_row("belt", prepared, unstated, names)
     assert context.public_resource_snapshot(prepared, unstated, "belt")["part_location.peg"] == "not stated"
-    assert "part_location: peg loading_position_1" in facts._resource_row("belt", prepared, stated, names)
+    assert "part_location.<part name>: peg loading_position_1" in facts._resource_row("belt", prepared, stated, names)
 
 
 def test_a_resource_lookup_states_current_values_and_what_events_left_unstated(tmp_path):

@@ -1733,27 +1733,6 @@ def test_empty_KMR_return_requires_observed_downward_home(home):
     assert _validate_kmr_completion(task, evidence)
 
 
-@pytest.mark.parametrize("change,arrived", [
-    ({}, True),
-    ({"base_pose": [-1.204, 1.15, -1.5708]}, True),
-    ({"base_pose": [-1.21, 1.15, -1.5708]}, False),
-    ({"base_pose": [-1.2, 1.15, -1.5708 + 2 * 3.141592653589793]}, True),
-    ({"base_pose": [-1.2, 1.15, -1.5]}, False),
-    ({"arm_parked": False}, False),
-    ({"resource_location": "M2"}, False),
-    ({"base_pose": None}, False),
-])
-def test_KMR_coordinate_move_requires_the_measured_pose_at_the_commanded_coordinates(change, arrived):
-    from cais_spade_llm.recovery_framework.workflow_execution import _validate_kmr_completion
-
-    task = {"event_name": "move_to_location", "task_id": "drive",
-            "parameters": {"x": -1.2, "y": 1.15, "yaw": -1.5708, "observed_resource_location": None}}
-    observations = {"controllers_succeeded": True, "attached": False, "arm_parked": True,
-                    "resource_location": None, "base_pose": [-1.2, 1.15, -1.5708], **change}
-    evidence = {"status": "completed", "task_id": "drive", "observations": observations}
-    assert _validate_kmr_completion(task, evidence) is arrived
-
-
 def test_discovery_survives_unrelated_acknowledgements_and_rejects_dependency_changes(inputs):
     context = EnvironmentProductContext(**inputs)
     request = context.request(time.time() + 60)
@@ -2490,6 +2469,10 @@ def test_saved_function_contracts_cover_every_resource_graph_variant():
         graph = nominal_capability_graph(model, models)
         assert graph["edges"], resource_id
         for edge in graph["edges"]:
+            if edge["function_contract"] is None:
+                # An observed completion is a transition with no function to dispatch.
+                assert next(event for event in model["events"] if event["event_id"] == edge["event_id"])["controllable"] is False
+                continue
             contract = validated_function_contract(models, edge["event_id"])
             assert edge["function_contract"] == contract
             assert edge["function_name"] == contract["function_name"]
@@ -2518,12 +2501,8 @@ def test_saved_function_contracts_cover_every_resource_graph_variant():
     )
     planned = validated_function_contract(models, printer["event_id"])
     assert planned["program_status"] == "planned" and not planned["steps"]
-    kmr = next(
-        event for event in models["KMR"]["events"]
-        if event["event_name"] == "move_to_location"
-        and event["parameter_bindings"]["resource_state"] == {"equals": "carrying"}
-    )
-    assert "carrying" in validated_function_contract(models, kmr["event_id"])["program_variants"]
+    kmr = next(event for event in models["KMR"]["events"] if event["event_name"] == "move_to_resource")
+    assert {"empty", "empty_return"} <= set(validated_function_contract(models, kmr["event_id"])["program_variants"])
 
 
 def test_function_contract_rejects_saved_state_disagreement():
@@ -2533,7 +2512,7 @@ def test_function_contract_rejects_saved_state_disagreement():
     models = build_environment_models(read_json(SCENE_PATH))
     event = next(
         event for event in models["M1"]["events"]
-        if event["event_name"] == "machine_part"
+        if event["event_name"] == "start_job"
     )
     event["program"]["entry_state"] = "idle"
     with pytest.raises(ValueError, match="in state"):
@@ -2542,8 +2521,9 @@ def test_function_contract_rejects_saved_state_disagreement():
         event for event in models["3D Printing Station"]["events"]
         if event["event_name"] == "print_part"
     )
-    printer["guards"].pop("resource_state")
-    with pytest.raises(ValueError, match="output conditions"):
+    # Printing starts from idle; a saved program that starts elsewhere disagrees with it.
+    printer["program"]["entry_state"] = "completed"
+    with pytest.raises(ValueError, match="in state"):
         validated_function_contract(models, printer["event_id"])
 
 

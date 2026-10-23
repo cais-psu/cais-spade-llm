@@ -18,8 +18,7 @@ from uuid import uuid4
 from cais_spade_llm.recovery_framework import ROOT, SCENE_PATH, fingerprint
 from cais_spade_llm.recovery_framework.geometry import collision_boxes, compose, quaternion, rotate
 from cais_spade_llm.recovery_framework.kmr_tasks import (
-    KMR_LOCATION_TASK, KMR_LOCATION_VARIANTS, KMR_MOVE_VARIANTS,
-    capability_decompositions, delivery_bindings, execute_composition,
+    KMR_MOVE_VARIANTS, capability_decompositions, delivery_bindings, execute_composition,
 )
 from cais_spade_llm.recovery_framework.kmr_motion import (
     bounded_joints, joint_limits, retime_trajectory, trajectory_cost,
@@ -279,7 +278,7 @@ def run(request: dict, session: dict | None = None) -> dict:
     held_part = valuation.get('KMR', {}).get('held_part')
     part = (parameters.get('part_name') or request.get('primitive_parameters', {}).get('part_name')
             or held_part or pending.get('part_name'))
-    if part is None and mode in {'probe', 'task', 'environment_task'} and name != 'move_to_location':
+    if part is None and mode in {'probe', 'task', 'environment_task'}:
         part = config['part_name']
     part_geometry = request.get('geometry', {}).get(part, {})
     if part_geometry.get('dimensions_m'):
@@ -1495,7 +1494,7 @@ def run(request: dict, session: dict | None = None) -> dict:
         if transform is None:
             if held_part is not None:
                 raise ValueError('Empty KMR travel requires no held part')
-            if free_target and mode not in {'function', 'primitive'} and name != 'move_to_location':
+            if free_target and mode != 'primitive':
                 raise ValueError('KMR target is not a configured destination')
             acknowledgement = authorize_empty_transport(route=route, endpoints_only=free_target)
             operations.append({'operation': 'validated_empty_transport_route',
@@ -1507,7 +1506,7 @@ def run(request: dict, session: dict | None = None) -> dict:
             return {'resource_location': destination, 'base_pose': arrived,
                     'attached': False, 'arm_parked': True}
 
-        if destination not in {'M1', 'M2'} and mode not in {'function', 'primitive'} and name != 'move_to_location':
+        if destination not in {'M1', 'M2'} and mode != 'primitive':
             raise ValueError('Loaded KMR delivery target must be M1 or M2')
         custody(transform)
         configuration = confirm_carrying()
@@ -1910,15 +1909,8 @@ def run(request: dict, session: dict | None = None) -> dict:
                        'composition': capability_decompositions(function_name=name, scene=scene)}
         if mode == 'environment_task':
             if name not in {'pick_approach', 'pick_part', 'move_to_resource',
-                             'place_approach', 'place_release', 'move_to_location'}:
+                             'place_approach', 'place_release'}:
                 raise ValueError('Unsupported environmental KMR event')
-            if name == 'move_to_location' and (
-                    not {'x', 'y', 'yaw'} <= set(parameters)
-                    <= {'resource_id', 'resource_state', 'x', 'y', 'yaw', 'observed_resource_location'}
-                    or parameters.get('resource_id', 'KMR') != 'KMR'
-                    or not all(isinstance(parameters[key], (int, float)) and math.isfinite(parameters[key])
-                               for key in ('x', 'y', 'yaw'))):
-                raise ValueError('KMR coordinate event requires finite x, y, yaw')
             if name in {'pick_approach', 'pick_part'}:
                 from cais_spade_llm.recovery_framework.kmr_recovery import pickup_docking_pose
 
@@ -1932,12 +1924,6 @@ def run(request: dict, session: dict | None = None) -> dict:
                         raise ValueError('KMR release has no implemented receiving contract')
                 elif 'workholding_pose' not in destination:
                     raise ValueError('KMR release requires recorded workholding geometry')
-        elif mode == 'function':
-            if name != 'move_to_location' or set(parameters) != {'x', 'y', 'yaw'}:
-                raise ValueError('Unsupported KMR coordinate function or arguments')
-            if not all(isinstance(parameters[key], (int, float)) and math.isfinite(parameters[key])
-                       for key in ('x', 'y', 'yaw')):
-                raise ValueError('KMR coordinate function requires finite x, y, yaw')
         elif mode != 'primitive':
             expected = delivery_bindings(part)
             if (name not in expected or json.dumps(parameters, sort_keys=True)
@@ -1991,16 +1977,10 @@ def run(request: dict, session: dict | None = None) -> dict:
             and (request.get('custody') or {}).get('attached') is not True
         )
         variant = 'empty_return' if empty_move and target_resource == 'Storage' else 'empty' if empty_move else ''
-        if name == 'move_to_location':
-            variant = 'carrying' if held_part is not None else ''
-            definition = (saved_robot_definition(scene, 'KMR', name, variant=variant)
-                          if 'resource_programs' in scene else
-                          KMR_LOCATION_VARIANTS[variant] if variant else KMR_LOCATION_TASK)
-        else:
-            definition = (
-                saved_robot_definition(scene, 'KMR', name, variant=variant)
-                if 'resource_programs' in scene else KMR_MOVE_VARIANTS[variant] if variant else None
-            )
+        definition = (
+            saved_robot_definition(scene, 'KMR', name, variant=variant)
+            if 'resource_programs' in scene else KMR_MOVE_VARIANTS[variant] if variant else None
+        )
         previous = deepcopy(request.get('custody') or {})
         if name == 'pick_part':
             previous['pick_targets'] = confirm_pick_approach(previous)
@@ -2023,9 +2003,6 @@ def run(request: dict, session: dict | None = None) -> dict:
                               if row['resource_id'] == target_resource))
             state['base_target_pose'] = [pose[0], pose[1], pose[5]]
             state['base_waypoints'] = route_between(source_resource, target_resource)[1:-1]
-        elif name == 'move_to_location':
-            state['base_target_pose'] = [parameters[key] for key in ('x', 'y', 'yaw')]
-            state['base_waypoints'] = []
         outputs = execute_composition(
             name, arguments=parameters, state=state,
             primitives=primitives, records=primitive_results, operations=operations,
@@ -2046,8 +2023,6 @@ def run(request: dict, session: dict | None = None) -> dict:
             observation.update(observe_place_approach(outputs['place'], previous['grasp_transform']))
         elif name == 'place_release':
             observation.update(observe_release(previous['place_targets']['destination']))
-        elif name == 'move_to_location':
-            observation.update(outputs['transport'])
         observation['controllers_succeeded'] = True
         observation['timing'] = timings()
         node.get_logger().info(f'[KMR] {name} completed: part={part}; task={pending.get("task_id")}')

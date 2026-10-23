@@ -141,7 +141,7 @@ def _initial_models(scene: dict) -> dict[str, dict]:
     if kmr.get("integrated") and kmr.get("task_execution"):
         models["KMR"]["execution_support"] = (
             "Gazebo execution: pick_approach, pick_part, move_to_resource, "
-            "place_approach, place_release, and move_to_location through /KMR/move_base. "
+            "place_approach, and place_release through /KMR/move_base. "
             f"DockKMR compatibility binding: {kmr['docking_action']}. "
             "Physical execution is not integrated."
         )
@@ -1004,25 +1004,6 @@ def build_nominal_resource_des_models(scene: dict[str, Any]) -> dict[str, dict[s
     _machine_and_mobile_events(models, scene)
     _robot_events(models, scene)
     _transport_and_print_events(models, scene)
-    for state in ("idle", "carrying"):
-        _event(
-            models, "move_to_location",
-            {"resource_id": "KMR", "resource_state": state},
-            {"KMR": _equals(resource_state=state)},
-            {"KMR": {"resource_location": {"set_from_param": "observed_resource_location"}}},
-            parameters={
-                "x": {"required": True, "type": "number"},
-                "y": {"required": True, "type": "number"},
-                "yaw": {"required": True, "type": "number"},
-                "observed_resource_location": {"required": True, "type": ["string", "null"]},
-            },
-            capability=(
-                {"resource_state": state},
-                {"resource_state": state,
-                 "resource_location": {"set_from_param": "observed_resource_location"}},
-            ),
-            notes="Measured base pose resolves a named location only at its configured dock.",
-        )
     for model in models.values():
         model["local_event_alphabet"] = list(
             dict.fromkeys(event["event_name"] for event in model["events"])

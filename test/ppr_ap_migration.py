@@ -49,6 +49,50 @@ def migrate_ap_key(value: str) -> str:
     return canonical_ap_key(make_ap_definition(kind, product, process, resource, symbol, arguments))
 
 
+def migrate_resource_programs(programs: dict) -> None:
+    """Bring archived saved programs to the current transport and machine job contracts."""
+    from cais_spade_llm.resources.machine.machine_jobs import machine_job_functions
+
+    resources = programs.get("resources", {})
+    for rid, event in (("Conveyor", "advance_conveyor"), ("Buffer For Machined parts", "advance_part")):
+        bundle = resources.get(rid)
+        if not isinstance(bundle, dict) or set(bundle.get("primitives", {})) != {"move_relative"}:
+            continue
+        program = bundle["functions"][event]["program"]
+        program["steps"] = [{"id": "observe", "op": "detect_parts"},
+                            {"id": "targets", "op": "compute_transport_targets"}, *program["steps"]]
+        bundle["primitives"] = {name: {"status": "executable", "recovery_selectable": True}
+                                for name in ("detect_parts", "compute_transport_targets", "move_relative")}
+    kmr = resources.get("KMR")
+    if isinstance(kmr, dict):
+        # Coordinate travel is composed from move_base; it is no longer a saved KMR function.
+        kmr.get("functions", {}).pop("move_to_location", None)
+    printer = resources.get("3D Printing Station")
+    if isinstance(printer, dict) and "print_part" in printer.get("functions", {}):
+        # Printing starts the print; its output appears when the completion is observed.
+        printer["functions"]["print_part"]["program"].update(entry_state="idle", success_state="printing")
+    baseline = machine_job_functions()
+    for bundle in resources.values():
+        if isinstance(bundle, dict) and "start_job" in bundle.get("functions", {}):
+            # Job-controlled machining is start_job then the observed complete_job.
+            bundle["functions"].pop("machine_part", None)
+        for name, function in (bundle.get("functions", {}) if isinstance(bundle, dict) else {}).items():
+            if "start_job" in bundle["functions"] and name in baseline:
+                for key in ("entry_state", "success_state"):
+                    if key in baseline[name]["program"]:
+                        function["program"][key] = baseline[name]["program"][key]
+
+
+def migrate_scene(scene: dict) -> None:
+    """Bring an archived scene's saved programs and printer states to the current models."""
+    migrate_resource_programs(scene["resource_programs"])
+    printer = scene.get("3D Printing Station")
+    state = ((printer.get("state_variables") or {}).get("resource_state")
+             if isinstance(printer, dict) and isinstance(printer.get("state_variables"), dict) else None)
+    if isinstance(state, dict) and state.get("domain") == ["idle", "completed"]:
+        state["domain"] = ["idle", "printing", "completed"]
+
+
 def migrate_ppr_fixture(value: Any) -> Any:
     """Copy an old fixture with typed AP records and current catalog versions."""
     if isinstance(value, list):
@@ -58,6 +102,8 @@ def migrate_ppr_fixture(value: Any) -> Any:
     if not isinstance(value, dict):
         return deepcopy(value)
     result = {migrate_ap_key(key): migrate_ppr_fixture(item) for key, item in value.items()}
+    if isinstance(result.get("resource_programs"), dict):
+        migrate_scene(result)
     if "specifications" in result and "version" in result:
         result["version"] = 2
     if result.get("mode") == "predefined":

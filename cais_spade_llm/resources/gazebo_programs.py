@@ -11,8 +11,6 @@ from dataclasses import asdict, replace
 from typing import Any
 
 from cais_spade_llm.recovery_framework.kmr_tasks import (
-    KMR_LOCATION_TASK,
-    KMR_LOCATION_VARIANTS,
     KMR_MOVE_VARIANTS,
     KMR_TASKS,
     PRIMITIVE_CONTRACTS,
@@ -38,8 +36,8 @@ _ROBOT_EXECUTORS = {
 }
 _WORKFLOW_EXECUTORS = {
     "M1": {"dwell"}, "M2": {"dwell"},
-    "Conveyor": {"move_relative"},
-    "Buffer For Machined parts": {"move_relative"},
+    "Conveyor": {"detect_parts", "compute_transport_targets", "move_relative"},
+    "Buffer For Machined parts": {"detect_parts", "compute_transport_targets", "move_relative"},
 }
 
 
@@ -113,12 +111,6 @@ def _expected_functions(resource_id: str, scene: dict) -> dict[str, dict[str, An
         }
         functions["move_to_resource"]["variants"] = {
             name: json.loads(json.dumps(asdict(task.program))) for name, task in KMR_MOVE_VARIANTS.items()
-        }
-        functions["move_to_location"] = {
-            "function_name": "move_to_location", "status": "implemented",
-            "program": json.loads(json.dumps(asdict(KMR_LOCATION_TASK.program))),
-            "variants": {name: json.loads(json.dumps(asdict(task.program)))
-                         for name, task in KMR_LOCATION_VARIANTS.items()},
         }
         return functions
     if resource_id in _WORKFLOW_EVENTS:
@@ -346,9 +338,7 @@ def saved_robot_definition(scene: dict, resource_id: str, function_name: str, *,
     function = saved_function(scene, resource_id, function_name, variant=variant)
     if function["status"] != "implemented":
         raise ValueError(f"No Gazebo executor for {resource_id}.{function_name}")
-    if resource_id == "KMR" and function_name == "move_to_location":
-        baseline = KMR_LOCATION_VARIANTS[variant] if variant else KMR_LOCATION_TASK
-    elif resource_id == "KMR":
+    if resource_id == "KMR":
         baseline = KMR_MOVE_VARIANTS[variant] if variant else KMR_TASKS[function_name]
     else:
         baseline = robot_task_registry()[function_name]

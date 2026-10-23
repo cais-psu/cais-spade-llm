@@ -129,34 +129,6 @@ KMR_MOVE_VARIANTS = {
 }
 
 
-def _location_definition(resource_state: str) -> RobotTaskDefinition:
-    """Declare coordinate travel with the current KMR held-part state preserved."""
-    steps = (_step('transport', 'move_base', target_pose=_state('base_target_pose'),
-                   waypoints=_state('base_waypoints')),) if resource_state == 'idle' else (
-        _step('transport', 'move_base', target_pose=_state('base_target_pose'),
-              waypoints=_state('base_waypoints'),
-              transform=_state('previous', 'grasp_transform')),
-    )
-    return RobotTaskDefinition(
-        name='move_to_location',
-        description='Move the KMR base to a validated world-frame coordinate.',
-        arguments=tuple(RobotTaskArgument(name, 'number', required=True)
-                        for name in ('x', 'y', 'yaw')),
-        source='recovery_framework/kmr_tasks.py',
-        program=RobotTaskProgram(
-            entry_state=resource_state, success_state=resource_state,
-            entry_guards=(RobotTaskGuard(
-                'bound_task', description='Fresh KMR observations and saved scene revision'),),
-            steps=steps, effects=(),
-            notes=('Coordinate movement updates measured base pose and only a matched named location.',),
-        ),
-    )
-
-
-KMR_LOCATION_TASK = _location_definition('idle')
-KMR_LOCATION_VARIANTS = {'carrying': _location_definition('carrying')}
-
-
 def capability_decompositions(*, function_name='', resource_jid='', scene=None, **_kwargs) -> dict:
     """Derive recovery metadata from the same programs that dispatch primitives."""
     from cais_spade_llm.recovery_framework import SCENE_PATH
@@ -164,9 +136,8 @@ def capability_decompositions(*, function_name='', resource_jid='', scene=None, 
 
     scene = scene if scene is not None else json.loads(SCENE_PATH.read_text())
     definitions = (
-        {name: saved_robot_definition(scene, 'KMR', name)
-         for name in (*KMR_TASKS, 'move_to_location')}
-        if 'resource_programs' in scene else {**KMR_TASKS, 'move_to_location': KMR_LOCATION_TASK}
+        {name: saved_robot_definition(scene, 'KMR', name) for name in KMR_TASKS}
+        if 'resource_programs' in scene else dict(KMR_TASKS)
     )
     decompositions = {name: {
         **definition.capability_decomposition(resource_jid=resource_jid),

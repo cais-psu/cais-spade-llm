@@ -1514,12 +1514,20 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             or not context.allows_task(task)
         ):
             raise ValueError("Task does not match current prepared execution")
-        contract = validated_function_contract(context.models, task["event_id"])
-        name = contract["event_name"]
-        if (task["event_name"] != name or contract["resource_id"] != actor.resource_id
-                or contract["program_status"] != "implemented"
-                or contract["program_revision"] != runtime.program_revision):
-            raise ValueError("Function transition does not match the prepared program")
+        event = next(row for row in actor.model["events"] if row["event_id"] == task["event_id"])
+        # An observed event commands nothing: it has no function and needs no CCA permission to start.
+        observed = event.get("controllable") is False
+        if observed:
+            name = event["event_name"]
+            if task["event_name"] != name or event["parameter_bindings"]["resource_id"]["equals"] != actor.resource_id:
+                raise ValueError("Observed transition does not match the prepared event")
+        else:
+            contract = validated_function_contract(context.models, task["event_id"])
+            name = contract["event_name"]
+            if (task["event_name"] != name or contract["resource_id"] != actor.resource_id
+                    or contract["program_status"] != "implemented"
+                    or contract["program_revision"] != runtime.program_revision):
+                raise ValueError("Function transition does not match the prepared program")
         if name not in actor.executors or not context.relevant_revisions_match(task):
             raise ValueError("Controller unavailable or resource configuration changed")
         part = task["parameters"].get("part_name") or task.get("part_name") or context.selected_parts[0]
@@ -1541,7 +1549,7 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             is not True
         ):
             raise ValueError("Resource start conditions have not been validated")
-        if not runtime.diagnostic_cca_bypass:
+        if not runtime.diagnostic_cca_bypass and not observed:
             await send_agent_message(
                 behaviour,
                 message(
@@ -1583,7 +1591,7 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
         physical_binding = ({"recovery_composition_ref": deepcopy(grant["recovery_composition_ref"])}
                             if grant is not None else {})
         await ack("running")
-        if not runtime.diagnostic_cca_bypass:
+        if not runtime.diagnostic_cca_bypass and not observed:
             await send_agent_message(
                 behaviour,
                 message(

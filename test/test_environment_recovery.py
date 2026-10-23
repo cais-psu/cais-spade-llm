@@ -59,6 +59,30 @@ def test_placement_target_capability_keeps_recorded_custody_constraints(owner_co
         assert placed == pytest.approx([*fixture[:3], *quaternion(fixture[3:])])
 
 
+
+def test_an_empty_belt_keeps_its_movement_and_each_resource_keeps_the_shared_events_it_takes_part_in(owner_context):
+    def descriptor(rid):
+        owner = owner_for(owner_context, rid)
+        return environment_recovery_descriptor(environment_owner_evidence(owner), environment_owner_snapshot(owner),
+                                               resource_jid=owner.jid)
+
+    conveyor = descriptor('Conveyor')
+    # The belt's contents change during recovery, so its movement is bound against the projected valuation later.
+    advances = [event for event in conveyor['events'] if event['event_name'] == 'advance_conveyor']
+    assert advances and conveyor['model_complete']
+    assert all(event['collection_binding'] == 'projected_valuation' and 'equals' not in event['parameter_bindings']['next_locations']
+               and event['primitive_support'] for event in advances)
+    # A robot's placement onto the belt is the Conveyor's shared event: its own updates, no program it runs.
+    placements = [event for event in conveyor['shared_events'] if event['event_name'] == 'place_release']
+    assert {event['parameter_bindings']['resource_id']['equals'] for event in placements} == {'ur5e-1', 'ur5e-2'}
+    assert all('program' not in event and 'primitive_support' not in event and 'part_location.{part_name}' in event['updates']
+               for event in placements)
+    storage = descriptor('Storage')
+    assert storage['events'] == []
+    assert {event['event_name'] for event in storage['shared_events']} == {'pick_approach', 'pick_part'}
+    assert all(field.startswith('inventory.') for event in storage['shared_events']
+               for field in (*event['guards'], *event['updates']))
+
 @pytest.fixture
 def owner_context():
     meta = next(iter(read_json(PRODUCT_PATH).values()))
@@ -248,7 +272,7 @@ def test_kmr_keeps_exact_seven_joint_and_pose_formats(owner_context):
     assert cartesian['required_params'] == ['target']
 
 
-def test_typed_bindings_validate_after_successor_binding_and_retain_missing(owner_context):
+def test_a_location_change_matches_the_declared_moves_between_docks_only(owner_context):
     owner = owner_for(owner_context, 'KMR')
     evidence = environment_owner_evidence(owner)
     snapshot = environment_owner_snapshot(owner)
@@ -256,33 +280,8 @@ def test_typed_bindings_validate_after_successor_binding_and_retain_missing(owne
     proposal = {'resource_jid': owner.jid, 'part_name': None, 'params': {},
                 'expected_end_state': {'resource_location': 'M1'}}
     support = derive_primitive_union(task=proposal, recovery_des_model=model, recovery_snapshot=snapshot)
-    assert support['matching_transitions']
-    coordinate = next(row for row in support['matching_transitions'] if row['event_name'] == 'move_to_location')
-    assert 'x' not in coordinate['parameter_bindings']
-    assert coordinate['parameter_bindings']['observed_resource_location'] == 'M1'
-    proposal['params']['x'] = False
-    support = derive_primitive_union(task=proposal, recovery_des_model=model, recovery_snapshot=snapshot)
-    assert not any(row['event_name'] == 'move_to_location' for row in support['matching_transitions'])
-
-
-def test_kmr_location_parameters_bind_recorded_dock_without_committing(owner_context):
-    from cais_spade_llm.recovery_framework.kmr_recovery import prepare_kmr_primitive_parameters
-
-    owner = owner_for(owner_context, 'KMR')
-    owner.environment_context.valuation['resource_location'] = 'M2'
-    evidence = environment_owner_evidence(owner)
-    snapshot = environment_owner_snapshot(owner)
-    model = environment_recovery_descriptor(evidence, snapshot, resource_jid=owner.jid)
-    proposal = {'event_name': 'unseen_event', 'resource_jid': owner.jid, 'part_name': None,
-                'expected_end_state': {'resource_location': 'M1', 'resource_state': 'idle'}}
-    original = deepcopy((proposal, snapshot, model, evidence))
-    prepared = prepare_kmr_primitive_parameters(task=proposal, recovery_des_model=model,
-        recovery_snapshot=snapshot, resource_evidence=evidence, resource_jid=owner.jid)
-    calculation = next(row for row in prepared['parameter_calculations'] if row['event_name'] == 'move_to_location')
-    assert 'x' not in calculation['parameter_bindings']
-    assert 'x' in calculation['resolved_parameter_bindings']
-    assert calculation['parameter_sources']['x']['resource_location'] == 'M1'
-    assert (proposal, snapshot, model, evidence) == original
+    # Travel to any other position is composed from move_base; no declared event shortcuts it.
+    assert {row['event_name'] for row in support['matching_transitions']} == {'move_to_resource'}
 
 
 def test_missing_owner_geometry_uses_saved_native_bounds_without_live_observation(monkeypatch):

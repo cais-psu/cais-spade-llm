@@ -1748,8 +1748,8 @@ def test_workflow_gazebo_records_the_failed_primitive_without_acknowledging_arri
     )
     with pytest.raises(ValueError, match="Gazebo rejected controlled transport"):
         runner.execute()
-    assert [row["status"] for row in runner.primitive_trace] == ["failed"]
-    assert runner.primitive_trace[-1]["primitive"] == "move_relative"
+    assert [(row["primitive"], row["status"]) for row in runner.primitive_trace] == [
+        ("detect_parts", "completed"), ("compute_transport_targets", "completed"), ("move_relative", "failed")]
     assert runner.observations == {}
 
 
@@ -1807,7 +1807,8 @@ def test_workflow_gazebo_rejects_missing_workholding_and_blocked_conveyor():
     )
     with pytest.raises(ValueError, match="Robot has not cleared the conveyor"):
         conveyor.execute()
-    assert [row["status"] for row in conveyor.primitive_trace] == ["failed"]
+    assert [(row["primitive"], row["status"]) for row in conveyor.primitive_trace] == [
+        ("detect_parts", "completed"), ("compute_transport_targets", "completed"), ("move_relative", "failed")]
     assert conveyor.primitive_trace[-1]["primitive"] == "move_relative"
     assert conveyor.observations == {}
 

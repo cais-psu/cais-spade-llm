@@ -23,6 +23,37 @@ def job_public_state(record: dict) -> dict:
             "selected_program": record["selected_program"]}
 
 
+def machine_public_state(record: dict, values: dict) -> dict:
+    """Read the machine's own state from its job record, beside its selected program.
+
+    A job runs, pauses, stops or completes the machine's loaded part, so those are states of the
+    machine itself; an interrupted job is the observed fault state. Without a job for the held part
+    the machine keeps its modeled state.
+
+    Args:
+        record: The machine's owner job record.
+        values: The machine's current values, which name the part it holds.
+
+    Returns:
+        ``selected_program`` and, when a job of the held part decides it, ``resource_state`` (and
+        ``current_state`` when ``values`` carries that alias).
+    """
+    part_name, active = values.get("part_name"), record["active_job"]
+    job = record["jobs"][active] if active else next(
+        (row for row in reversed(list(record["jobs"].values())) if part_name and row.get("part_name") == part_name), {})
+    state = {"selected_program": record["selected_program"]}
+    if job.get("job_state") in {"running", "paused", "stopped", "interrupted", "completed"}:
+        state["resource_state"] = job["job_state"]
+        if "current_state" in values:
+            state["current_state"] = job["job_state"]
+    return state
+
+
+def part_job_states(record: dict) -> dict:
+    """Return each part's latest job state; a part keeps it when it leaves the machine."""
+    return {row["part_name"]: row.get("job_state") for row in record["jobs"].values() if row.get("part_name")}
+
+
 def public_processing_observations(record: dict) -> dict:
     """Expose factual job progress without command history or private programs."""
     fields = {"job_id", "task_id", "part_name", "process", "result", "program", "job_state",
@@ -240,16 +271,14 @@ def machine_programs(machine: dict) -> dict:
 
 
 def machine_job_functions() -> dict:
-    """Declare job commands separately from acknowledged machining completion."""
+    """Declare the job commands; machining completion is observed, so it has no function."""
     functions = {name: {"function_name": name, "status": "implemented",
                         "program": {"steps": [{"id": name, "op": name}]}}
                  for name in MACHINE_PRIMITIVES}
-    functions["start_job"]["program"]["entry_state"] = "loaded"
-    functions["machine_part"] = {
-        "function_name": "trim_part", "status": "implemented",
-        "program": {"entry_state": "loaded", "success_state": "completed",
-                    "steps": [{"id": "process", "op": "start_job"}]},
-    }
+    # Each command moves the one machine automaton; a command allowed from several states names "any".
+    for name, (entry, success) in {"start_job": ("loaded", "running"), "pause_job": ("running", "paused"),
+                                   "resume_job": ("any", "running"), "stop_job": ("any", "stopped")}.items():
+        functions[name]["program"].update(entry_state=entry, success_state=success)
     return functions
 
 

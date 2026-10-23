@@ -1,6 +1,6 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
-## Resource model correction — October 22, 2026 — APPROVED, stages 0–3 and 5 in progress (stage 4 dropped)
+## Resource model correction — October 22, 2026 — stages 0–3 DONE (uncommitted); stage 5 prepared, Gazebo not started; stage 4 dropped
 
 **Why.** The user decided the plant models must be correct before the RA rebuild; the paper
 (Table 2, Section 2 models) changes afterwards. Seven items: (1) prompt display of per-part
@@ -10,6 +10,67 @@ Conveyor/Buffer `move_relative` not recovery-selectable; (5) Conveyor/Buffer tra
 one step; (6) coupling through the part's location as in the semiconductor framework
 (`SemiconductorSimulation_testing-master`, `BufferAgent`/`RobotAgent`/`MachineAgent`); (7) the two
 unlinked M1/M2 state layers.
+
+**Status (October 22, end of day).** Stages 0–3 are implemented and uncommitted; the user asked to stop
+right before any Gazebo run.
+- Stage 0: `_resource_row` shows `part_location.<part name>` and no state word without a declared
+  `resource_state`; `recovery_resource_adapter` leaves `current_state` None for such resources.
+- Stage 1: `environment_recovery_descriptor` keeps own events in `events` and other resources'
+  events this resource takes part in in `shared_events` (own guards/updates, no program); events with
+  `collection_effects` (Conveyor `advance_conveyor`, the Conveyor copy of robot placements) stay unbound
+  with `collection_binding: projected_valuation`. `outline_draft._inputs` derives non-robot models
+  again from the recorded evidence snapshot (identical to the stored models in all four captures before
+  the change, except the KMR catalog in the Part slippage capture). Nominal-connection steps carry the
+  other participants' bound updates as `neighbor_end_state` (`by: model`). Replay: three drafts
+  unchanged; the ur5e-1 draft's handoff now names the Conveyor's resumed advance as a nominal entry
+  instead of an unchecked assumption.
+- Stage 2: transport is `detect_parts` → `compute_transport_targets` → `move_relative`
+  (`workflow_task_programs.py`, `gazebo_programs._WORKFLOW_EXECUTORS`, `WorkflowPrimitiveRunner`);
+  scene `resource_programs` revision 6 with all three recovery-selectable. Not built: executing a single
+  Conveyor/Buffer step during recovery composition (it did not exist before; belongs to the composition
+  stage).
+- Stage 3: `_declare_machine_jobs` builds one automaton (`resource_state` idle, loaded, running, paused,
+  stopped, completed), part-scoped `job_state`, uncontrollable `complete_job`, picks from completed,
+  paused or stopped, and `fault_states: [interrupted]` (accepted by `owners`). `machine_public_state`
+  maps the worker job record onto the machine's `resource_state`; job programs carry entry/success
+  states; `validate_function_contracts` and the UI function view skip uncontrollable events.
+- Tests: affected tests updated, regression tests added; archived fixtures migrate saved programs in
+  `test/ppr_ap_migration.py`. Full suite: 152 failed (the known list), 4,478 passed.
+- Stage 5 prepared: queue entry 6 in `recapture_v2_20261015/GAZEBO_QUEUE.md`; captures go to
+  `recapture_v3_20261022/`. No capture exercises a belt advance before its failure point, so the split
+  transport is covered by unit tests only. User-verified safety preview inputs are stale and need the
+  user's re-approval.
+
+**Additions A–C status (October 22, night): implemented, uncommitted, Gazebo not started.**
+- A: KMR `move_to_location` removed (nominal_des, kmr_tasks, gazebo_programs, kmr_agent, kmr_gazebo,
+  workflow_execution, kmr_recovery, scene `resource_programs`). `KMRPrimitives.move_base` declares its
+  effect `base_pose: pose_absolute_from_target_pose: [x, y, yaw]`; `declare_derived_conditions` takes a
+  base-pose effect first and marks that pose `locates_resource`, so "moves to any position (x, y, yaw)"
+  and the KMR pose condition now come from the primitive.
+- B: job-controlled machines lose `machine_part`; `start_job` (no `job_id`; the machine names the job
+  after the task) then observed `complete_job` with the trim effect. Worker: `start_job` returns after
+  acknowledgement; a `complete_job` request runs the old wait loop (`await_job_completion`), where the
+  Machining fault now fires. Runtime: observed events skip the saved-program contract and the CCA
+  safety check/running messages, and admission accepts them without a grant. Planner binds `result`
+  from the requirement; feasibility checks `start_job`. Failure code moved to `start_job`/`complete_job`
+  (fault request, checkpoint hold, ur5e-1 checkpoint, capture check, rule A2 names the pending
+  `complete_job`). Draft nominal connection now includes observed events.
+- C: printer `print_part` is idle → printing (no output); observed `complete_job` printing → completed
+  adds the output and the `print_part` record; custody accepts whichever event makes an output present.
+- Open: with the CCA active (not bypassed), an observed event still sends its "completed"
+  `resource_event` without a prior grant; untested against a live CCA. Old captures keep their recorded
+  models (with `machine_part`, `move_to_location`) until the recapture.
+
+**Approved additions (October 22, evening), before the recapture.**
+- A. Remove the KMR `move_to_location` event: it is not nominal, and its program is one `move_base`, so it
+  bypasses composition. Keep `move_base` as a primitive.
+- B. Nominal machining as controllable `start_job` (loaded → running) then observed `complete_job`
+  (running → completed); remove `machine_part`, which duplicated both and ignored the part's job state.
+- C. Printer follows the same pattern: a start into a printing state and an observed completion.
+- B scope (user chose full B): the runtime had no way to acknowledge an observed (uncontrollable) event, so B adds
+  one (a completion observer on the machine worker, dispatch and acknowledgement without a command or CCA
+  grant), makes `start_job` plannable, and moves the Machining fault injection, the ur5e-1 checkpoint,
+  capture checks and grounding from `machine_part` to `start_job`/`complete_job`.
 
 **Findings that shape the plan.**
 - Nominal composition is already $\Vert_i G_i$: `nominal_des._event` (54-94) gives each participant

@@ -154,7 +154,7 @@ class ConveyorFault:
         if (not self.enabled
                 or self.configuration["scenario"] != "Machining breakdown during part processing"
                 or task["resource_id"] != self.configuration["resource_id"]
-                or task["event_name"] != "machine_part"):
+                or task["event_name"] != "complete_job"):
             return {}
         if self._control_directory is None:
             self._control_directory = tempfile.TemporaryDirectory(prefix="cais_machine_fault_")

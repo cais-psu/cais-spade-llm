@@ -133,7 +133,19 @@ class KMRPrimitives:
     async def move_base(self, target_pose: list[float],
                         waypoints: list[list[float]] | None = None,
                         transform: list[float] | None = None) -> dict:
-        """Plan and follow a checked base route to an exact planar pose."""
+        """
+        ---
+        description: Plan and follow a checked base route to an exact planar pose.
+        params:
+          target_pose: {type: array, items: {type: number}, description: "Base pose [x, y, yaw] in the world frame, in metres and radians"}
+          waypoints: {type: array, items: {type: array, items: {type: number}}, description: "Intermediate base poses [x, y, yaw] to pass through. Optional."}
+          transform: {type: array, items: {type: number}, description: "Grasp transform of the part the KMR carries. Optional."}
+        preconditions: {}
+        effects:
+          base_pose:
+            pose_absolute_from_target_pose: [x, y, yaw]
+        ---
+        """
         return await self._call('move_base', {'target_pose': target_pose,
                                               'waypoints': waypoints,
                                               'transform': transform})

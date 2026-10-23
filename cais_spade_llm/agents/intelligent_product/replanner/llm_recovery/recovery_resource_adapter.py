@@ -103,7 +103,19 @@ def adapt_recovery_resource_snapshot(
     modeled_state: dict[str, Any] | None = None,
     state_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Adapt a raw resource snapshot into the stable recovery runtime shape."""
+    """Adapt a raw resource snapshot into the stable recovery runtime shape.
+
+    Args:
+        resource_jid: The resource's JID.
+        resource_type: The resource's declared type.
+        snapshot: The resource's raw snapshot.
+        modeled_state: Modeled values used where the snapshot records none.
+        state_variables: The resource's declared state variables, when known.
+
+    Returns:
+        The adapted snapshot. Its ``current_state`` is None for a resource whose model declares
+        no ``resource_state``, since such a resource has no state to report.
+    """
     raw_snapshot = dict(snapshot or {})
     if isinstance(raw_snapshot.get("resource_core"), dict):
         current_state = (
@@ -137,6 +149,8 @@ def adapt_recovery_resource_snapshot(
             if raw_snapshot.get("current_location") is not None
             else (modeled_state or {}).get("current_location")
         )
+    if state_variables is not None and "resource_state" not in state_variables and current_state == "unknown":
+        current_state = None
 
     adapted_type = resource_type_from_value(resource_type)
     profile = get_resource_profile(adapted_type)

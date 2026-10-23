@@ -13,24 +13,34 @@ _PROGRAMS: dict[str, dict[str, Any]] = {
         "status": "implemented",
         "steps": [{"id": "process", "op": "dwell"}],
     },
+    # Transport observes the parts it moves and computes their targets before it moves, as a robot does.
     "advance_conveyor": {
         "function_name": "move_parts_downstream",
         "entry_state": "belt_stopped",
         "success_state": "belt_stopped",
         "status": "implemented",
-        "steps": [{"id": "transport", "op": "move_relative"}],
+        "steps": [
+            {"id": "observe", "op": "detect_parts"},
+            {"id": "targets", "op": "compute_transport_targets"},
+            {"id": "transport", "op": "move_relative"},
+        ],
     },
     "advance_part": {
         "function_name": "move_to_next_zone",
         "entry_state": "occupied source zone",
         "success_state": "occupied downstream zone",
         "status": "implemented",
-        "steps": [{"id": "transport", "op": "move_relative"}],
+        "steps": [
+            {"id": "observe", "op": "detect_parts"},
+            {"id": "targets", "op": "compute_transport_targets"},
+            {"id": "transport", "op": "move_relative"},
+        ],
     },
+    # Printing starts the print; the output appears when its completion is observed.
     "print_part": {
         "function_name": "print_part",
-        "entry_state": "output absent",
-        "success_state": "output present",
+        "entry_state": "idle",
+        "success_state": "printing",
         "status": "planned",
         "availability_note": "The current Gazebo scene starts with all supported printer outputs present; no printing executor is bound.",
         "steps": [],

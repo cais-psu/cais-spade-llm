@@ -52,7 +52,7 @@ def resource_function_rows(model: dict[str, Any]) -> dict[str, list[dict[str, An
                     availability += f". {note}"
             elif executable is None:
                 availability = "Configured — start the system to check Gazebo execution"
-            elif event_name in executable or (resource_id == "KMR" and event_name == "move_to_location"):
+            elif event_name in executable:
                 availability = "Gazebo executable"
             else:
                 availability = "No Gazebo executor bound"

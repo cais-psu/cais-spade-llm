@@ -34,9 +34,21 @@ def observation_fingerprint(record: dict) -> str:
     return fingerprint({key: value for key, value in record.items() if key not in {"source_path", "source_sha256"}})
 
 
-def recorded_processing_fields(record: dict, *, resource_id: str, run_id: str, inputs: dict) -> dict:
-    """Validate a saved owner job record before using its public state."""
-    from cais_spade_llm.resources.machine.machine_jobs import MachineJobs, job_public_state
+def recorded_processing_fields(record: dict, *, resource_id: str, run_id: str, inputs: dict,
+                               values: dict | None = None) -> dict:
+    """Validate a saved owner job record before using its public state.
+
+    Args:
+        record: The machine's saved owner job record.
+        resource_id: The machine.
+        run_id: The run the record belongs to.
+        inputs: Recorded run inputs with the scene.
+        values: The machine's current values, which name the part it holds.
+
+    Returns:
+        The machine state the record shows (see ``machine_public_state``).
+    """
+    from cais_spade_llm.resources.machine.machine_jobs import MachineJobs, machine_public_state
 
     machines = [row for row in inputs.get("scene", {}).get("machines", [])
                 if row.get("resource_id") == resource_id]
@@ -53,7 +65,7 @@ def recorded_processing_fields(record: dict, *, resource_id: str, run_id: str, i
     for identity, job in record["jobs"].items():
         if not isinstance(job, dict) or job.get("job_id") != identity:
             raise ValueError("Conflicting saved job identity for " + resource_id)
-    return job_public_state(record)
+    return machine_public_state(record, values or {})
 
 
 def reconcile_resource_snapshot(evidence: dict, physical_evidence: dict, *, resource_id: str,
@@ -114,7 +126,8 @@ def reconcile_resource_snapshot(evidence: dict, physical_evidence: dict, *, reso
             "reason": "Machine-worker observations are unavailable; copied symbolic job fields are not measured facts"})
     if processing is not None:
         try:
-            fields = recorded_processing_fields(processing, resource_id=resource_id, run_id=run_id, inputs=inputs)
+            fields = recorded_processing_fields(processing, resource_id=resource_id, run_id=run_id, inputs=inputs,
+                                                values=snapshot)
         except (ValueError, KeyError, TypeError) as exc:
             conflict("processing_observations", processing, None, str(exc))
             fields = {}
@@ -988,7 +1001,8 @@ def capture_observations(runtime, failure: dict, *, include_physical: bool = Tru
                 continue
             owner["processing_observations"] = deepcopy(record)
             try:
-                fields = recorded_processing_fields(record, resource_id=rid, run_id=context.run_id, inputs=context.inputs)
+                fields = recorded_processing_fields(record, resource_id=rid, run_id=context.run_id, inputs=context.inputs,
+                                                    values=owner["environment_valuation"][rid])
             except (ValueError, KeyError, TypeError) as exc:
                 owner.setdefault("conflicts", []).append({"field": "processing_observations", "reason": str(exc)})
                 continue

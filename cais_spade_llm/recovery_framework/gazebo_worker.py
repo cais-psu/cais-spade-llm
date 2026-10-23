@@ -175,7 +175,7 @@ class GazeboWorker:
         return deepcopy(self.machine_jobs)
 
     async def machine_control(self, request: dict, *, command_id: str) -> dict:
-        """Service job controls while the machine_part request is still running."""
+        """Service job controls while a machine request, such as an observed completion, is still running."""
         check_stopped()
         guard = getattr(self, 'physical_request_guard', None)
         if callable(guard):

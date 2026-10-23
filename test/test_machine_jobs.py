@@ -12,7 +12,7 @@ import pytest
 from cais_spade_llm.recovery_framework import SCENE_PATH
 from cais_spade_llm.resources.machine.machine_jobs import (
     MachineJobs, MACHINE_PRIMITIVES, processing_failure_time, project_job_command,
-    job_public_state, public_processing_observations,
+    job_public_state, machine_public_state, public_processing_observations,
     interrupted_pickup_conditions,
 )
 
@@ -429,7 +429,7 @@ def test_new_case_and_programs_do_not_change_other_defaults():
                for rid in ('M1', 'M2'))
 
 
-def test_worker_commands_remain_responsive_during_machine_part(machine, tmp_path):
+def test_worker_commands_remain_responsive_while_a_completion_is_observed(machine, tmp_path):
     from cais_spade_llm.recovery_framework.workflow_gazebo import WorkflowPrimitiveRunner
     scene = json.loads(SCENE_PATH.read_text())
     clock = [100.]
@@ -454,14 +454,20 @@ def test_worker_commands_remain_responsive_during_machine_part(machine, tmp_path
         observe(duration)
         assert clock[0] < 120
         return begin, clock[0]
-    runner = WorkflowPrimitiveRunner({'scene':scene, 'geometry':{'RGOCG4-50_Round_4mm':{'model_name':'part'}},
-        '_control_path':str(control), '_jobs_path':str(tmp_path/'jobs.json'),
-        'task':{'task_id':'task', 'run_id':'run', 'resource_id':'M2', 'event_name':'machine_part',
-                'parameters':{'part_name':'RGOCG4-50_Round_4mm', 'process':'trim', 'result':'circle'}}},
-        entity=lambda _: state, set_pose=lambda *_:pytest.fail('job control dispatched motion'),
-        robot_clearance=lambda *_:{'ur5e-2':1.}, current_clock=lambda:clock[0], wait_simulation=wait)
-    runner._kmr_clearance = lambda:{'link':1.}
-    result = runner.execute()
+    def runner(event_name, task_id, jobs=None):
+        worker = WorkflowPrimitiveRunner({'scene':scene, 'geometry':{'RGOCG4-50_Round_4mm':{'model_name':'part'}},
+            '_control_path':str(control), '_jobs_path':str(tmp_path/'jobs.json'),
+            'task':{'task_id':task_id, 'run_id':'run', 'resource_id':'M2', 'event_name':event_name,
+                    'parameters':{'part_name':'RGOCG4-50_Round_4mm', 'process':'trim', 'result':'circle'}}},
+            entity=lambda _: state, set_pose=lambda *_:pytest.fail('job control dispatched motion'),
+            robot_clearance=lambda *_:{'ur5e-2':1.}, current_clock=lambda:clock[0], wait_simulation=wait,
+            machine_jobs=jobs)
+        worker._kmr_clearance = lambda:{'link':1.}
+        return worker
+    # The machine names the job after the start command; its completion is then observed.
+    starter = runner('start_job', 'task')
+    starter.execute()
+    result = runner('complete_job', 'observe', starter.machine_jobs).execute()
     assert sent == ['pause','resume']
     job = result['processing_observations']['jobs']['task']
     assert job['processing_active_sec'] == machine['simulation_process']['processing_time_sec']
@@ -524,15 +530,23 @@ def test_random_worker_failure_preserves_both_jobs_before_shutdown(tmp_path):
         publish_peer()
         observe(duration)
         return before, clock[0]
-    runner = WorkflowPrimitiveRunner({'scene':scene, 'geometry':{'KET4_Square_4mm':{'model_name':'part'}},
-        '_jobs_path':paths['M1'], 'task':{'run_id':'run','resource_id':'M1','task_id':'square-job',
-            'event_name':'machine_part','parameters':{'part_name':'KET4_Square_4mm','process':'trim','result':'square'}},
-        'failure_injection':{'run_id':'run','resource_id':'M1','task_id':'square-job', 'seed':11,
-            'checkpoint':'during_processing','control_path':str(fault),'processing_paths':paths,
-            'evidence_path':str(tmp_path/'interruption.json')}},
-        entity=lambda _:state, set_pose=lambda *_:pytest.fail('processing dispatched motion'),
-        robot_clearance=lambda *_:{'ur5e-1':1.}, current_clock=lambda:clock[0], wait_simulation=wait)
-    runner._kmr_clearance = lambda:{'link':1.}
+    def worker(event_name, task_id, jobs=None, fault_request=None):
+        runner = WorkflowPrimitiveRunner({'scene':scene, 'geometry':{'KET4_Square_4mm':{'model_name':'part'}},
+            '_jobs_path':paths['M1'], 'task':{'run_id':'run','resource_id':'M1','task_id':task_id,
+                'event_name':event_name,'parameters':{'part_name':'KET4_Square_4mm','process':'trim','result':'square'}},
+            **({'failure_injection': fault_request} if fault_request else {})},
+            entity=lambda _:state, set_pose=lambda *_:pytest.fail('processing dispatched motion'),
+            robot_clearance=lambda *_:{'ur5e-1':1.}, current_clock=lambda:clock[0], wait_simulation=wait,
+            machine_jobs=jobs)
+        runner._kmr_clearance = lambda:{'link':1.}
+        return runner
+    starter = worker('start_job', 'square-job')
+    starter.execute()
+    # The breakdown is injected while the job's completion is observed.
+    runner = worker('complete_job', 'observe-square', starter.machine_jobs, {
+        'run_id':'run','resource_id':'M1','task_id':'observe-square', 'seed':11,
+        'checkpoint':'during_processing','control_path':str(fault),'processing_paths':paths,
+        'evidence_path':str(tmp_path/'interruption.json')})
     with pytest.raises(RuntimeError, match='Machining breakdown'):
         runner.execute()
     capture = json.loads((tmp_path/'interruption.json').read_text())
@@ -548,11 +562,49 @@ def test_random_worker_failure_preserves_both_jobs_before_shutdown(tmp_path):
     assert peer.record['active_job'] is None
 
 
+def test_job_control_is_the_machine_automaton_and_each_part_keeps_its_job_state():
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    m1 = build_environment_models(json.loads(SCENE_PATH.read_text()))['M1']
+    variables = m1['state_variables']
+    assert 'active_job' not in variables and variables['job_state']['scope'] == 'part'
+    own = {(event['event_name'], event['guards']['resource_state']['equals'], event['updates']['resource_state']['set'])
+           for event in m1['events'] if event['parameter_bindings']['resource_id'] == {'equals': 'M1'}
+           and 'equals' in event['guards'].get('resource_state', {}) and 'resource_state' in event['updates']}
+    assert {('start_job', 'loaded', 'running'), ('pause_job', 'running', 'paused'), ('resume_job', 'paused', 'running'),
+            ('stop_job', 'paused', 'stopped'), ('complete_job', 'running', 'completed')} <= own
+    # Completion is observed, never commanded, and an interrupted job is the machine's declared fault state.
+    assert m1['fault_states'] == ['interrupted']
+    assert next(event for event in m1['events'] if event['event_name'] == 'complete_job')['controllable'] is False
+    # The job of the held part decides the machine's state; an interrupted job is the observed fault state.
+    record = {'active_job': None, 'selected_program': 'square',
+              'jobs': {'job': {'part_name': 'KET4_Square_4mm', 'job_state': 'interrupted'}}}
+    assert machine_public_state(record, {'part_name': 'KET4_Square_4mm', 'current_state': 'loaded'}) == {
+        'selected_program': 'square', 'resource_state': 'interrupted', 'current_state': 'interrupted'}
+    assert machine_public_state(record, {'part_name': None}) == {'selected_program': 'square'}
+
+def test_job_controlled_machining_plans_a_commanded_start_and_an_observed_completion():
+    from cais_spade_llm.resources.environment_models import build_environment_models, candidates, feasibility
+
+    m1 = build_environment_models(json.loads(SCENE_PATH.read_text()))['M1']
+    part, desired = 'KET4_Square_4mm', {'process': 'trim', 'result': 'square'}
+    tasks = {task['event_name']: task for task in candidates(m1, {}, part, desired, [desired])}
+    # No combined machining event remains; the machine names the job it starts, so start_job takes no job_id.
+    assert set(tasks) == {'start_job', 'complete_job'}
+    assert tasks['start_job']['parameters'] == {'resource_id': 'M1', 'part_name': part, 'process': 'trim',
+                                                'result': 'square'}
+    assert tasks['complete_job']['parameters']['result'] == 'square'
+    # The command is what the machine's program and tooling must support.
+    assert feasibility(m1, tasks['start_job'], {})[0] != 'INFEASIBLE'
+    circle = {**tasks['start_job'], 'parameters': {**tasks['start_job']['parameters'], 'result': 'circle'}}
+    assert feasibility(m1, circle, {}) == ('INFEASIBLE', ['Current program cannot establish the requested result'])
+
 def machine_capture(machine):
     """Build the recorded null snapshot and running worker state from one run."""
     jobs = MachineJobs(machine, 'run')
     start(jobs)
-    fields = job_public_state(jobs.snapshot())
+    # The running job is the machine's own state.
+    fields = machine_public_state(jobs.snapshot(), {})
     owner = {'snapshot': deepcopy(fields), 'state': deepcopy(fields),
         'environment_valuation': {'M2': deepcopy(fields)}, 'processing_observations': jobs.snapshot(),
         'source': {'run_id': 'run', 'revision': 7, 'kind': 'recorded_owner_state'}}
@@ -576,11 +628,10 @@ def test_physical_refresh_preserves_worker_fields_and_raw_nulls(machine):
                               resource_agents=[owner], setup={'execution_mode': 'simulation'})
     for measured in ({'status': 'pending'}, physical):
         result = capture_resource_evidence(runtime, measured)['M2@localhost']
-        assert result['snapshot']['active_job'] == 'circle-job'
-        assert result['snapshot']['job_state'] == 'running'
+        assert result['snapshot']['resource_state'] == 'running'
         assert result['conflicts'] == []
     assert result['physical_snapshot']['active_job'] is None
-    assert result['snapshot_sources']['active_job']['revision'] == evidence['processing_observations']['revision']
+    assert result['snapshot_sources']['resource_state']['revision'] == evidence['processing_observations']['revision']
     assert (evidence, physical) == original
 
 
@@ -616,15 +667,15 @@ def test_capture_checks_machine_job_identity_and_revision(machine, defect):
         recorded_processing_fields(record, resource_id='M2', run_id='run', inputs=inputs)
 
 
-@pytest.mark.parametrize('value', [None, 'another-job'])
+@pytest.mark.parametrize('value', ['loaded', 'paused'])
 def test_capture_keeps_authoritative_machine_disagreement(machine, value):
     from cais_spade_llm.recovery_framework.recovery_observations import reconcile_resource_snapshot
 
     evidence, physical, inputs = machine_capture(machine)
-    evidence['snapshot']['active_job'] = value
+    evidence['snapshot']['resource_state'] = value
     result = reconcile_resource_snapshot(evidence, physical, resource_id='M2', run_id='run', revision=7, inputs=inputs)
     assert result['conflicts'][0]['recorded'] == value
-    assert result['conflicts'][0]['observed'] == 'circle-job'
+    assert result['conflicts'][0]['observed'] == 'running'
 
 
 def test_observation_repair_is_immutable_and_does_not_use_shutdown(machine):
@@ -642,7 +693,7 @@ def test_observation_repair_is_immutable_and_does_not_use_shutdown(machine):
     result = derive_recorded_observations(record, source_path='/original/observations.json', source_sha256='original-hash')
     assert record == before
     assert result['physical_evidence'] == before['physical_evidence']
-    assert result['resource_evidence']['M2@localhost']['snapshot']['active_job'] == 'circle-job'
+    assert result['resource_evidence']['M2@localhost']['snapshot']['resource_state'] == 'running'
     assert result['processing_shutdown'] == before['processing_shutdown']
     assert result['observation_repair']['source_sha256'] == 'original-hash'
     record['failure']['processing_observations']['M2']['revision'] += 1

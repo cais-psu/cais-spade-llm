@@ -236,7 +236,6 @@ def test_catalog_preserves_assignments_and_only_nominal_tasks(models, scene):
     names = {row["event_name"] for model in models.values() for row in model["events"]}
     assert names == {
         "move_to_resource",
-        "move_to_location",
         "pick_part",
         "place_release",
         "machine_part",
@@ -903,11 +902,6 @@ def test_function_graph_handles_variants_planned_and_unowned_resources(scene):
         "program_variants"
     ] == ["empty", "empty_return"]
     assert len({event_id for edge in movement for event_id in edge["event_ids"]}) == 4
-    location = [edge for edge in kmr["edges"]
-                if edge["function_name"] == "move_to_location"]
-    assert {(states[edge["source"]], states[edge["target"]]) for edge in location} == {
-        ("idle", "idle"), ("carrying", "carrying"),
-    }
 
     printer = nominal_function_graph(models["3D Printing Station"], models)
     assert len(printer["edges"]) == 1
@@ -1026,27 +1020,31 @@ def test_product_state_machine_results_are_declared_additions_not_current_progra
         model = models[rid]
         diagram = nominal_resource_product_diagram(model, models)
         states = {node["id"]: node for node in diagram["nodes"]}
-        assert {edge["event_name"] for edge in diagram["edges"]} == {"machine_part"}
-        assert {edge["parameters"]["result"] for edge in diagram["edges"]} == {"square", "circle"}
+        assert {edge["event_name"] for edge in diagram["edges"]} == {
+            "start_job", "pause_job", "resume_job", "stop_job", "complete_job"}
+        # The trim result is added when the job's completion is observed.
+        completions = [edge for edge in diagram["edges"] if edge["event_name"] == "complete_job"]
+        assert {edge["parameters"]["result"] for edge in completions} == {"square", "circle"}
         assert len(model["current_configuration"]["program"]["effects"]) == 1
-        for edge in diagram["edges"]:
+        for edge in completions:
             before, after = states[edge["source"]], states[edge["target"]]
             assert before["product_state"] == {"part_location": rid}
-            assert before["conditions"] == {f"{rid}.resource_state": "loaded"}
+            assert before["conditions"] == {f"{rid}.resource_state": "running"}
             assert after["product_state"]["processCompleted"] == [
                 {"process": "trim", "result": edge["parameters"]["result"]}
             ]
             assert "contains" in after["label"]
-        event = diagram["events"][0]
+        event = next(event for event in diagram["events"] if event["event_name"] == "complete_job")
         assert event["product_effects"]["processCompleted"] == [
             {"process": "trim", "result": {"set_from_param": "result"}}
         ]
         assert event["product_guards"]["ordered_requirements"]
 
         model["process_capabilities"]["trim"]["supported_results"] = ["square"]
-        limited = nominal_resource_product_diagram(model, models)
-        assert len(limited["edges"]) == 1
-        assert limited["edges"][0]["parameters"] == {"result": "square"}
+        limited = [edge for edge in nominal_resource_product_diagram(model, models)["edges"]
+                   if edge["event_name"] == "complete_job"]
+        assert len(limited) == 1
+        assert limited[0]["parameters"] == {"result": "square"}
 
 
 def test_product_state_kmr_connects_pickup_travel_and_release_with_custody(scene):
@@ -1070,7 +1068,7 @@ def test_product_state_kmr_connects_pickup_travel_and_release_with_custody(scene
         assert arrived["conditions"]["resource_location"] == nodes[end]["product_state"]["part_location"]
     events = {event["event_id"]: event for event in graph["events"]}
     for edge in graph["edges"]:
-        if edge["event_name"] not in ("move_to_resource", "move_to_location"):
+        if edge["event_name"] != "move_to_resource":
             continue
         for variant in edge["variants"]:
             assert variant["source_conditions"]["KMR.held_part"] == {"reference": "part_name"}
@@ -1126,7 +1124,7 @@ def test_product_state_transport_and_printer_keep_declared_part_effects(scene):
     assert all("processCompleted" not in node["product_state"]
                for graph in (buffer, conveyor) for node in graph["nodes"])
     printer = nominal_resource_product_diagram(models["3D Printing Station"], models)
-    assert len(printer["edges"]) == 1
+    assert {edge["event_name"] for edge in printer["edges"]} == {"print_part", "complete_job"}
     states = [node["product_state"] for node in printer["nodes"]]
     assert any(state.get("output.{part_name}") is False for state in states)
     assert any(state.get("processCompleted") == [{"process": "print_part"}] for state in states)
@@ -1184,9 +1182,7 @@ def test_resource_state_diagrams_use_exact_fields_events_and_symbolic_effects(sc
             assert len(diagram["state_rows"]) == len(diagram["nodes"])
 
     kmr = nominal_resource_state_diagram(models["KMR"], "resource_location")
-    assert {edge["event_name"] for edge in kmr["edges"]} == {
-        "move_to_resource", "move_to_location",
-    }
+    assert {edge["event_name"] for edge in kmr["edges"]} == {"move_to_resource"}
     buffer = nominal_resource_state_diagram(models[BUFFER], "zone_1_part")
     assert {json.dumps(node["value"], sort_keys=True) for node in buffer["nodes"]} == {
         "null", '{"reference": "delivered_part"}', '{"reference": "part_name"}'
@@ -1283,8 +1279,10 @@ def test_product_process_plan_stages_keep_order_initial_print_and_exact_effects(
     by_requirement = {name: {row["event_name"] for row in variants
                              if row["requirement"]["process"] == name}
                       for name in ("trim", "print_part", "assembly")}
-    assert "machine_part" in by_requirement["trim"]
-    assert "print_part" in by_requirement["print_part"]
+    # The trim result comes from the job's observed completion.
+    assert "complete_job" in by_requirement["trim"]
+    # The print's record comes from its observed completion.
+    assert "complete_job" in by_requirement["print_part"]
     assert "place_insert" in by_requirement["assembly"]
     assert all(row["event_id"] in {
         event["event_id"] for event in models[row["actor"]]["events"]
@@ -1656,7 +1654,7 @@ def test_shared_movement_buffer_backpressure_and_handoff_are_visible(scene):
         "ur5e-3": ["pick_approach", "pick_grasp", "place_approach", "place_insert", "move_home"],
         "ur5e-4": ["pick_approach", "pick_grasp", "place_approach", "place_insert", "move_home"],
         "Storage": ["pick_part"],
-        "3D Printing Station": ["print_part", "pick_grasp"],
+        "3D Printing Station": ["print_part", "complete_job", "pick_grasp"],
         "Exit": ["pick_grasp", "place_release"],
     }.items():
         assert _graph_paths(nominal_capability_graph(models[rid], models), names), rid
@@ -2241,8 +2239,9 @@ def test_product_state_ui_refreshes_capabilities_and_open_configuration_details(
             assert "result = circle" in replacement.content
             assert "result = square" not in replacement.content
             data = detail_data()
-            assert len(data["transitions"]) == 1
-            assert data["transitions"][0]["parameters"] == {"result": "circle"}
+            completions = [row for row in data["transitions"] if row["event_name"] == "complete_job"]
+            assert len(completions) == 1
+            assert completions[0]["parameters"] == {"result": "circle"}
             assert data["states"] == nominal_resource_product_diagram(models["M1"], models)["nodes"]
 
             state["revision"] += 1
@@ -2372,9 +2371,8 @@ def test_resource_catalog_renders_steps_and_current_generated_program(scene):
         labels = [getattr(element, "text", "") for element in client.elements.values()]
         assert any("observe_workholding" in label for label in labels)
         assert any("Formal event: place_release" in label for label in labels)
-        assert any("Formal event: machine_part" in label for label in labels)
         headings = [element._props.get("label") for element in client.elements.values()]
-        assert "place_insert" in headings and "trim_part" in headings
+        assert "place_insert" in headings and "start_job" in headings
         assert any("assembly_board-v1 · M1 · machine_part" in label for label in labels)
         assert any("Approval: primitive_pending" in label for label in labels)
 
@@ -2410,11 +2408,15 @@ def test_one_resource_diagram_hides_identities_and_preserves_guarded_events(scen
     for resource_id in ("M1", "M2"):
         diagram = nominal_resource_diagram(models[resource_id], models)
         states = {node["id"]: node["label"] for node in diagram["nodes"]}
-        assert set(states.values()) == {"idle", "loaded", "completed"}
+        # Job control moves the one machine automaton; a paused or stopped part can be unloaded.
+        assert set(states.values()) == {"idle", "loaded", "running", "paused", "stopped", "completed"}
         assert states[diagram["initial_id"]] == "idle"
         assert {
             ("idle", "place_release", "loaded"),
-            ("loaded", "machine_part", "completed"),
+            ("loaded", "start_job", "running"),
+            ("running", "complete_job", "completed"),
+            ("running", "pause_job", "paused"),
+            ("paused", "pick_grasp", "idle"),
             ("completed", "pick_grasp", "idle"),
         } <= {(states[e["source"]], e["event_name"], states[e["target"]])
               for e in diagram["edges"]}
@@ -2433,7 +2435,8 @@ def test_one_resource_diagram_hides_identities_and_preserves_guarded_events(scen
     assert states[printer["initial_id"]] == "completed"
     assert {(states[e["source"]], e["event_name"], states[e["target"]])
             for e in printer["edges"]} == {
-        ("idle", "print_part", "completed"),
+        ("idle", "print_part", "printing"),
+        ("printing", "complete_job", "completed"),
         ("completed", "pick_grasp", "completed"),
         ("completed", "pick_grasp", "idle"),
     }

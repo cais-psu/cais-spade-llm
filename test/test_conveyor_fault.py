@@ -415,7 +415,7 @@ def runtime_with_failure(scenario, *, robot="ur5e-3"):
         context.part_tracker[part].update(location="M1")
         context.resources["ur5e-1"].valuation.update(resource_state="idle", held_part=None)
         context.transitions.append({
-            "acknowledgement": {"resource_id": "M1", "event_name": "machine_part",
+            "acknowledgement": {"resource_id": "M1", "event_name": "complete_job",
                                 "task_id": "machined", "evidence": "resource",
                                 "run_id": context.run_id,
                                 "parameters": {"part_name": part}},
@@ -552,7 +552,7 @@ def test_robot_breakdown_retains_completed_part_in_M1_and_observed_pose(monkeypa
     assert runtime.context.resources["ur5e-1"].executors == executors
     assert runtime.conveyor_fault.evidence["resource_values_before"]["ur5e-1"]["resource_state"] == "at_pick"
     assert runtime.conveyor_fault.evidence["pick_approach"]["acknowledgement"]["task_id"] == "approached"
-    assert runtime.conveyor_fault.evidence["machine_part"]["acknowledgement"]["task_id"] == "machined"
+    assert runtime.conveyor_fault.evidence["complete_job"]["acknowledgement"]["task_id"] == "machined"
     executors["pick_grasp"].assert_not_called()
     executors["move_home"].assert_not_called()
     assert runtime.conveyor_fault.evidence["robot_pose"] == {"x": -4, "y": 2, "z": 1}
@@ -639,7 +639,7 @@ def test_new_marker_uses_resource_or_observation_and_has_no_collision(scenario):
 
 def test_machine_worker_fault_rejects_stale_evidence_and_never_completes_process(monkeypatch):
     runtime, part, _ = runtime_with_failure("Machining breakdown during part processing")
-    task = {"resource_id": "M1", "event_name": "machine_part", "task_id": "process",
+    task = {"resource_id": "M1", "event_name": "complete_job", "task_id": "process",
             "run_id": runtime.context.run_id, "parameters": {"part_name": part}}
     runtime.context.pending_tasks["process"] = task
     evidence = {**{key: task[key] for key in ("run_id", "task_id", "resource_id")},
@@ -767,7 +767,7 @@ def test_stop_retains_worker_clock_interruption_before_its_reply(monkeypatch, ob
 
     runtime, part, _ = runtime_with_failure("Machining breakdown during part processing")
     fault = runtime.conveyor_fault
-    task = {"resource_id": "M1", "event_name": "machine_part", "task_id": "processing",
+    task = {"resource_id": "M1", "event_name": "complete_job", "task_id": "processing",
             "run_id": runtime.context.run_id, "parameters": {"part_name": part}}
     runtime.context.pending_tasks["processing"] = task
     request = fault.worker_request(task)
@@ -801,7 +801,7 @@ def test_stop_retains_worker_clock_interruption_before_its_reply(monkeypatch, ob
 ])
 def test_machine_checkpoint_rejects_incomplete_or_contradictory_evidence(invalid):
     runtime, part, _ = runtime_with_failure("Machining breakdown during part processing")
-    task = {"resource_id": "M1", "event_name": "machine_part", "task_id": "process",
+    task = {"resource_id": "M1", "event_name": "complete_job", "task_id": "process",
             "run_id": runtime.context.run_id, "parameters": {"part_name": part}}
     runtime.context.pending_tasks["process"] = task
     evidence = {key: task[key] for key in ("run_id", "task_id", "resource_id")}
@@ -878,7 +878,7 @@ def test_machine_worker_control_tracks_disarm_rearm_and_rejects_other_tasks():
 
     runtime, part, _ = runtime_with_failure("Machining breakdown during part processing")
     fault = runtime.conveyor_fault
-    task = {"resource_id": "M1", "event_name": "machine_part", "task_id": "processing",
+    task = {"resource_id": "M1", "event_name": "complete_job", "task_id": "processing",
             "run_id": runtime.context.run_id, "parameters": {"part_name": part}}
     runner = WorkflowPrimitiveRunner.__new__(WorkflowPrimitiveRunner)
     runner.task = task

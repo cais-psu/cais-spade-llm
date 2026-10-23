@@ -490,7 +490,14 @@ def _declared_locations(entry: dict) -> list[str]:
 
 
 def _coordinate_parameters(model: dict) -> list[str]:
-    """Return the free numeric parameters of a declared event that sets ``resource_location``."""
+    """Return the coordinates a resource moves to.
+
+    These are the fields of its declared pose when that pose locates the resource (a base it moves),
+    or else the free numeric parameters of a declared event that sets ``resource_location``.
+    """
+    pose = model.get("state_variables", {}).get("pose", {})
+    if pose.get("locates_resource") and pose.get("fields"):
+        return list(pose["fields"])
     for event in model.get("events", []):
         if "resource_location" not in event.get("updates", {}):
             continue
@@ -714,7 +721,7 @@ def _resource_row(jid: str, prepared: dict, session: dict, names: dict[str, str]
     for prefix, keys in families.items():
         values = list(dict.fromkeys(value for name, declaration in declarations.items() if name.startswith(prefix + ".")
                                     for value in declaration.get("domain") or [] if isinstance(value, str) and value not in parts))
-        items.append(f"{prefix}: {', '.join(keys) or 'none'}" + (f" (values {', '.join(values)})" if values else ""))
+        items.append(f"{prefix}.<part name>: {', '.join(keys) or 'none'}" + (f" (values {', '.join(values)})" if values else ""))
     if _pose(row.get("current_pose")):
         # The latest event that moved the resource decides: a stated pose is where it is, a location
         # change leaves the last pose behind, which an earlier event stated or the capture measured.
@@ -735,9 +742,12 @@ def _resource_row(jid: str, prepared: dict, session: dict, names: dict[str, str]
     if capabilities := _capabilities(jid, prepared, session):
         items.append(capabilities)
     unstated = "resource_state" in session.get("diagnostic_unknown_owner_fields", {}).get(jid, [])
-    head = (f"{names.get(jid, jid)} ({entry.get('resource_type') or 'resource'})  "
-            f"{row.get('resource_state') or row.get('current_state') or ('state not stated' if unstated else 'state not recorded')}"
-            + (", unavailable" if row.get("availability") == "unavailable" else ""))
+    # A resource whose model declares no resource_state has no state word; its variables are its condition.
+    status = [row.get("resource_state") or row.get("current_state") or ("state not stated" if unstated else "state not recorded")
+              ] if "resource_state" in declarations else []
+    if row.get("availability") == "unavailable":
+        status.append("unavailable")
+    head = f"{names.get(jid, jid)} ({entry.get('resource_type') or 'resource'})" + ("  " + ", ".join(status) if status else "")
     return head + ("; " + "; ".join(items) if items else "")
 
 
