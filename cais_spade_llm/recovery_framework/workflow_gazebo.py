@@ -339,9 +339,10 @@ class WorkflowPrimitiveRunner:
         if elapsed >= job["processing_time_sec"]:
             raise ValueError("Machine completed before the selected failure point")
         observed = self.entity(self.state["model"]).pose.position
+        # The job record carries the task that started it; the evidence binds to the observing task.
         self.state["failure_injection"] = {
-            **{key: self.task[key] for key in ("run_id", "task_id", "resource_id")},
-            **deepcopy(job), "checkpoint": fault["checkpoint"],
+            **deepcopy(job), **{key: self.task[key] for key in ("run_id", "task_id", "resource_id")},
+            "checkpoint": fault["checkpoint"],
             "source": "gazebo_workholding_observation", "observation_status": "completed",
             "observed_pose": {axis: float(getattr(observed, axis)) for axis in ("x", "y", "z")},
             "actual_interruption_simulation_sec": self.current_clock(),

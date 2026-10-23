@@ -102,7 +102,7 @@ touched by the recovery
 
 | Specification | Part slippage | Conveyor breakdown | Machining breakdown | ur5e-1 gripper fault |
 | --- | --- | --- | --- | --- |
-| 1 Board mutex | ● | ● | ○ | ○ |
+| 1 Board mutex | ● | ○ | ○ | ○ |
 | 2 M1 mutex | ○ | ○ | ● | ● |
 | 3 M2 mutex | ○ | ○ | ● | ○ |
 | 4 Trim before board entry | ○ | ○ | ● | ○ |
@@ -112,7 +112,9 @@ touched by the recovery
 
 - Every specification drives at least one scenario.
 - Three scenarios are each driven by at least two specifications.
-- Conveyor breakdown is driven by the board mutex alone; see `02_conveyor_breakdown.md`.
+- Conveyor breakdown is driven by no specification. gear_small is assembled before the failure
+  (user decision, 2026-10-16), so the board mutex is in force but not contended; see
+  `02_conveyor_breakdown.md`.
 
 ## Rules 5b and 6 are independent
 

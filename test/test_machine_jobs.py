@@ -550,6 +550,8 @@ def test_random_worker_failure_preserves_both_jobs_before_shutdown(tmp_path):
     with pytest.raises(RuntimeError, match='Machining breakdown'):
         runner.execute()
     capture = json.loads((tmp_path/'interruption.json').read_text())
+    # The evidence names the observing task; the job keeps the task that started it.
+    assert capture['task_id'] == 'observe-square' and capture['job_id'] == 'square-job'
     assert capture['actual_interruption_simulation_sec'] >= capture['chosen_timing']['interruption_simulation_sec']
     for rid, record in capture['processing_observations'].items():
         job = record['jobs'][record['active_job']]

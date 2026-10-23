@@ -219,10 +219,10 @@ OFFICIAL = {
     "capture_8beafdb8a01e444894cfaf41d29921fd": (["A2", "B2"], ["M1"], "environment_21", "machine_part"),
     "capture_1b3f3d1d729a4701b94cff514c783130": (["B2"], ["Conveyor"], "d49d4e9e71354325b11328a1cee4a5ce_pending_2", "place_approach"),
     "capture_0a7fde8074b6426586b204204f2b3417": (["B2"], ["ur5e-1"], "01eeb91143e741c69242142690a5a4be_pending_0", "pick_grasp"),
-    "capture_77666affc1b9468ca157cf366d706dc8": (["A1", "B2", "C1"], ["ur5e-4"], "environment_9", "place_approach"),
-    "capture_4d1e4cc0fd9b4e07812ce7cbb01d2c87": (["A2", "B2"], ["M1"], "environment_21", "machine_part"),
-    "capture_3aed616530294a4bbdf353000fc69596": (["B2"], ["Conveyor"], "5a764b64795247fe927cef6fc1ef4d72_pending_0", "place_approach"),
-    "capture_b2d4286af67c4567b4bc0d0fd5ee55c7": (["B2"], ["ur5e-1"], "d52dabb273c14fd0ad9629acbd317f78_pending_1", "pick_grasp"),
+    "capture_82804cb13221467a8b6be4e0eb3e3ac4": (["A1", "B2", "C1"], ["ur5e-4"], "environment_9", "place_approach"),
+    "capture_142d8c7d69d74e39aade558dcbc4b15e": (["A2", "B2"], ["M1"], "environment_24", "complete_job"),
+    "capture_6d907d9ba40a4bb099cba8804166caf0": (["B2"], ["Conveyor"], "2c7098683d184c6aad1da6d6b2a24dbd_pending_0", "place_approach"),
+    "capture_41e711f0ce414a1fa0b1b633ec387656": (["B2"], ["ur5e-1"], "13daa63911274a5a92631b8793a9bbed_pending_1", "pick_grasp"),
 }
 
 

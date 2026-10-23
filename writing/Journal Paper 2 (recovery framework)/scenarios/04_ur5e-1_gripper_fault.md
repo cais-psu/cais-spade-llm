@@ -91,19 +91,23 @@ This is an evaluation hypothesis; other validated sequences may succeed.
 ## Open items (internal — not for the paper)
 
 - **Scenario key:** stays `ur5e-1 breakdown`.
-- **New capture (2026-10-16):** `capture_d1ca51654ff7423193d1bd13b146964d` (development, schema 2).
-  It is frozen at sim 131.78:
-  - M1 has KET4's 90 s square trim completed;
-  - M2 has RGOCG4 at 78% of its 60 s circle trim;
+- **Capture (2026-10-23):** `capture_41e711f0ce414a1fa0b1b633ec387656` (development, schema 2, on
+  the corrected resource models) is the Recovery UI default. It is frozen at sim 130.38:
+  - M1 has KET4's 90 s square trim completed, observed through `complete_job`;
+  - M2 has RGOCG4 at 77% of its 60 s circle trim;
   - the KMR is idle at Storage;
-  - `ur5e-1` is empty in M1, with the fault from "gripper object detection".
+  - `ur5e-1` is empty above M1's workholding, with the fault from "gripper object detection":
+    "not working (hardware fault, needs repair)".
+
+  It supersedes `capture_b2d4286a…` (2026-10-20), archived on 2026-10-23 to
+  `/home/jongh/recovery_archives/20261023_pre_model_correction_captures/`, and
+  `capture_d1ca5165…` (2026-10-16), archived on 2026-10-20.
 
   The fault comes before the grasp, at the existing pre-grasp checkpoint, so the "unloading" in
   this file means `ur5e-1` has reached in but has not closed its gripper. The trim times are set
   only in the capture's private scene.
 - **Old capture:** `capture_0a7fde8074b6426586b204204f2b3417` records the earlier design (fails
-  before the pick, with M2 off). It stays selectable as a regression fixture; since 2026-10-16 the
-  UI default is the new capture.
+  before the pick, with M2 off). It stays selectable as a regression fixture.
 - **KMR status (2026-10-15):**
   - Generic driving and release are verified live (see IMPLEMENTATION_PLAN.md, Stages B–D): pick
     at Storage, carrying drive to (−3.0, −0.36, −π/2), release onto the belt at (−3.0, 0.40), and

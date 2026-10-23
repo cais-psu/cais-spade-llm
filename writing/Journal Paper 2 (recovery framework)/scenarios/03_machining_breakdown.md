@@ -130,12 +130,18 @@ program back, then resume after reloading.
 - **Capture:** the official failure capture `capture_8beafdb8a01e444894cfaf41d29921fd` (schema 1)
   is retained. It used 5 s trims, which tie on rule 6 nominally and leave M2 only about 3 s at the
   fault.
-- **Schema-2 capture:** `capture_4d1e4cc0fd9b4e07812ce7cbb01d2c87` (run `machining_02`,
-  2026-10-16, seed `4000168541`). It is verified offline and listed in Recovery Offline.
-  - At the frozen checkpoint, KET4 is interrupted in M1 at 7% (4.2 of 60 s), and RGOCG4 is running
-    in M2 at 5% (4.6 of 90 s).
+- **Schema-2 capture:** `capture_142d8c7d69d74e39aade558dcbc4b15e` (run `machining_02` of
+  `recapture_v3_20261022`, 2026-10-23, seed `4000168541`, on the corrected resource models). It is
+  verified offline and is the Recovery UI default.
+  - M1 fails with KET4 at 7% (4.2 of 60 s) and RGOCG4 at 4% (4.0 of 90 s). At the frozen
+    checkpoint, KET4's job is interrupted in M1 and RGOCG4 is running in M2 at 5% (4.7 of 90 s).
+  - M1's state is the observed fault state `interrupted`. The failed task is the pending observed
+    `complete_job`; `machine_part` no longer exists.
   - The KMR is idle at M2, and ur5e-1 to ur5e-4 are at home.
-  - It supersedes `capture_8beafdb8…`.
+  - It supersedes `capture_4d1e4cc0…` (which superseded `capture_8beafdb8…`), archived on
+    2026-10-23 to `/home/jongh/recovery_archives/20261023_pre_model_correction_captures/`.
+  - M1's recorded `job_state` field still reads `running` (its value before the fault), while its
+    job record says `interrupted`. The turn-1 grounding states the interruption correctly.
   - The 60/90 s trims are set only in the capture's private scene
     (`evaluation_conditions.condition_setup`, user decision 2026-10-16).
 - **Earlier LLM draft:** it proposed essentially this order with gaps, and was never validated.

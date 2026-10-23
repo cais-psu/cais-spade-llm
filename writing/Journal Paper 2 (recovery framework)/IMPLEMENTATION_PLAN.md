@@ -1,5 +1,160 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## RA feasibility validation — October 23, 2026 — plan approved by the user, not started
+
+**Goal.** Rebuild RA validation as the paper defines it, applied to each event the LLM proposes:
+Algorithm 1 (backward derivation) followed by Eq. 12 (forward check). Rebuild rules (October 22): every
+constraint is model data, every check maps to one paper element, and the code has no hidden rules.
+The LLM-only mode stays as it is.
+
+**Why model data comes first.** Every end value in the four October 23 drafts was matched, value by
+value, against the declared transitions of the acting resource:
+- These matched: robot `held_part`, `resource_state` and location changes, and every machine job
+  change (`paused`, `running`, `selected_program`).
+- These did not match. None of them is an LLM error:
+
+  | Mismatch | Count | Cause |
+  | --- | --- | --- |
+  | `part_state: ready` after a robot places a part on a tray, buffer or machine | 7 | Not a gap. No event sets "ready": the plant derives a part's location and state from custody (`product/state.py` 47-70, `environment_models.product_state_from_custody`), and a part in a staging slot, buffer zone, on the belt or in Storage is "ready" |
+  | KMR events' `part_location`/`part_state` | 6 | Not a gap, same custody rule: the KMR's `held_part` makes the part `in_gripper` at the KMR. UR5e events also write the part fields directly, so the two resources state the same fact in two ways |
+  | `pose` | 4 | No event sets a pose; only primitives do (`move_cartesian`, bounded by `gripper_reach`), so this is Eq. 12, not transition matching |
+  | Conveyor `part_location.KET4: loading_position_2` | 1 | The advance is declared as `collection_effects`, not as plain updates |
+  | ur5e-1 `resource_state: failed` | 1 | Unchanged from the start state (the observed fault); needs no derivation |
+
+- Primitive constraints C_ρ and parameter domains Θ are mostly undeclared:
+  - UR5e primitives have `capability_constraints: {}` and parameters typed only as numbers. The data
+    exists in manifests (`gripper_reach` in `initialization/resources/robot_ur5e.json`, the
+    `reachability` list) but is not attached to the primitives.
+  - KMR preconditions and effects are prose ("fresh", "observed poses").
+  - Machine and Conveyor primitives declare no preconditions or effects. "The Conveyor only runs
+    downstream" (Machining's "no route from M1 to M2") is not declared anywhere.
+
+**Steps.**
+1. **Complete the model data (A.2).** Declare constraints C_ρ and parameter domains Θ (yes/no
+   predicates, no new symbolic effects; see the rule below the list) in machine-readable form, taken
+   from the existing declarations:
+   UR5e `gripper_reach` and `reachability`, KMR reachable locations and navigation map, machine
+   programs, Conveyor direction. The list for review is "Step 1 list" below; show it to the user
+   before changing the models.
+2. **Backward derivation (Alg. 1).** For each variable the event changes, collect the acting resource's
+   declared transitions whose update sets that value (including `collection_effects`), and gather
+   their `primitive_support`. Unchanged variables need no derivation. A value nothing produces is
+   refused with the fact (for example "no declared transition of ur5e-3 sets part_state to ready"),
+   never the fix.
+3. **Forward check (Eq. 12).** For each collected primitive, check that some θ ∈ Θ satisfies
+   C_ρ(v, v′, θ), with θ drawn from recorded evidence. Examples: a stated pose must lie inside
+   `gripper_reach`; a target place must be among the reachable locations.
+4. **Hook into the draft loop** behind a `check_ra_feasibility` toggle. A refusal returns to the LLM
+   as feedback. An accepted event's stated end state becomes the projected state.
+5. **Offline replay** of the four October 23 drafts through the check (no LLM cost) to see what it
+   refuses, reviewed with the user before any live run.
+
+**Step 1 list (October 23, for the user's review; nothing changed yet).** Where each declaration
+lives today and what to add. Everything stays outside the scene `resource_programs`, whose revision is a
+SHA-256 of the whole block (`gazebo_programs.resource_program_revision`), so the existing captures stay
+executable.
+
+0. **Part fields: no change.** `part_location`/`part_state` follow from the custody fields of the end
+   state (`held_part`, machine `part_name`, `staging_part`, `zone_*_part`, Conveyor `part_location.*`,
+   `inventory.*`, `output.*`, `assembled.*`) through the plant's product projection. The RA derives the
+   custody fields; the part's condition follows from them.
+1. **Resource conditions ν_i: decided by the user (October 23), no data needed.** `resource_state` is the
+   DES state's name x′ and is free for every resource. Every other declared variable is a condition v′
+   (bookkeeping `task_ctx.*` and private fields are skipped, as today). A machine's job is still checked
+   through its part-scoped `job_state`; its `resource_state` only repeats it.
+   - An event that changes only the name has no condition to derive, so the RA accepts it.
+   - A new name that blocks normal production (nominal guards use the declared names) is the handoff
+     check's job (Eq. 6), not the RA's.
+2. **UR5e primitives** (YAML frontmatter in the docstrings of
+   `resources/robot/gazebo_pick_place_controller.py`, read by `resource_primitives.py` 146-162; every
+   `capability_constraints` is `{}` today):
+   - `move_cartesian`: the target (x, y, z) lies inside `gripper_reach` (`robot_ur5e.json` 31-42: a
+     vertical cylinder, `origin_pose` xy, `max_xy_radius_m` 0.7, `z_min_m` 0.85, `z_max_m` 1.6,
+     `tolerance_m` 0.01; the same test as `robot_agent._recovery_pose_gripper_reach_error`). Use the
+     value recorded in the capture's `static_capabilities`, which is what the runtime used
+     (`workflow_execution` 202-206 computes it when the scene gives none).
+   - `move_relative`: the resulting pose lies inside `gripper_reach`.
+   - `move_to_named_pose`: `pose_name` is one of the declared `named_positions`.
+   - `grasp_part`/`release_part`: the `held_part` preconditions already exist; their targets come from
+     recorded evidence and are bounded by the `move_cartesian` constraint.
+   - Needs one new constraint operator, "point inside a declared region". The current vocabulary
+     (`recovery_transition_derivation._CONDITIONS`) compares state fields only; the region's shape and
+     size stay data.
+3. **KMR primitives** (`recovery_framework/kmr_primitives.py` docstring frontmatter). Add constraints
+   only; the prose contracts in `kmr_tasks.PRIMITIVE_CONTRACTS` (serialized into `resource_programs`)
+   stay as they are.
+   - `move_base`, Θ: the KMR footprint at `target_pose` is free on the floor map. The data is the
+     obstacle bounds `outline_draft._navigation_floor` already reads, plus
+     `platform_overall_dimensions_m` [1.19, 0.72] from the scene KMR block. In primitive mode
+     `kmr_gazebo.move_base` already allows a free target.
+   - Arm moves (`move_cartesian`, `move_relative`, `move_to_named_pose`): the TCP target lies within
+     `arm_reach_m` 0.82 of `arm_mount_xyz` (scene KMR block 1400-1411), relative to the base pose.
+   - Noticed: the `move_base` effect is `pose_absolute_from_target_pose` in the frontmatter but
+     `base_pose: observed` in the JSON, and the effect parsers know only `pose_absolute_from_params`.
+     It matters for composition (Eq. 7), not for this check.
+4. **Machines** (M1, M2): nothing new. Their primitives map one to one to the job automaton's
+   transitions, which backward derivation reads directly. The domains already exist:
+   - `program` ∈ `program_options` (the `select_program` parameter domain);
+   - `result` ∈ `process_capabilities.trim.supported_results`;
+   - `resume_after_reload` and `restart_stopped_jobs` in `job_control`.
+5. **Conveyor:** move the region order and "downstream only" from code into the Conveyor's scene entry
+   (outside `resource_programs`). Today they are the `nominal_conveyor.CONVEYOR_LOCATIONS` constant and
+   a `ValueError` (239-242). `nominal_conveyor` reads the same values from data, so nothing changes at
+   runtime. `move_relative` constraints:
+   - no resident part's region index decreases;
+   - Θ: 0 < `speed_mps` ≤ `simulation_transport.speed_mps`, already checked in `gazebo_programs`
+     280-292.
+6. **Buffer:** the zone chain is already data (`downstream_zone`, capacity 1). Add the `move_relative`
+   speed Θ only.
+
+**Rule: primitives must not be symbolically connectable (user, October 23).** If every primitive had
+complete symbolic preconditions and effects over the same variables (location, held part, slot), a
+classical planner could chain them from the failure state to the goal without the LLM, and RC1
+collapses. So the RA is a verifier, never a generator:
+- Backward derivation is a lookup keyed by the LLM's stated values. It reads the DES transitions and
+  their `primitive_support`, which exist; it never searches.
+- Eq. 12 needs only C_ρ and Θ: yes/no predicates on a given proposal over continuous geometry and
+  recorded evidence (reach cylinder, free footprint, belt order, speed bounds). They give no successor
+  rule.
+- Add no symbolic location, slot or part effects to primitives. The existing UR5e frontmatter effects
+  (`held_part`, `gripper_state`, continuous `current_pose`) stay; the composition check (Eq. 7) uses
+  them to check a given sequence.
+7. **Printer, Storage, Exit:** no primitives (paper Table 2), nothing to add.
+
+Noticed, out of scope: `workflow_gazebo.py` 56-60 indexes `machines[0]`/`[1]` unsorted, while
+`nominal_des` sorts them by `conveyor_loading_pose` (the same order today).
+
+**Design choices (user-approved October 23).**
+- Match each changed variable separately, not the whole end state against one transition, so
+  combined task-level events (Part slippage's single pick-and-insert event spans two nominal
+  transitions) are not refused for their shape.
+- With checks on, validate all 1–5 candidates. Take the LLM's selected candidate if it is feasible,
+  otherwise the first feasible one in the LLM's order. If none is feasible, refuse with each
+  candidate's reason.
+- Model data first (step 1), then the checker.
+
+**Resource conditions (decided October 23).** The paper derives from the resource condition,
+ν_i(x′) = v′_i, not from the DES state name x′. So `resource_state` is free for every resource, and
+backward derivation applies to the other declared variables only (Step 1 list, item 1). Part fields
+(`part_location`, `part_state`) follow from the custody fields of the end state by the plant's own
+product projection (Step 1 list, item 0).
+
+**Does changing the model data need a recapture?** Not for the outline-stage RA check:
+- **Primitive contracts, constraints and domains (C_ρ, Θ):** they are static declarations (A.2) and
+  do not change what happened in Gazebo. The captures record the catalogs as they were (robot
+  catalogs inside the recorded `recovery_des_model`, other catalogs inside the recorded evidence), so
+  the RA check must read the current declarations at validation time, not the recorded catalogs, and
+  record their fingerprint in the draft. Do not rewrite capture files: `source_sha256` pins every
+  draft to its capture.
+- **No event declarations change.** The part-field rows were custody, not gaps (see the table), so the
+  recorded DES models stay valid.
+- **Later, for Gazebo execution of a recovery:** a change to the scene `resource_programs` bumps its
+  revision, and captures with an older revision cannot execute in Gazebo (`delivery.py` 265-266). The
+  step 1 list touches nothing inside `resource_programs`.
+
+**Later.** The handoff check (Eq. 6, refuse `recovery_complete` until H holds) as its own toggle, then
+CCA safety (Eq. 13). Ablation rows: LLM only, +handoff, +RA, +CCA, all three.
+
 ## Resource model correction — October 22, 2026 — stages 0–3 DONE (uncommitted); stage 5 prepared, Gazebo not started; stage 4 dropped
 
 **Why.** The user decided the plant models must be correct before the RA rebuild; the paper
@@ -2105,7 +2260,9 @@ The following records are under
 | Deleted 2026-10-16; was the accepted Part slippage recovery outline | `offline_470087fe7a92421abd624ea721aa2ca1` |
 | Deleted 2026-10-16; was the accepted Part slippage primitive composition | `offline_1bb1efac84d7443aa37238521ead3b68` |
 | Official Part slippage failure capture | `cf647a0930c64f018d672a27904811b0` |
-| Part slippage schema-2 capture used by the October 19 drafts | `capture_77666affc1b9468ca157cf366d706dc8` |
+| Part slippage schema-2 capture used by the October 19 drafts | `capture_77666affc1b9468ca157cf366d706dc8`, archived 2026-10-23 with the other three pre-correction captures (`capture_4d1e4cc0…`, `capture_3aed6165…`, `capture_b2d4286a…`) and their harness folders to `/home/jongh/recovery_archives/20261023_pre_model_correction_captures/` (tar.gz + manifest, 436 files verified), then removed |
+| Default failure captures of the corrected resource models (Recovery UI `_DEFAULT_OBSERVATIONS`, 2026-10-23) | Part slippage `capture_82804cb13221467a8b6be4e0eb3e3ac4`, Machining `capture_142d8c7d69d74e39aade558dcbc4b15e`, Conveyor `capture_6d907d9ba40a4bb099cba8804166caf0`, ur5e-1 `capture_41e711f0ce414a1fa0b1b633ec387656` |
+| Outline drafts on the corrected-model captures, validation off, gpt-5.4 medium (2026-10-23) | Part slippage `outline_drafts/draft_8149840e8ebc4d5fa4b23d3eef8e061b` (handoff complete, 6 calls); Conveyor `draft_1b233a1b39114d3cb013dffcf73ad0e4` (handoff complete, 7 calls); ur5e-1 `draft_9aea54b0a2fb422da5da018bd8d28cc5` (handoff complete with no assumptions, 9 calls); Machining `draft_b89cc88b33fc4580b2e85aa68369dd23` (LLM declared complete, no handoff, 14 calls: it paused M2's RGOCG4-50 job and left that part on the M2 staging tray, so after M2's `complete_job` for KET4 the goal holds but nominal entry `environment_25` cannot resume) |
 | Part slippage outline drafts, validation off (keep for the paper's model comparison) | `outline_drafts/draft_f7c5a94605c54baf83e8a03a21076c9a`, `draft_85ee4684d69a43d2b615e9af6aba4b71`, `draft_8bfa737c6a444de3b8668acda31c05c0`, `draft_f2a9fb151f71496c8333cd3c43971853`, `draft_9fb1a36de41342cb8a360475da42c667` |
 | Conveyor breakdown outline drafts, validation off (keep for the paper's model comparison) | `outline_drafts/draft_8bf5b6d05b6642098baedd8e25211852` (works), `draft_0aa3406e820345c8bb72224a2ed9ef14` (works, with `place_end_state`). Failed, user to decide keep or delete: `draft_6d122269bb53462f9059af8431928557`, `draft_7199f1650ca741a1948360ac0728b14d` |
 | Official Machining breakdown during part processing failure capture | `capture_8beafdb8a01e444894cfaf41d29921fd` |

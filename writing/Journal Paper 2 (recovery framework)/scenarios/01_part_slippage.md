@@ -80,8 +80,15 @@ This is an evaluation hypothesis; other validated sequences may succeed.
 
 ## Open items (internal — not for the paper)
 
-- **Capture:** `capture_77666affc1b9468ca157cf366d706dc8` (development, schema 2, 2026-10-15). It
-  supersedes `capture_7dda4f66…`.
+- **Capture:** `capture_82804cb13221467a8b6be4e0eb3e3ac4` (development, schema 2, 2026-10-23, on
+  the corrected resource models) is the Recovery UI default. It records the slip at 50% of the
+  lowering, the gear upright at (0.250, 0.450, 1.025), `ur5e-4` failed by gripper object
+  detection, and `ur5e-3` holding the trimmed KET4. It supersedes `capture_77666aff…`, archived on
+  2026-10-23 to `/home/jongh/recovery_archives/20261023_pre_model_correction_captures/`; the
+  October 19 outline drafts were made on that archived capture.
+- **`ur5e-4` location field:** at the failure it still reads `3D Printing Station`, its last
+  pickup origin, while its tool is physically at the board. Rule 1 uses geometry, so it is not
+  affected.
 - **Drop spot:** moved to (0.25, 0.45, 1.04) on 2026-10-15. At the earlier spot (0, 0.30),
   `ur5e-4` could still reach the gear.
 - **Height band in the robot's own pose check:** the band is −0.05 to +0.10 m above the robot
