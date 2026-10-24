@@ -577,6 +577,33 @@ failures); `poetry check` (deprecation warnings only); `compileall`; `ui_main --
 - Captures run with the CCA bypassed and record no monitor history; recovery validation replays each
   captured trace through the seven monitors offline to get the monitor states at $s_F$.
 
+## Nominal order run under B — October 24, 2026
+
+- Captures under B (recapture_v4_20261023, queue item 7): Conveyor `capture_225e2748…`, ur5e-1
+  `capture_e3c8151b…`, Machining `capture_695ea223…` (KMR now `travelling`), Part slippage
+  `capture_98937559…` (ur5e-4 now `approaching_place`). UI defaults and the grounding test use them.
+- Full 11-part order, CCA on with `safety_none.txt` (`run_nominal.py`): with the Eq. 13 admission it ran
+  6 minutes with 42 start and 42 finish records (CCA `ack_cursor` 42) and ur5e-4 placed all three gears.
+  It then stops deterministically: ur5e-3's `place_approach` of KET4 to the board fails motion validation
+  with a self-collision (`ur5e_3_rg2_right_inner_finger` vs `ur5e_3_upper_arm_link`) on the Cartesian move
+  from the buffer pickup to above the slot.
+- **Resolved 2026-10-24 (user):** ur5e-3's 2026-09-29 home and pick transit waypoints restored, and MoveIt
+  collision checking turned off for ur5e-1..4 (`avoid_collisions` false, as on 2026-09-29; "i dont want any
+  collision check"); the KMR keeps its own. KMR `arm_motion_wall_timeout_sec` 360 s in the main scene (the
+  captures' value). **`nominal_cca_05` passed:** all 11 parts assembled, all final poses within tolerance,
+  37 min, 187 start / 203 finish records, CCA `ack_cursor` 203 with no invalid reason. Follow-up for recovery
+  validation: `prepare_ur5e_motion` refuses robots without collision checking, so the CCA's physical recovery
+  check must stop depending on MoveIt's flag.
+- **Was open: ur5e-3's route.** Not B. Since 2026-10-08 (`237c3e4`, "add cca rule") ur5e-3 has
+  no pick transit waypoints and a wrapped home configuration (`shoulder_lift` 5.199 rad), and since
+  2026-10-02 its Cartesian moves are collision-checked; the last full order passed on 2026-09-28 with
+  neither. The failure captures stop before ur5e-3 places anything, so no run exposed it. It also blocks
+  any Part slippage recovery that places ur5e-3's KET4. Options: restore the 2026-09-29 ur5e-3 home and
+  waypoints, or add a transit waypoint for the board approach; either changes ur5e-3 in the captures.
+- Also found and fixed on the way: the late `complete_job` observer, the leftover tracker `state` reads, the
+  plan rebuild projecting a started activity from its start, and the protected `cca_safety_logic.json`
+  being rewritten by nominal starts (the harness restores it).
+
 ## RA feasibility validation — October 23, 2026 — plan approved by the user, not started
 
 **Goal.** Rebuild RA validation as the paper defines it, applied to each event the LLM proposes:

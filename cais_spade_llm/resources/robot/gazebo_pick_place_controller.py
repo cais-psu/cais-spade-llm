@@ -3122,6 +3122,34 @@ class GazeboPickPlaceController:
             }
         return entry["solution"], "reused after complete collision validation"
 
+    def _cartesian_blocking_contacts(self, request) -> list[list[str]]:
+        """Name what stops a collision-checked Cartesian path, for failure evidence only.
+
+        The same path is planned without collision checks, and its first invalid state is the
+        contact the checked plan could not pass. Nothing is executed.
+        """
+        if getattr(self, "_state_validity_client", None) is None:
+            return []
+        from moveit_msgs.srv import GetStateValidity
+
+        request.avoid_collisions = False
+        response = self._wait_future(self._cart_client.call_async(request), timeout_sec=10.0,
+                                     label="blocked Cartesian path diagnosis", timeout_log_level="debug")
+        if response is None:
+            return []
+        trajectory = response.solution.joint_trajectory
+        for point in trajectory.points:
+            check = GetStateValidity.Request()
+            check.group_name = self.group_name
+            check.robot_state.is_diff = True
+            check.robot_state.joint_state.name = list(trajectory.joint_names)
+            check.robot_state.joint_state.position = list(point.positions)
+            result = self._wait_future(self._state_validity_client.call_async(check), timeout_sec=3.,
+                                       label="blocked Cartesian state", timeout_log_level="debug")
+            if result is not None and not result.valid:
+                return [[contact.contact_body_1, contact.contact_body_2] for contact in result.contacts]
+        return []
+
     def _apply_gazebo_fast_timing_profile(self, scale: float | None = None) -> None:
         """Use native simulation durations; speed is owned by the scene clock."""
         self._gazebo_wait_scale = 1.0
@@ -9111,9 +9139,11 @@ class GazeboPickPlaceController:
                 self._last_failure_message = (
                     f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
                 )
-                self._log().error(
-                    f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
-                )
+                if request.avoid_collisions:
+                    contacts = GazeboPickPlaceController._cartesian_blocking_contacts(self, request)
+                    if contacts:
+                        self._last_failure_message += f"; first contact {contacts}"
+                self._log().error(self._last_failure_message)
                 return None
             if response.fraction < 0.999 and not allow_partial:
                 self._last_failure_message = f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"

@@ -3981,8 +3981,10 @@ def test_ur3_buffer_startup_and_runtime_home_share_the_saved_joint_target(models
     expected = [robot["initial_joint_positions"][joint] for joint in scene.UR5E_JOINTS]
     assert named["home"] == expected
     assert controller["retain_observed_clear_pose_as_home"] is False
-    assert controller["cartesian_motion"]["pick_transit_waypoints"] == []
-    assert controller["cartesian_motion"]["avoid_collisions"] is True
+    # The 2026-09-29 route, restored on 2026-10-24: without it ur5e-3 hit itself carrying KET4 to the board.
+    assert len(controller["cartesian_motion"]["pick_transit_waypoints"]) == 3
+    # MoveIt collision checking is off for the UR robots (user, 2026-10-24), as on 2026-09-29.
+    assert controller["cartesian_motion"]["avoid_collisions"] is False
     control = ET.fromstring(description)
     semantic = ET.fromstring(srdf)
     home = semantic.find("group_state[@name='ur5e_3_home']")
