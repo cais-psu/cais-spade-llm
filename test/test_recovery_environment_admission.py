@@ -236,8 +236,8 @@ def _environment_commit_case(monkeypatch=None):
                           "part_name": "gear_small", "operation": {
                               "processesToComplete": [{"process": "assembly"}]}}])
         # These tests exercise retention and commit of a detached preview;
-        # the existing local-composition suite exercises its graph search.
-        monkeypatch.setattr(module, "analyze", lambda *_args, **_kwargs:
+        # the specification check itself is tested separately.
+        monkeypatch.setattr(module, "specification_check", lambda *_args, **_kwargs:
                             Analysis("allowed", "", deepcopy(scope)))
     return case
 
@@ -309,11 +309,12 @@ def test_prepared_nominal_commit_rejects_changed_or_missing_evidence(change, mon
     assert case.admission.epoch == epoch
 
 
-def test_prepared_nominal_commit_uses_retained_candidate_not_mutable_cache(monkeypatch):
+def test_prepared_nominal_commit_grants_the_exact_pending_task_without_a_cache(monkeypatch):
     case = _environment_commit_case(monkeypatch)
     verdict = asyncio.run(case.admission.check(case.task, commit=False))
     assert verdict["status"] == "allowed", verdict
-    case.admission.components[-1].plant.proposed.task["parameters"]["home_available"] = False
+    # The Eq. 13 check keeps no composition graph whose bindings a later caller could change.
+    assert not hasattr(case.admission, "components")
     result = case.admission.commit_prepared(case.task, verdict)
     assert result["status"] == "allowed", result
     assert case.admission.grants[case.task["task_id"]].task == case.task

@@ -475,6 +475,46 @@ def test_worker_commands_remain_responsive_while_a_completion_is_observed(machin
     assert job['simulation_paused_sec'] >= 1.
 
 
+def test_a_completion_observed_after_its_job_ended_reports_the_finished_part(machine, tmp_path):
+    """A late complete_job observer (the 2026-10-23 nominal run) still reports its clearance and validates."""
+    from cais_spade_llm.recovery_framework.workflow_execution import _validate_machine_completion
+    from cais_spade_llm.recovery_framework.workflow_gazebo import WorkflowPrimitiveRunner
+    scene = json.loads(SCENE_PATH.read_text())
+    clock = [100.]
+    position = SimpleNamespace(**dict(zip(('x', 'y', 'z'), machine['workholding_pose'][:3])))
+    state = SimpleNamespace(pose=SimpleNamespace(position=position))
+
+    def wait(duration, observe):
+        begin = clock[0]
+        clock[0] += duration
+        observe(duration)
+        return begin, clock[0]
+
+    def runner(event_name, task_id, jobs=None):
+        worker = WorkflowPrimitiveRunner({'scene': scene, 'geometry': {'RGOCG4-50_Round_4mm': {'model_name': 'part'}},
+            '_control_path': str(tmp_path / 'control.json'), '_jobs_path': str(tmp_path / 'jobs.json'),
+            'task': {'task_id': task_id, 'run_id': 'run', 'resource_id': 'M2', 'event_name': event_name,
+                     'parameters': {'part_name': 'RGOCG4-50_Round_4mm', 'process': 'trim', 'result': 'circle'}}},
+            entity=lambda _: state, set_pose=lambda *_: pytest.fail('job control dispatched motion'),
+            robot_clearance=lambda *_: {'ur5e-2': 1.}, current_clock=lambda: clock[0], wait_simulation=wait,
+            machine_jobs=jobs)
+        worker._kmr_clearance = lambda: {'link': 1.}
+        return worker
+    starter = runner('start_job', 'task')
+    starter.execute()
+    # The job ends before its observer is dispatched.
+    clock[0] += machine['simulation_process']['processing_time_sec'] + 1
+    starter.tick_machine()
+    assert starter.machine_jobs.record['jobs']['task']['job_state'] == 'completed'
+    task = {'task_id': 'observe', 'resource_id': 'M2', 'event_name': 'complete_job',
+            'parameters': {'part_name': 'RGOCG4-50_Round_4mm'}}
+    observations = runner('complete_job', 'observe', starter.machine_jobs).execute()
+    assert observations['KMR_arm_clearance_m'] == {'link': 1.}
+    evidence = {'status': 'completed', 'resource_id': 'M2', 'event_name': 'complete_job', 'task_id': 'observe',
+                'observations': observations, 'timing': {'simulation_sec': 0.0}}
+    assert _validate_machine_completion(task, evidence)
+
+
 def test_active_processing_cannot_silently_freeze_during_another_event(machine):
     from cais_spade_llm.resources.machine.machine_jobs import missing_processing_projection
     owner = MachineJobs(machine, 'run')

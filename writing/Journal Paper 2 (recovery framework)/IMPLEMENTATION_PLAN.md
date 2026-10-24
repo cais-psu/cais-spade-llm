@@ -553,6 +553,30 @@ failures); `poetry check` (deprecation warnings only); `compileall`; `ui_main --
   rules do not name running states as state APs. (The user chose finish-only, 2026-10-23. Stepping on starts too, in all four CCA parts together, is a possible later stage.)
 - State the outcome-level recovery event convention (B-D5).
 
+## CCA check scope — October 24, 2026 — decided by the user
+
+- **Nominal admission is Eq. 13 (done, uncommitted until the tests finish).**
+  `environment_admission.specification_check` checks a start and its own projected finish against every
+  specification monitor (an accepting state stays reachable) and still blocks a start that needs a
+  reservation held by running work. The plant-wide nonblocking search (`local_composition.analyze`) is no
+  longer used for nominal starts: it is not in the paper and timed out on the first full-order start
+  even with no rules (2 s / 20,000 states). With no rules the CCA now acts like a bypass. Recovery admission
+  (Section 5.3 local composition) is unchanged.
+- **Both checks must eventually work for both modes** (user, 2026-10-24: "i dont need to write those on
+  paper but i should still have it working"):
+  - recovery: symbolic Eq. 13 on outline events, physical Section 5.3 on recovery motions (paper core);
+  - nominal: symbolic Eq. 13 (done); **physical nominal check, later stage, not in the paper.** Each
+    resource implements `prepare_nominal_safety_program` (its saved nominal program planned into motion
+    evidence) and `observe_prepared_nominal_completion`, so `RecoveryCompositionAdmission.check_nominal`
+    can admit nominal starts against the predefined (geometric) specs. Today no resource implements them,
+    so a run with the seven predefined specs holds every nominal start. This stage also gives the
+    measurement of how much the seven specs delay production.
+- **Order:** commit A (late `complete_job` observer) and B (Eq. 13), one nominal order with no rules,
+  recovery validation (RA, handoff check, CCA symbolic and physical) on the new captures, then the physical
+  nominal check.
+- Captures run with the CCA bypassed and record no monitor history; recovery validation replays each
+  captured trace through the seven monitors offline to get the monitor states at $s_F$.
+
 ## RA feasibility validation — October 23, 2026 — plan approved by the user, not started
 
 **Goal.** Rebuild RA validation as the paper defines it, applied to each event the LLM proposes:

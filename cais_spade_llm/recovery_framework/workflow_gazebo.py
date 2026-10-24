@@ -298,6 +298,10 @@ class WorkflowPrimitiveRunner:
             job = self.machine_jobs.record["jobs"][job_id]
             if job["job_state"] == "completed":
                 self.part_name = job["part_name"]
+                if "kmr_distances" not in self.state:
+                    # The job ended before this observer started, so no tick observed it; the finished
+                    # part is still in the workholding until its pickup.
+                    self._job_observation(job["part_name"])
                 self.state.update(process_duration=job["processing_active_sec"],
                     started_sim=job["simulation_started_sec"], completed_sim=job["simulation_completed_sec"])
                 self.confirm_process_observation()

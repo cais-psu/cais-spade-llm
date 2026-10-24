@@ -1,7 +1,9 @@
 """Atomic CCA admission for recovery environmental execution.
 
 Only validated ProductAgent acknowledgement records advance the live monitors.
-Searches use detached copies; permission is committed under the context lock.
+A start is admitted as Eq. 13 defines safety validation: its labels and its own
+projected finish keep an accepting state reachable in every specification
+monitor. Checks use detached copies; permission is committed under the context lock.
 """
 
 from __future__ import annotations
@@ -9,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import Any
 
 from cais_spade_llm.agents.central_controller.local_composition import (
@@ -18,10 +19,7 @@ from cais_spade_llm.agents.central_controller.local_composition import (
     AnalysisLimit,
     Budget,
     IncompleteModel,
-    Node,
     Scope,
-    analyze,
-    state_key,
 )
 from cais_spade_llm.product.environment import fingerprint
 from cais_spade_llm.recovery_framework.environment_composition import (
@@ -34,13 +32,61 @@ from cais_spade_llm.recovery_framework.environment_composition import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class CachedComposition:
-    """A complete graph, its objective and exact nominal model identity."""
+def specification_check(plant: EnvironmentPlant, checker, monitors: dict[str, str], candidate: Action,
+                        running: tuple[Action, ...], budget: Budget) -> Analysis:
+    """Check one start as Eq. 13 defines safety validation.
 
-    plant: EnvironmentPlant
-    analysis: Analysis
-    model_identity: str
+    The start extends the trace with its labels and projected state, and so does its own finish,
+    which cannot be disabled once the activity starts. Both steps must keep an accepting state
+    reachable in every specification monitor. A start that needs a reservation held by running
+    work is held. There is no search over the plant's future: Eq. 13 checks the monitors, not that
+    every resource can still finish, so other running activities' later finishes are checked when
+    they are observed.
+
+    Args:
+        plant: Detached nominal plant at the checked revision.
+        checker: Detached specification monitors.
+        monitors: Each rule's current monitor state.
+        candidate: The start to check.
+        running: Granted activities still running.
+        budget: Time limit for the check.
+
+    Returns:
+        An allowed or held analysis with its rule checks as evidence.
+    """
+    rules = sorted(monitors)
+    scope = Scope(rules=set(rules), claims=set(candidate.claims), tasks={action.key for action in running})
+
+    def result(status: str, reason: str, **fields) -> Analysis:
+        return Analysis(status, reason, scope, elapsed=budget.clock() - budget.started, **fields)
+
+    conflicts = sorted(candidate.claims & frozenset(claim for action in running for claim in action.claims))
+    if conflicts:
+        scope.reasons.append({"kind": "running_reservation", "reservations": conflicts})
+        return result("held", "running_reservation_conflict")
+    try:
+        after = plant.project(plant.initial, candidate)
+    except ValueError as exc:
+        return result("held", "start_not_enabled: " + str(exc))
+    running_labels = frozenset(label for action in running for label in action.labels)
+    states = [monitors[rule] for rule in rules]
+    steps = {
+        "start": running_labels | plant.labels(plant.initial) | candidate.labels | plant.labels(after),
+        "finish": running_labels | plant.labels(after) | candidate.labels,
+    }
+    for event, sigma in steps.items():
+        budget.check()
+        checks = [checker.transition_evidence(rule, state, sigma) for rule, state in zip(rules, states, strict=True)]
+        incomplete = [row for row in checks if row["reason"] in {"dfa_missing_transition", "dfa_ambiguous_transition"}]
+        if incomplete:
+            raise IncompleteModel(incomplete[0]["reason"] + ": " + incomplete[0]["rule_id"])
+        scope.reasons.append({"kind": event + "_specification_checks", "rules": len(checks)})
+        rejected = [row for row in checks if row["status"] != "passed"]
+        if rejected:
+            scope.reasons.append({"kind": "specification_violation", "event": event, "transitions": rejected})
+            return result("held", "specification_violation",
+                          witness=[{"action": candidate.key, "event": event, "rule_checks": rejected}])
+    return result("allowed", "")
 
 
 class EnvironmentAdmission:
@@ -54,7 +100,6 @@ class EnvironmentAdmission:
         self.grants: dict[str, Any] = {}
         self.goals: dict[str, dict] = {}
         self.contexts: dict[str, dict] = {}
-        self.components: list[CachedComposition] = []
         self.epoch = 0
         # ack_cursor and acknowledgement_history count completions, the monitor ticks; record_cursor
         # reads every committed record, and starts and faults are kept in activity_history.
@@ -73,7 +118,6 @@ class EnvironmentAdmission:
     def invalidate(self, reason: str) -> None:
         """Discard affected proofs after a run failure without resetting history."""
         with self.context.admission_lock:
-            self.components.clear()
             self._prepared_admissions.clear()
             self.invalid_reason = reason
             self.epoch += 1
@@ -122,7 +166,6 @@ class EnvironmentAdmission:
                                for event in model.get("events", []))
                 if action is None and not observed:
                     self.invalid_reason = "acknowledgement_without_admission"
-                    self.components.clear()
                 labels = action.labels if action else frozenset(self.monitor._map_task_to_aps(
                     self.runtime.jids[task["resource_id"]], task["event_name"],
                     {**task["parameters"], "task_id": task["task_id"]}))
@@ -140,7 +183,6 @@ class EnvironmentAdmission:
                     if evidence["status"] != "passed":
                         self.monitor.history_error = evidence
                         self.invalid_reason = "unexpected_completion"
-                        self.components.clear()
                     next_states[rule] = evidence["to"]
                 self.monitor.current_states = next_states
                 self.monitor.running_aps = self._running_labels()
@@ -154,26 +196,6 @@ class EnvironmentAdmission:
                 })
                 self.epoch += 1
                 self._prepared_admissions.clear()
-            # Retire a finished operation only once its scoped release condition holds.
-            keep = []
-            for component in self.components:
-                plant, analysis = component.plant, component.analysis
-                state = {"resources": self.context.snapshot(),
-                         "products": self.context.part_tracker, "contexts": self.contexts}
-                relevant = [action for action in self.grants.values()
-                            if self._interacts(action, analysis.scope)]
-                if not relevant and plant.complete(state, analysis.scope):
-                    for part in analysis.scope.products:
-                        self.goals.pop(part, None)
-                else:
-                    keep.append(component)
-            self.components = keep
-
-    @staticmethod
-    def _interacts(action, scope) -> bool:
-        part = action.task["parameters"].get("part_name") or action.task.get("part_name")
-        return part in scope.products or bool(action.claims & scope.claims) or bool(
-            action.claims & {f"resource:{rid}" for rid in scope.resources})
 
     def _revision(self) -> dict:
         return {
@@ -278,16 +300,13 @@ class EnvironmentAdmission:
             self._prepared_admissions.clear()
             return self._result(task_id, result)
 
-    async def check(self, task: dict, *, commit: bool, full: bool = False,
-                    budget: Budget | None = None) -> dict:
-        """Analyze outside the lock, then compare revision and atomically grant.
+    async def check(self, task: dict, *, commit: bool, budget: Budget | None = None) -> dict:
+        """Check outside the lock, then compare revision and atomically grant.
 
         Args:
             task: Exact prepared task, including run and task identity.
             commit: Resource permission commits a grant; plan checks only warm caches.
-            full: Use the reference selection for controlled small-model experiments.
-            budget: Explicit search budget, otherwise the run's configured budget
-                or the existing defaults.
+            budget: Explicit time limit, otherwise the run's configured budget or the default.
 
         Returns:
             Structured allowed, held or inconclusive evidence.
@@ -317,92 +336,25 @@ class EnvironmentAdmission:
             goals = deepcopy(self.goals)
             goals.update(deepcopy(getattr(self.runtime, "operation_goals", {})))
             contexts = deepcopy(self.contexts)
-            components = list(self.components)
 
-        def search():
+        def check_start():
             plant = EnvironmentPlant(snapshot, checker, self.runtime.jids, goals,
-                                     [action.task for action in running] +
-                                     [component.plant.proposed.task for component in components])
+                                     [action.task for action in running])
             plant.initial["contexts"] = contexts
             candidate = plant.action(task)
-            # Force the proposal's exact task identity into generated event bindings.
-            plant.proposed = candidate
-            model_identity = fingerprint([
-                snapshot.models, {rid: sorted(actor.executors)
-                                  for rid, actor in snapshot.resources.items()},
-                checker.safety_rules, getattr(checker, "dfa_dots", checker.dfas),
-                snapshot.requirements, snapshot.geometry, snapshot.permitted_resources,
-                getattr(plant, "_has_state_context", True),
-            ])
-            for component in components:
-                if full or component.model_identity != model_identity:
-                    continue
-                old = component.analysis
-                # Re-select so a new operation cannot borrow a proof with fewer obligations.
-                scope = plant.select(candidate, running, checker, budget, full=False)
-                if (scope.resources != old.scope.resources or scope.products != old.scope.products
-                        or scope.rules != old.scope.rules or scope.goals != old.scope.goals
-                        or scope.claims != old.scope.claims):
-                    continue
-                relevant = tuple(action for action in running if self._interacts(action, scope))
-                node = Node(plant.initial, relevant, tuple(monitors[r] for r in sorted(scope.rules)))
-                root = state_key(plant, scope, node)
-                if root in old.graph and any(edge.kind == "start" and edge.action == candidate.key
-                                            for edge in old.graph[root]):
-                    # A graph edge is reusable only with identical AP and claim bindings.
-                    target = next(edge.target for edge in old.graph[root]
-                                  if edge.kind == "start" and edge.action == candidate.key)
-                    successor = old.nodes.get(target)
-                    previous = next((item for item in successor.running
-                                     if item.key == candidate.key), None) if successor else None
-                    if previous is None or (previous.labels, previous.claims) != (
-                            candidate.labels, candidate.claims):
-                        continue
-                    result = Analysis(old.decision(root, candidate), "", scope, root,
-                                      old.graph, old.nodes, old.winning,
-                                      budget.clock() - budget.started)
-                    result.reason = "" if result.status == "allowed" else "no_joint_completion"
-                    budget.check()
-                    return plant, candidate, result, model_identity, True
-            result = analyze(plant, checker, monitors, candidate, running,
-                             budget=budget, full=full)
-            if result.status == "held" and plant.missing_capabilities:
-                # A directly observed DFA violation remains proven even when
-                # an unrelated continuation has unavailable behavior.
-                try:
-                    projected = plant.project(plant.initial, candidate)
-                except ValueError:
-                    violations = []
-                else:
-                    sigma = (plant.labels(plant.initial) | plant.labels(projected)
-                             | candidate.labels | frozenset(
-                                 label for action in running for label in action.labels))
-                    violations = [checker.transition_evidence(rule, monitors[rule], sigma)
-                                  for rule in sorted(result.scope.rules)]
-                    violations = [row for row in violations
-                                  if row["reason"] == "accepting_state_unreachable"]
-                if not violations:
-                    result.status = "inconclusive"
-                    result.reason = "missing_required_capability"
-                else:
-                    result.scope.reasons.append({"kind": "specification_violation",
-                                                 "transitions": violations})
-                result.scope.reasons.append({"kind": "unavailable_behavior",
-                                             "capabilities": sorted(plant.missing_capabilities)})
-            return plant, candidate, result, model_identity, False
+            return candidate, specification_check(plant, checker, monitors, candidate, running, budget)
 
         try:
-            plant, candidate, analysis, identity, cache_hit = await asyncio.to_thread(search)
+            candidate, analysis = await asyncio.to_thread(check_start)
         except (IncompleteModel, KeyError, StopIteration) as exc:
             with self.context.admission_lock:
                 return self._inconclusive(task_id, "missing_model_or_binding: " + str(exc), revision)
-        # A cache-selection deadline is subject to the same fail-closed limit as search.
         except AnalysisLimit as exc:
             with self.context.admission_lock:
                 return self._inconclusive(task_id, str(exc), revision)
         with self.context.admission_lock:
             self.synchronize()
-            result = analysis.evidence(revision, cache_hit=cache_hit)
+            result = analysis.evidence(revision)
             result["analysis_time_sec"] = budget.clock() - budget.started
             if result["analysis_time_sec"] >= budget.seconds:
                 result.update(status="inconclusive", reason="time_limit")
@@ -413,17 +365,9 @@ class EnvironmentAdmission:
                 result.update(status="inconclusive", reason="stale_snapshot")
                 return self._result(task_id, result)
             if analysis.status == "allowed":
-                # Publish only successful replacements, preserving other components.
-                scope = analysis.scope
-                self.components = [component for component in self.components
-                                   if not (scope.resources & component.analysis.scope.resources
-                                           or scope.products & component.analysis.scope.products
-                                           or scope.rules & component.analysis.scope.rules
-                                           or scope.claims & component.analysis.scope.claims)]
-                self.components.append(CachedComposition(plant, analysis, identity))
                 self._prepared_admissions[task_id] = {
                     "task": deepcopy(task), "candidate": deepcopy(candidate),
-                    "goals": deepcopy(scope.goals), "verdict": deepcopy(result),
+                    "goals": deepcopy(analysis.scope.goals), "verdict": deepcopy(result),
                     "fingerprint": fingerprint(result),
                 }
                 if commit:

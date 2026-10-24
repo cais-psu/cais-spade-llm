@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from copy import deepcopy
-from threading import RLock
-from types import SimpleNamespace
 
 import pytest
 
@@ -264,120 +261,36 @@ def test_terminal_empty_event_changes_only_analysis_copy():
     assert checker.current_states == {"SPEC": "0"}
     assert not checker.running_aps
 
-def test_arrivals_extend_and_merge_only_after_success(monkeypatch):
-    """Independent operation A/B proofs survive a rejected connecting arrival."""
-    from copy import copy
-    from cais_spade_llm.recovery_framework import environment_admission as module
+def _specification_check(plant, checker, name, running=()):
+    from cais_spade_llm.recovery_framework.environment_admission import specification_check
 
-    resources = {name: {"resource_state": "idle", "progress": 0} for name in ("A", "B", "C")}
-    products = {name: {"progress": 0} for name in resources}
-    context = SimpleNamespace(
-        admission_lock=RLock(), run_id="arrivals", revision=0, unavailable_resources=set(),
-        models={name: {"resource_id": name} for name in resources},
-        resources={name: SimpleNamespace(executors={"start": None}) for name in resources},
-        part_tracker=products, requirements={}, geometry={}, permitted_resources=list(resources),
-        pending_tasks={}, acknowledgements={}, transitions=[], negotiations=[], reservations={})
-    context.snapshot = lambda: deepcopy(resources)
-    context.revisions = lambda: {name: {"revision": context.revision} for name in resources}
-    context.calculation_snapshot = lambda: copy(context)
-    context.pending_for = lambda key: deepcopy(context.pending_tasks.get(key))
-    context.relevant_revisions_match = lambda task: True
-    context._task_participants = lambda task: [task["parameters"]["part_name"]]
-    footprints = {"A": {"A"}, "B": {"B"}, "C": {"A", "B"}}
+    return specification_check(plant, checker, dict(checker.current_states), plant.action(name),
+                               tuple(plant.action(item) for item in running), Budget(seconds=5))
 
-    class ArrivalPlant:
-        def __init__(self, snapshot, checker, jids, goals, admitted):
-            self.initial = {"resources": snapshot.snapshot(), "products": deepcopy(snapshot.part_tracker),
-                            "contexts": {}}
-            self.admitted = admitted
-            self.missing_capabilities = set()
 
-        def action(self, task, state=None):
-            name = task["parameters"]["part_name"]
-            return Action(task["event_name"] + ":" + name, deepcopy(task),
-                          frozenset("resource:" + rid for rid in footprints[name]), frozenset())
+def test_nominal_admission_holds_a_start_whose_finish_breaks_a_specification():
+    plant = assembly_plant()
+    plant.initial["assembly_board-v1"] = "KET4_Square_4mm"
+    checker = monitor(PRECEDENCE)
+    # KET4's assembly would complete before gear_small's (ap2 before ap1): no accepting state stays reachable.
+    held = _specification_check(plant, checker, "KET4_Square_4mm:assemble")
+    assert (held.status, held.reason) == ("held", "specification_violation")
+    assert held.witness[0]["rule_checks"][0]["reason"] == "accepting_state_unreachable"
+    plant.initial["assembly_board-v1"] = "gear_small"
+    assert _specification_check(plant, checker, "gear_small:assemble").status == "allowed"
 
-        def select(self, candidate, running, checker, budget, *, full):
-            included = {candidate.task["parameters"]["part_name"]}
-            known = {task["parameters"]["part_name"] for task in self.admitted}
-            changed = True
-            while changed:
-                old = set(included)
-                footprint = set().union(*(footprints[name] for name in included))
-                included.update(name for name in known if footprints[name] & footprint)
-                changed = old != included
-            scope = Scope(resources=footprint, products=included,
-                          claims={"resource:" + rid for rid in footprint})
-            scope.tasks = {stage + ":" + name for name in included for stage in ("start", "finish")}
-            scope.goals = [{"part_name": name, "operation": {"progress": 2}} for name in sorted(included)]
-            return scope
 
-        def actions(self, state, scope, budget):
-            for name in sorted(scope.products):
-                for stage in ("start", "finish"):
-                    yield self.action(task(name, stage))
+def test_nominal_admission_holds_a_start_that_needs_a_running_reservation():
+    plant = assembly_plant()
+    checker = monitor()
+    held = _specification_check(plant, checker, "gear_small:enter", running=("KET4_Square_4mm:enter",))
+    assert (held.status, held.reason) == ("held", "running_reservation_conflict")
+    assert held.scope.reasons[0]["reservations"] == ["entry"]
 
-        def project(self, state, action):
-            name = action.task["parameters"]["part_name"]
-            progress = 0 if action.task["event_name"] == "start" else 1
-            if state["products"][name]["progress"] != progress:
-                raise ValueError("guard")
-            after = deepcopy(state)
-            after["products"][name]["progress"] = progress + 1
-            after["resources"][name]["progress"] = progress + 1
-            return after
 
-        def key(self, state, scope):
-            return json.dumps([{name: state["products"][name] for name in sorted(scope.products)}],
-                              sort_keys=True)
-
-        def labels(self, state):
-            return frozenset()
-
-        def complete(self, state, scope):
-            return all(state["products"][name]["progress"] == 2 for name in scope.products)
-
-    def task(name, stage="start"):
-        return {"task_id": stage + name, "run_id": "arrivals", "resource_id": name,
-                "event_id": stage, "event_name": stage, "parameters": {"part_name": name}}
-
-    monkeypatch.setattr(module, "EnvironmentPlant", ArrivalPlant)
-    runtime = SimpleNamespace(context=context, jids={name: name + "@local" for name in resources},
-                              stopped=False, operation_goals={})
-    admission = module.EnvironmentAdmission(runtime, monitor())
-
-    async def check(name, *, stage="start", commit=True, budget=None):
-        candidate = task(name, stage)
-        context.pending_tasks[candidate["task_id"]] = candidate
-        return await admission.check(candidate, commit=commit, budget=budget)
-
-    def acknowledge(name):
-        candidate = task(name)
-        before, product_before = deepcopy(resources), deepcopy(products)
-        resources[name]["progress"] = products[name]["progress"] = 1
-        context.transitions.append({"acknowledgement": {**candidate, "status": "completed"},
-                                    "before": before, "after": deepcopy(resources),
-                                    "product_before": product_before, "product_after": deepcopy(products)})
-        context.revision += 1
-        context.pending_tasks.pop(candidate["task_id"])
-        admission.synchronize()
-
-    async def scenario():
-        assert (await check("A"))["status"] == "allowed"
-        assert (await check("B"))["status"] == "allowed"
-        assert len(admission.components) == 2
-        originals = list(admission.components)
-        rejected = await check("C", budget=Budget(max_states=1))
-        assert rejected["status"] == "inconclusive"
-        assert admission.components == originals
-        acknowledge("A")
-        acknowledge("B")
-        extension = await check("A", stage="finish", commit=False)
-        assert extension["status"] == "allowed" and extension["cache_hit"]
-        assert len(admission.components) == 2
-        merged = await check("C")
-        assert merged["status"] == "allowed"
-        assert merged["included_products"] == ["A", "B", "C"]
-        assert len(admission.components) == 1
-
-    asyncio.run(scenario())
+def test_nominal_admission_without_specifications_searches_no_plant_completion():
+    plant = assembly_plant()
+    plant.goal = lambda _state: False
+    # Eq. 13 checks the monitors only; with none, an enabled start is allowed even if the plant cannot finish.
+    allowed = _specification_check(plant, monitor(), "gear_small:enter")
+    assert (allowed.status, allowed.nodes) == ("allowed", {})

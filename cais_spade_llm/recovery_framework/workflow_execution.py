@@ -776,8 +776,9 @@ def _validate_machine_completion(task: dict, evidence: dict) -> bool:
         _identity_matches(task, evidence)
         and observations.get("correct_part_present") is True
         and observations.get("robot_access_clear") is True
-        and float(evidence.get("timing", {}).get("simulation_sec", -1.0)) + 1e-6
-        >= float(observations.get("processing_time_sec", 0.0))
+        # A job record proves its own processing time; its observer may start after the job ended.
+        and (record is not None or float(evidence.get("timing", {}).get("simulation_sec", -1.0)) + 1e-6
+             >= float(observations.get("processing_time_sec", 0.0)))
     )
 
 
