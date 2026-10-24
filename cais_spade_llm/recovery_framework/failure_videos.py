@@ -1037,7 +1037,11 @@ async def record_one(number: int, directory: Path, output: Path, timeout: float)
     setup = scenario_setup(number, str(safety))
     save_setup(setup)
     _write_json(directory / "setup.json", setup)
+    from cais_spade_llm.recovery_framework.evaluation_capture import scope_bridge_cleanup
+
     bridge = SystemBridge()
+    # The global cleanup killed the recorder, whose command line names recovery_gazebo_runs.
+    scope_bridge_cleanup(bridge, directory)
     bridge.execution_mode, bridge.robot_env = "simulation", "gazebo"
     for field in ("selected_product", "selected_product_order_file", "selected_safety_file",
                   "runtime_recovery_mode", "runtime_recovery_validation_policy",

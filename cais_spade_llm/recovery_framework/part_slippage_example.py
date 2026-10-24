@@ -32,10 +32,10 @@ logger = logging.getLogger(__name__)
 # Schema-2 captures of the corrected resource models (2026-10-22/23); the schema-1 originals stay
 # selectable as regression fixtures.
 _DEFAULT_OBSERVATIONS = {
-    "Part slippage": "capture_82804cb13221467a8b6be4e0eb3e3ac4",
-    "Machining breakdown during part processing": "capture_142d8c7d69d74e39aade558dcbc4b15e",
-    "Conveyor breakdown": "capture_6d907d9ba40a4bb099cba8804166caf0",
-    "ur5e-1 breakdown": "capture_41e711f0ce414a1fa0b1b633ec387656",
+    "Part slippage": "capture_989375599c884039b591e46bf3c099ce",
+    "Machining breakdown during part processing": "capture_695ea22349284bf99563fed688c54c11",
+    "Conveyor breakdown": "capture_225e2748e32a43259960e6067fd2286d",
+    "ur5e-1 breakdown": "capture_e3c8151b96e6473a9bdba7d83f339236",
 }
 
 

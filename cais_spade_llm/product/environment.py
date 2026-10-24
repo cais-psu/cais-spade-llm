@@ -747,7 +747,7 @@ class EnvironmentProductContext:
         if pending is None:
             return False
         values = self.snapshot()
-        self.transitions.append({
+        record = {
             "kind": "fault",
             "acknowledgement": {**deepcopy(pending), "status": report.get("status"),
                                 "reason": report.get("reason", "")},
@@ -755,7 +755,10 @@ class EnvironmentProductContext:
             "after": deepcopy(values),
             "product_before": deepcopy(self.part_tracker),
             "product_after": deepcopy(self.part_tracker),
-        })
+        }
+        if report.get("execution_evidence") is not None:
+            record["observations"] = deepcopy(report["execution_evidence"])
+        self.transitions.append(record)
         if self.acknowledgement_observer is not None:
             self.acknowledgement_observer()
         return True

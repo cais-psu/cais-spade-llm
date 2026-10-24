@@ -223,6 +223,11 @@ OFFICIAL = {
     "capture_142d8c7d69d74e39aade558dcbc4b15e": (["A2", "B2"], ["M1"], "environment_24", "complete_job"),
     "capture_6d907d9ba40a4bb099cba8804166caf0": (["B2"], ["Conveyor"], "2c7098683d184c6aad1da6d6b2a24dbd_pending_0", "place_approach"),
     "capture_41e711f0ce414a1fa0b1b633ec387656": (["B2"], ["ur5e-1"], "13daa63911274a5a92631b8793a9bbed_pending_1", "pick_grasp"),
+    # Activity model B (2026-10-23): the same faults, captured with start and finish records.
+    "capture_989375599c884039b591e46bf3c099ce": (["A1", "B2", "C1"], ["ur5e-4"], "environment_9", "place_approach"),
+    "capture_695ea22349284bf99563fed688c54c11": (["A2", "B2"], ["M1"], "environment_24", "complete_job"),
+    "capture_225e2748e32a43259960e6067fd2286d": (["B2"], ["Conveyor"], "cff7bd9081d348968f4062b4c5adfb2c_pending_0", "place_approach"),
+    "capture_e3c8151b96e6473a9bdba7d83f339236": (["B2"], ["ur5e-1"], "bc3d1c3826854d39a7ec0714723850d7_pending_1", "pick_grasp"),
 }
 
 

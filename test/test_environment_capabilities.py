@@ -147,8 +147,10 @@ def test_a_completion_reported_without_a_start_commits_both():
 def test_a_reported_failure_leaves_a_started_activity_running():
     context, pending = _prepared_move_home()
     context.start(pending['task_id'])
-    assert context.record_fault(pending['task_id'], {'status': 'blocked', 'reason': 'gripper fault'})
+    assert context.record_fault(pending['task_id'], {'status': 'blocked', 'reason': 'gripper fault',
+                                                     'execution_evidence': {'contacts': [['a', 'b']]}})
     fault = context.transitions[-1]
+    assert fault['observations'] == {'contacts': [['a', 'b']]}
     assert [row['kind'] for row in context.transitions] == ['start', 'fault']
     assert fault['before'] == fault['after'] and fault['acknowledgement']['reason'] == 'gripper fault'
     assert context.resources['ur5e-1'].valuation['resource_state'] == 'moving_home'

@@ -609,20 +609,32 @@ def install_capture_guards() -> list[str]:
     return calls
 
 
-def configure_bridge(bridge, directory: Path, domain: int, port: int, scenario: str) -> None:
-    """Scope cleanup, process ownership, logs, and bundle state to this harness."""
+def scope_bridge_cleanup(bridge, directory: Path) -> None:
+    """Own only this harness's launch group instead of killing every matching process.
+
+    The bridge's normal startup and stop kill any process whose command mentions Gazebo and
+    delete shared DDS memory, which also kills a recorder or another chat's simulation.
+
+    Args:
+        bridge: The harness's own SystemBridge.
+        directory: Output folder that holds the owned-process registry.
+    """
     from cais_spade_llm.ui.process_registry import UIProcessRegistry
 
     bridge._ui_process_registry = UIProcessRegistry(directory / 'owned_processes.json')
-    bridge._sim_readiness_diagnostic_path = directory / 'readiness_probes.jsonl'
-    # The normal methods kill unrelated groups and delete shared DDS memory.
-    # Its tracked launch stop already sends SIGINT/SIGKILL to the owned group.
+    # The tracked launch stop already sends SIGINT/SIGKILL to the owned group.
     def skip_global_cleanup(*args, **kwargs):
         logger.info('Skipped global cleanup; only the experiment launch group is owned')
 
     for name in ('_kill_stale_gazebo_helpers', '_force_kill_gazebo_core',
                  '_force_kill_digital_twin_helpers', '_cleanup_shm_and_tmp'):
         setattr(bridge, name, skip_global_cleanup)
+
+
+def configure_bridge(bridge, directory: Path, domain: int, port: int, scenario: str) -> None:
+    """Scope cleanup, process ownership, logs, and bundle state to this harness."""
+    scope_bridge_cleanup(bridge, directory)
+    bridge._sim_readiness_diagnostic_path = directory / 'readiness_probes.jsonl'
     bridge._archive_monitors = lambda: {'history': 0, 'plan': 0, 'state': 0}
     bridge.ROS2_LAUNCH_CMDS = dict(bridge.ROS2_LAUNCH_CMDS)
     bridge.ROS2_LAUNCH_CMDS['gazebo_dual'] = (
