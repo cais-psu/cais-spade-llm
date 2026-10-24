@@ -105,7 +105,10 @@ def validate_failure(sample: dict, configuration: dict) -> dict:
         raise ValueError("Failure injection or visible marker is not confirmed for this run")
     if sample["diagnostic_cca_bypass"]:
         raise ValueError("Recording requires CCA enabled")
-    if configuration["resource_id"] not in sample["unavailable_resources"]:
+    # A device's own fault report states a failure without making the resource unavailable
+    # (the ur5e-1 and Part slippage failures since failure grounding).
+    if (configuration["resource_id"] not in sample["unavailable_resources"]
+            and not sample.get("fault_reports", {}).get(configuration["resource_id"])):
         raise ValueError("Failed resource is still available")
     before = evidence.get("resource_values_before", {})
     part = evidence.get("part_name")
@@ -761,6 +764,7 @@ async def _observe(bridge, negotiation_cursor: int = 0) -> dict:
                 "diagnostic_cca_bypass": runtime.diagnostic_cca_bypass,
                 "pending_tasks": deepcopy(list(runtime.context.pending_tasks.values())),
                 "unavailable_resources": sorted(runtime.context.unavailable_resources),
+                "fault_reports": deepcopy(runtime.context.fault_reports),
                 "negotiations": deepcopy(runtime.context.negotiations[negotiation_cursor:]),
                 "slippage_initialization": deepcopy(getattr(runtime, "slippage_initialization_evidence", None)),
                 "physical_motions": [

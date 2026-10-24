@@ -189,6 +189,28 @@ def test_failure_video_rejects_unconfirmed_or_unrelated_failure(change):
         failure_videos.validate_failure(sample, config)
 
 
+def test_failure_video_accepts_a_device_fault_report_for_an_available_resource():
+    """A ur5e-1 breakdown is reported by its gripper; the robot is not made unavailable."""
+    from cais_spade_llm.recovery_framework import failure_videos
+
+    config = {'scenario': 'ur5e-1 breakdown', 'resource_id': 'ur5e-1',
+              'checkpoint': 'after_M1_processing_before_pick', 'mode': 'once'}
+    evidence = {'run_id': 'run', 'checkpoint': config['checkpoint'], 'injection_status': 'completed',
+                'part_name': 'KET4_Square_4mm',
+                'resource_values_before': {'M1': {'resource_state': 'completed', 'part_name': 'KET4_Square_4mm'},
+                                           'ur5e-1': {'held_part': None}},
+                'part_tracker_before': {'KET4_Square_4mm': {'location': 'M1',
+                                                            'processCompleted': [{'process': 'trim'}]}}}
+    sample = {'run_id': 'run', 'diagnostic_cca_bypass': False, 'unavailable_resources': [],
+              'fault_reports': {'ur5e-1': {'reported_state': 'failed', 'source': 'gripper object detection'}},
+              'fault': {'status': 'triggered', 'run_id': 'run', 'scenario': config['scenario'],
+                        'visual': {'status': 'completed'}, 'evidence': evidence}}
+    assert failure_videos.validate_failure(sample, config)['validated']
+    sample['fault_reports'] = {}
+    with pytest.raises(ValueError, match='still available'):
+        failure_videos.validate_failure(sample, config)
+
+
 @pytest.mark.parametrize('fraction', [None, .4, .6, float('nan')])
 def test_machining_video_requires_observed_halfway_interruption(fraction):
     config = {'scenario': 'Machining breakdown during part processing', 'resource_id': 'M1',
