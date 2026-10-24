@@ -1515,6 +1515,7 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
     observations = None
     live = None
     grant = None
+    execution = None
     context.negotiations.append({
         "kind": "task_received", "task_id": task_id, "resource_id": actor.resource_id,
         "timestamp": time.time(),
@@ -1607,8 +1608,10 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
                 grant = agent._recovery_composition_grants.pop(task_id, None)
                 if not isinstance(grant, dict):
                     raise ValueError("Nominal task has no exact physical execution grant")
-        physical_binding = ({"recovery_composition_ref": deepcopy(grant["recovery_composition_ref"])}
-                            if grant is not None else {})
+        # A nominal grant runs the resource's native program; a recovery grant runs its prepared steps.
+        native = grant is None or grant.get("nominal_native") is True
+        physical_binding = ({} if native else
+                            {"recovery_composition_ref": deepcopy(grant["recovery_composition_ref"])})
         await ack("running")
         if not runtime.diagnostic_cca_bypass and not observed:
             await send_agent_message(
@@ -1632,12 +1635,15 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             "resource_id": actor.resource_id, "event_name": name,
             "part_name": part, "timestamp": time.time(),
         })
-        if live is not None:
-            operation = live.execute_nominal(task=deepcopy(task), grant=grant)
-        else:
+        if native:
             operation = actor.executors[name](deepcopy(task))
+        else:
+            operation = live.execute_nominal(task=deepcopy(task), grant=grant)
         execution = asyncio.create_task(operation)
         runtime.active_executions.add(execution)
+        if grant is not None and native:
+            gate = live.nominal_gate
+            execution.add_done_callback(lambda _: gate.retire(task_id))
         try:
             # A timeout is not a certified stop. Keep live motion owned and tracked.
             awaited = asyncio.shield(execution) if live is not None else execution
@@ -1683,7 +1689,10 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
     except (ValueError, KeyError, TypeError, RuntimeError, OSError, TimeoutError) as exc:
         if observations is not None:
             actor.completion_observations[task_id] = deepcopy(observations)
-        if live is not None and grant is not None:
+        if grant is not None and grant.get("nominal_native") is True and (execution is None or execution.done()):
+            # Without running motion the claim can end now; a running execution retires it when done.
+            live.nominal_gate.retire(task_id)
+        if live is not None and grant is not None and "recovery_composition_ref" in grant:
             await send_agent_message(behaviour, message(agent.cca_jid, "resource_event", {
                 "task_id": task_id, "resource_jid": str(agent.jid),
                 "run_id": context.run_id, "function_name": task["event_name"],

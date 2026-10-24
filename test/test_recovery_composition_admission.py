@@ -744,6 +744,25 @@ def _prepared_admission_case():
     return coordinator, owner, native, task, steps, stages
 
 
+async def _prepared_nominal_check(coordinator, task, *, commit=True):
+    """Drive the prepared-motion proof with a nominal-shaped registration, as recovery programs use it."""
+    owner = next(row for row in coordinator.runtime.resource_agents if row.agent_name == task["resource_id"])
+    steps = owner.prepare_nominal_safety_program(deepcopy(task))["primitive_steps"]
+    jid = coordinator.runtime.jids[task["resource_id"]]
+    registration = await coordinator.register({
+        "recovery_id": "nominal_" + task["task_id"], "recovery_safety_scope_id": "nominal_run",
+        "tasks": [{"task_id": task["task_id"], "outline_id": task["task_id"], "resource_id": task["resource_id"],
+                   "resource_jid": jid, "function_name": task["event_name"], "params": deepcopy(task["parameters"]),
+                   "nominal_task": deepcopy(task), "primitive_steps": steps}]},
+        product_jid=coordinator.runtime.product_jid)
+    if registration["status"] != "allowed":
+        return registration
+    return await coordinator.check({"task_id": task["task_id"], "resource_jid": jid, "function_name": task["event_name"],
+        "params": {**deepcopy(task["parameters"]),
+                   "recovery_composition_ref": registration["task_refs"][task["task_id"]]}},
+        sender=jid, commit=commit)
+
+
 def test_shared_coordinator_nominal_then_recovery_retains_history_and_empty_region_authorization(monkeypatch):
     from cais_spade_llm.agents.central_controller.recovery_composition_admission import (
         LiveSafetyRuntime,
@@ -757,20 +776,20 @@ def test_shared_coordinator_nominal_then_recovery_retains_history_and_empty_regi
         assert LiveSafetyRuntime is RecoveryCompositionAdmission
         assert coordinator.monitor is coordinator.cca.safety_monitor.physical_monitor
         assert coordinator.commands is coordinator.runtime.physical_commands
-        preview = await coordinator.check_nominal(task, coordinator.runtime.product_jid, commit=False)
+        preview = await _prepared_nominal_check(coordinator, task, commit=False)
         assert preview["status"] == "allowed" and preview["committed"] is False
         assert "recovery_composition_grant" not in preview and not coordinator.regions.claims
         assert all(not row.get("reservation_token") for row in coordinator.commands.commands.values())
         native.commit_prepared.assert_not_called()
         stages.clear()
-        result = await coordinator.check_nominal(task, coordinator.runtime.product_jid, commit=True)
+        result = await _prepared_nominal_check(coordinator, task)
         assert result["status"] == "allowed", result
         grant = result["recovery_composition_grant"]
         assert grant["nominal_task"] == task and grant["run_id"] == "run"
         assert result["region_reservation"]["claim"]["regions"] == []
         native.commit_prepared.assert_called_once_with(task, native.check.return_value)
         assert stages == ["capture", "prepare", "coverage", "physical", "capture", "authorize"]
-        repeat_preview = await coordinator.check_nominal(task, coordinator.runtime.product_jid, commit=False)
+        repeat_preview = await _prepared_nominal_check(coordinator, task, commit=False)
         assert "recovery_composition_grant" not in repeat_preview
         for command_id, command in coordinator.commands.commands.items():
             if command.get("reservation_token"):
@@ -814,7 +833,7 @@ def test_prepared_admission_failure_never_publishes_grant_and_retains_committed_
             native.commit_prepared.return_value = {"status": "inconclusive", "reason": "stale_snapshot"}
         else:
             native.commit_prepared.side_effect = RuntimeError("stale_snapshot")
-        result = await coordinator.check_nominal(task, coordinator.runtime.product_jid, commit=True)
+        result = await _prepared_nominal_check(coordinator, task)
         assert result["status"] == "inconclusive", result
         assert not coordinator.sessions["nominal_nominal"]["grants"]
         assert coordinator.monitor.revision == 0
@@ -1069,7 +1088,7 @@ def test_prepared_admission_requires_exact_winning_immediate_graph_start(monkeyp
             return proof
 
         coordinator._ground = ground
-        result = await coordinator.check_nominal(task, coordinator.runtime.product_jid, commit=True)
+        result = await _prepared_nominal_check(coordinator, task)
         assert result["status"] in ("inconclusive", "held"), result
         assert not coordinator.sessions["nominal_nominal"]["grants"]
         assert not coordinator.regions.claims
@@ -1187,7 +1206,7 @@ def test_prepared_admission_binds_fresh_start_to_model_and_controller(monkeypatc
 
         owner.prepare_recovery_safety_program = lambda *args: {"status": "prepared", "steps": [{
             "start": deepcopy(start), "continuous_motion": deepcopy(motion)}]}
-        result = await coordinator.check_nominal(task, coordinator.runtime.product_jid, commit=True)
+        result = await _prepared_nominal_check(coordinator, task)
         assert result["status"] == ("allowed" if allowed else "inconclusive"), result
         assert native.commit_prepared.call_count == int(allowed)
         assert owner.recovery_composition_evidence_provider.authorize_preparation.call_count == int(allowed)

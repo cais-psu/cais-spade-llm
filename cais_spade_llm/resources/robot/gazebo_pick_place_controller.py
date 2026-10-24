@@ -9980,10 +9980,9 @@ def prepare_ur5e_motion(controller, *, primitive: str, params: dict,
             raise ValueError("Parameters do not match the UR5e move_cartesian contract")
         if (controller.execution_mode != "simulation"
                 or not GazeboPickPlaceController._cartesian_motion_only(controller)
-                or controller.controller_config["cartesian_motion"].get("avoid_collisions") is False
                 or getattr(controller, "_simulation_mating_context", None)
                 or getattr(controller, "_robot_task_step", None)):
-            raise ValueError("Preparation requires complete Cartesian planning with collision checking and no unresolved task or mating context")
+            raise ValueError("Preparation requires complete Cartesian planning and no unresolved task or mating context")
         if (start["joint_names"] != list(controller.arm_joint_names)
                 or len(start["joint_positions"]) != len(controller.arm_joint_names) or start["frame"] != controller.frame_id):
             raise ValueError("Checkpoint joint identities or planning frame changed")
@@ -10003,9 +10002,12 @@ def prepare_ur5e_motion(controller, *, primitive: str, params: dict,
         if q != start["current_pose"][3:]:
             raise ValueError("Changing orientation requires an unsupported observation model")
         target = controller._make_pose(*xyz, controller._make_orientation(*q))
+        # Plan as execution plans: MoveIt collision checking follows the robot's configuration,
+        # while the CCA's physical check of the prepared trajectory does not depend on it.
         prepared = GazeboPickPlaceController._prepare_cartesian_motion(
             controller, target, label="recovery safety preparation", min_fraction=1.,
             allow_partial=False, time_scale=scale,
+            avoid_collisions=controller.controller_config["cartesian_motion"].get("avoid_collisions", True),
             start_joint_positions=start["joint_positions"], consume_prepared=False)
         if prepared is None:
             raise ValueError(controller._last_failure_message or "UR5e planning unavailable")

@@ -253,6 +253,14 @@ def test_plan_only_retains_exact_parameters_joints_timing_and_custody(controller
     assert request.avoid_collisions
 
 
+def test_plan_only_follows_the_robot_without_moveit_collision_checking(controller):
+    controller.controller_config["cartesian_motion"]["avoid_collisions"] = False
+    result = prepare_ur5e_motion(controller, primitive="move_cartesian", params={"x": 1.5, "y": 0., "z": 1.},
+                                 start=_start(controller), binding={})
+    assert result["status"] == "prepared", result
+    assert controller._cart_client.call_async.call_args.args[0].avoid_collisions is False
+
+
 def test_continuous_owner_contract_preserves_the_native_prepared_trajectory(controller):
     from test_continuous_motion import configuration
 

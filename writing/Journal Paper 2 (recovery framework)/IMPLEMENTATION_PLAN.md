@@ -649,11 +649,41 @@ waits at that primitive boundary (stopped, holding its part, inside its own clai
 with a timeout after which the task faults and becomes a failure for recovery (prevents two waiting robots
 from deadlocking). A task that has not started holds no claims and just waits.
 
+**Implemented and run in Gazebo, 2026-10-24.** `recovery_framework/nominal_physical_gate.py`
+(`NominalPhysicalGate`), wired through `RecoveryCompositionAdmission.check_nominal` (the symbolic Eq. 13 commit and
+the physical claim commit under one admission lock), the controller send guard, the KMR request guard, and native
+execution in `environment_runtime`. `prepare_ur5e_motion` plans with the robot's own collision setting. Two fixes
+came from Gazebo: (1) the monitor kept every state along committed words, so a stale "square not trimmed yet" state
+falsely held every start once RGOCG4's circle trim was recorded (`nominal_7spec_03` deadlocked at 9/11 parts); each
+decision now first steps the monitors with the observed scene and drops ruled-out states (no surviving state =
+observed violation, everything holds); (2) a `start_job` now applies the completion its uncontrollable
+`complete_job` records, and a pending `complete_job` counts as possibly done for other checks.
+
+**Seven-spec nominal run `nominal_physical_20261024/nominal_7spec_04`: PASSED** (11/11 parts, all final poses within
+tolerance, CCA `ack_cursor` 202, no invalid reason). Against `nominal_cca_05` (no rules, same scene):
+
+| measure | 7 specs, symbolic + physical | no rules |
+|---|---|---|
+| wall time / production | 34.7 / 33.5 min | 37.0 / 36.0 min |
+| CCA allow / block | 194 / 20 | 195 / 1 |
+| CCA decision mean / p95 | 0.58 / 1.13 s | 0.29 / 0.67 s |
+| start waiting summed over tasks | 1.9 min | 0.95 min |
+| gate start holds | 14 (M1 mutex 10: KMR vs ur5e-1; M2 mutex 4: ur5e-2) | – |
+| robot sends checked / held / waited | 144 / 0 / 0 | – |
+| prediction mean / send check mean (max) | 0.18 s / 1.67 s (6.65 s) | – |
+
+One run each, so the 2.4 min shorter total is within run-to-run variance, not a speedup; the specs cost about
+1 min of extra start waiting (spread over parallel work) and ~1.7 s per robot send. Comparison script:
+`nominal_physical_20261024/compare_runs.py`. Gate setup can miss the first start when a resource is not yet
+observable at launch (retried at the next start). Remaining: KMR has only the start envelope (no per-send check);
+send check time could drop with coarser sweeps; the prepared nominal path in `_check_prepared_motion`,
+`execute_nominal` and the adapter's `prepare`/`complete` hooks are no longer reachable from nominal starts.
+
 ## Nominal order run under B — October 24, 2026
 
 - Captures under B (recapture_v4_20261023, queue item 7): Conveyor `capture_225e2748…`, ur5e-1
   `capture_e3c8151b…`, Machining `capture_695ea223…` (KMR now `travelling`), Part slippage
-  `capture_98937559…` (ur5e-4 now `approaching_place`). **Superseded 2026-10-24** by the v5 captures below.
+  `capture_98937559…` (ur5e-4 now `approaching_place`). **Superseded and deleted 2026-10-24** (user: "delete outright"), with the failed v4 Conveyor attempt `capture_e680e4ca…`, an empty `capture_a099f918…`, the v2/v3/v4 harness folders and `capture_v2_preview`: 123 paths, 2.7 GiB. Kept: `recapture_v4_20261023/nominal_cca_05*` (nominal baseline), `recapture_v2_20261015/GAZEBO_QUEUE.md`, and the three v3 harness scene files the retained v3 captures name as `setup.scene_file`. All retained official, v3 and v5 captures still load and ground.
 - **Captures after the ur5e-3 route restore and UR collision checks off (recapture_v5_20261024, queue item 8,
   2026-10-24):** Conveyor `capture_3ad495d2bd7845269fa70f1a09963bc9`, Machining
   `capture_37e090a54d0242f4948ae80c95d3cd76` (M1 stops at 6.5 %), Part slippage

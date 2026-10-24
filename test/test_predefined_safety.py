@@ -419,7 +419,9 @@ def test_three_selectable_safety_inputs_and_saved_defaults() -> None:
         "safety_M1_mutex.txt",
         "safety_M2_mutex.txt",
         "safety_assembly_board-v1_KET4_Square_4mm_before_gear_small.txt",
-        "safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt"}
+        "safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt",
+        # All seven specifications together, for the nominal and recovery runs.
+        "safety_assembly_board-v1_plant.txt"}
     assert {path.name for path in _SAFETY_DIR.glob("*.txt")} == expected
     bridge = SystemBridge.__new__(SystemBridge)
     assert {Path(path).name for path in bridge.list_safety_requirement_files()} == expected

@@ -194,8 +194,10 @@ class RecoveryCompositionAdmission:
         self._mock_region_identity = None
         self._mock_region_revision = 0
         self.runtime = self.cca = self.preparation = None
+        self.nominal_gate = None
         self.regions = self.region_reservations
         self._registration_lock = asyncio.Lock()
+        self._gate_lock = asyncio.Lock()
         if any(value is not None for value in (runtime, cca, preparation)):
             self.configure_live(runtime=runtime, cca=cca, preparation=preparation)
 
@@ -1017,7 +1019,7 @@ class RecoveryCompositionAdmission:
                 provider.execution_observer = self._record_execution
                 owner.recovery_composition_evidence_provider = provider
                 if owner.agent_name == "KMR":
-                    owner.worker.physical_request_guard = provider.request_guard
+                    owner.worker.physical_request_guard = self._request_guard(owner, provider)
                 controller = getattr(owner, "_controller", None)
                 if controller is not None:
                     from cais_spade_llm.recovery_framework.nominal_safety_adapter import (
@@ -1025,9 +1027,31 @@ class RecoveryCompositionAdmission:
                     )
 
                     install_nominal_robot_adapter(owner, runtime.context.inputs["scene"])
-                    controller._physical_dispatch_guard = provider.dispatch_guard
+                    controller._physical_dispatch_guard = self._dispatch_guard(owner, provider)
                     controller._physical_dispatch_accepted = provider.dispatch_accepted
             owner.recovery_composition_start_guard = self.holds
+
+    def _dispatch_guard(self, owner, provider) -> Callable:
+        """Route a controller send to its recovery grant, or to the nominal send check."""
+        def guard(topic: str, trajectory):
+            if provider.dispatch_command is not None:
+                return provider.dispatch_guard(topic, trajectory)
+            if self.nominal_gate is None:
+                raise ValueError("Controller dispatch lacks its exact live physical grant")
+            self.nominal_gate.guard_send(owner, topic, trajectory)
+            return None
+        return guard
+
+    def _request_guard(self, owner, provider) -> Callable:
+        """Admit a KMR worker request under its recovery grant or its admitted nominal task."""
+        def guard(request: dict) -> None:
+            if request.get("mode") != "environment_task":
+                provider.request_guard(request)
+                return
+            task_id = (request.get("pending") or {}).get("task_id")
+            if self.nominal_gate is None or not self.nominal_gate.admitted(task_id, owner.agent_name):
+                raise ValueError("KMR request lacks its admitted nominal task")
+        return guard
 
 
     def _capture(self):
@@ -1588,41 +1612,53 @@ class RecoveryCompositionAdmission:
         work["plan_events"].add(kind)
 
 
+    async def _nominal_physical_gate(self):
+        """Create the run's nominal physical gate once, from the idle scene before its first start."""
+        from cais_spade_llm.recovery_framework.nominal_physical_gate import NominalPhysicalGate
+
+        async with self._gate_lock:
+            if self.nominal_gate is None:
+                self.nominal_gate = await asyncio.to_thread(
+                    NominalPhysicalGate, self.runtime, self.cca, self.preparation)
+        return self.nominal_gate
+
     async def check_nominal(self, task: dict, product_jid: str, *, commit: bool) -> dict:
-        """Use the same physical grant and native continuation for a nominal task."""
+        """Admit a nominal start on its symbolic check and the predicted physical claims of its program.
+
+        The native program then runs unchanged, and the nominal gate checks each arm trajectory it
+        sends. A preview without ``commit`` runs only the symbolic check; the physical decision is
+        made when the resource asks to start.
+        """
         try:
             with self.lock:
                 if (product_jid != self.runtime.product_jid
                         or self.runtime.context.pending_tasks.get(task["task_id"]) != task
                         or task.get("run_id") != self.runtime.context.run_id):
                     raise ValueError("Nominal task is not the authenticated pending runtime task")
-            owner = next(row for row in self.runtime.resource_agents if row.agent_name == task["resource_id"])
-            resolve = getattr(owner, "prepare_nominal_safety_program", None)
-            if not callable(resolve):
-                raise ValueError("Nominal owner has no complete primitive preparation contract")
-            value = resolve(deepcopy(task))
-            if inspect.isawaitable(value):
-                value = await value
-            steps = value["primitive_steps"]
-            scope = "nominal_" + self.runtime.context.run_id
-            from cais_spade_llm.agents.central_controller.predefined_safety_runtime import (
-                predefined_scope,
-            )
-
-            predefined_scope(self.cca, scope)
-            request = {"recovery_id": "nominal_" + task["task_id"], "recovery_safety_scope_id": scope,
-                "tasks": [{"task_id": task["task_id"], "outline_id": task["task_id"],
-                    "resource_id": task["resource_id"], "resource_jid": self.runtime.jids[task["resource_id"]],
-                    "function_name": task["event_name"], "params": deepcopy(task["parameters"]),
-                    "nominal_task": deepcopy(task), "primitive_steps": steps}]}
-            registration = await self.register(request, product_jid=product_jid)
-            if registration["status"] != "allowed":
-                return registration
-            return await self.check({"task_id": task["task_id"], "resource_jid": self.runtime.jids[task["resource_id"]],
-                "function_name": task["event_name"], "params": {**deepcopy(task["parameters"]),
-                    "recovery_composition_ref": registration["task_refs"][task["task_id"]]}},
-                sender=self.runtime.jids[task["resource_id"]], commit=commit)
-        except (ValueError, KeyError, TypeError, StopIteration) as exc:
+            if self.holds():
+                return {"status": "held", "reason": "active_physical_program_requires_completion"}
+            admission = self.cca._environment_admission(self.runtime)
+            if not commit:
+                return await admission.check(task, commit=False)
+            gate = await self._nominal_physical_gate()
+            prediction = await asyncio.to_thread(gate.predict, deepcopy(task))
+            native = await admission.check(task, commit=False)
+            if native["status"] != "allowed":
+                return native
+            with self.lock:
+                physical = gate.decide(prediction)
+                if physical["status"] != "allowed":
+                    logger.info("Nominal start %s held by %s", task["task_id"], physical.get("rule_id"))
+                    return physical
+                committed = admission.commit_prepared(task, native)
+                if committed.get("status") != "allowed":
+                    return committed
+                gate.claim(prediction)
+            return {"status": "allowed", "committed": True, "physical_check": physical,
+                    "recovery_composition_grant": {"nominal_native": True, "nominal_task": deepcopy(task),
+                                                   "run_id": self.runtime.context.run_id}}
+        except (ValueError, KeyError, TypeError, StopIteration, RuntimeError) as exc:
+            logger.warning("Nominal start %s inconclusive: %r", task.get("task_id"), exc, exc_info=True)
             return {"status": "inconclusive", "reason": str(exc)}
 
 
