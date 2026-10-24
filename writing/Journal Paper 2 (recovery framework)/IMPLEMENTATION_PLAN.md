@@ -727,6 +727,17 @@ send check time could drop with coarser sweeps; the prepared nominal path in `_c
 
 ## RA feasibility validation — October 23, 2026 — plan approved by the user, not started
 
+**Resume here (2026-10-24, next chat session).** The physical nominal check is done (`87f9356`, `288c8de`), so
+recovery validation is next, starting with this plan. Re-checked against the code on 2026-10-24: the Step 1 list
+below still holds (UR5e primitives still declare no `capability_constraints`; `gripper_reach` is in
+`initialization/resources/robot_ur5e.json`; the Conveyor order is still the `nominal_conveyor.CONVEYOR_LOCATIONS`
+constant). The condition vocabulary lives in `cais_spade_llm/resources/recovery_transition_derivation.py`
+(`_CONDITIONS`), not under `resources/robot/`. New since activity model B: backward derivation should read each
+activity's combined result (start + finish, as `nominal_des.outcome_models` folds them), because end values such
+as `held_part` are set by `*_done` finishes. **Waiting for the user to approve the Step 1 list** (asked 2026-10-24,
+the user moved the discussion to a new session). Step 5 replays the four Oct 23 drafts on their v3 captures (no LLM
+cost); new drafts on the v5 captures come after the checker works.
+
 **Goal.** Rebuild RA validation as the paper defines it, applied to each event the LLM proposes:
 Algorithm 1 (backward derivation) followed by Eq. 12 (forward check). Rebuild rules (October 22): every
 constraint is model data, every check maps to one paper element, and the code has no hidden rules.
