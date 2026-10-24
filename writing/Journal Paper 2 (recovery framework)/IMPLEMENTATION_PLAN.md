@@ -568,20 +568,99 @@ failures); `poetry check` (deprecation warnings only); `compileall`; `ui_main --
   - nominal: symbolic Eq. 13 (done); **physical nominal check, later stage, not in the paper.** Each
     resource implements `prepare_nominal_safety_program` (its saved nominal program planned into motion
     evidence) and `observe_prepared_nominal_completion`, so `RecoveryCompositionAdmission.check_nominal`
-    can admit nominal starts against the predefined (geometric) specs. Today no resource implements them,
-    so a run with the seven predefined specs holds every nominal start. This stage also gives the
+    can admit nominal starts against the predefined (geometric) specs. Today only the URs have an adapter
+    and it refuses every saved UR program (see the plan below), so a run with the seven predefined specs
+    holds every nominal start. This stage also gives the
     measurement of how much the seven specs delay production.
-- **Order:** commit A (late `complete_job` observer) and B (Eq. 13), one nominal order with no rules,
-  recovery validation (RA, handoff check, CCA symbolic and physical) on the new captures, then the physical
-  nominal check.
+- **Order (changed by the user 2026-10-24):** video 2 and the four recaptures, then the **physical nominal
+  check** (plan first, user approval, then code; it must work with MoveIt collision checking off, so
+  `prepare_ur5e_motion` stops requiring it), then the seven-spec nominal run and its delay measurement
+  against `nominal_cca_05` (37 min, no rules), then recovery validation.
 - Captures run with the CCA bypassed and record no monitor history; recovery validation replays each
   captured trace through the seven monitors offline to get the monitor states at $s_F$.
+
+## Physical nominal check — plan, October 24, 2026 — APPROVED by the user (D1 native + send guard, D2 parallel claims, boundary wait)
+
+**What exists (read from the code, not run).** With a predefined safety file selected, every nominal
+start goes to `check_predefined_nominal_start` → `RecoveryCompositionAdmission.check_nominal`, which asks
+the owner for `prepare_nominal_safety_program`, plans each step with `prepare_ur5e_motion`, proves the
+trace against the physical monitor (`LivePhysicalMonitor.check`), claims mutex regions
+(`RegionReservationLedger`), and then *executes the prepared trajectories* through
+`execute_recovery_composition_step` (the dispatch guard refuses any other trajectory). The symbolic Eq. 13
+check runs inside it first. A robot adapter (`nominal_safety_adapter.NominalRobotAdapter`) exists, but:
+
+1. It accepts only plain Cartesian moves. Every UR program has steps it refuses: `open_gripper`,
+   `grasp_part`, `release_part`, routed moves (`move_above_part` with `pick_transit_waypoints`,
+   `move_above_destination` with `transit_waypoints`, `retreat_from_source`), and a helper read after a
+   motion (`compute_place_targets` in `place_approach`). `prepare_ur5e_motion` also refuses orientation
+   changes, mating context, and (since `9c55a0f`) every UR, because `avoid_collisions` is false.
+2. KMR, Conveyor, Buffer, M1 and M2 have no nominal adapter at all.
+3. It is serial: `holds()` holds every start while any physical program runs, and `_ground` refuses when
+   any command is active or any nominal program is running.
+
+So a seven-spec run would block its first start. Recovery uses the same owner preparation, so item 1 also
+limits the recovery physical check (a recovery program with a grasp or release cannot be proved today).
+
+**Recommended design: plan, claim, run natively, guard each send.**
+
+- **N1 Plan-only prediction.** At a nominal start the owner plans its whole saved program from the
+  current observed state, plan-only, with the same planner calls the native program makes (collision
+  checking off, as executed). Gripper steps are stationary intervals; the held part's geometry is added
+  from `grasp_part` until `release_part`; routed moves are planned segment by segment; helper reads that
+  do not depend on the arm pose (`compute_place_targets`) are read before the motion. KMR, Conveyor and
+  Buffer predict their own motion (base and arm; the transported part); M1/M2 are static bodies.
+- **N2 Admission.** Eq. 13 symbolic check (unchanged), then the physical check on the predicted trace:
+  the swept occupancy (configured continuous geometry plus held part) gives the program's region claim;
+  mutex rules hold a start whose claim conflicts with another live claim; part-entry ordering rules
+  (`part_region_entry` before `processCompleted`) must allow the entry now if the carried part can enter
+  the region. Other running programs are represented by their claims (their resource may be anywhere in
+  its claimed regions until it finishes and is observed clear, which the ledger already does), so
+  programs in disjoint regions run in parallel.
+- **N3 Native execution with a send guard.** Nominal programs keep their native executor (snap-to-slot,
+  seating, custody corrections unchanged). For a nominal grant, the dispatch guard checks each
+  trajectory actually sent against the claim (its swept occupancy must stay inside the claimed regions and
+  respect the ordering rules) instead of requiring the exact prepared trajectory. A send outside the
+  claim is refused and the task faults, so the check never relies on the prediction being exact.
+- **N4 Finish.** The PA finish commits as today; the claim is released after the stopped-and-clear
+  observation (existing ledger behavior); the physical monitor commits the executed trace.
+- **N5 Collision flag.** `prepare_ur5e_motion` stops requiring `avoid_collisions`; it plans what is
+  executed. This also unblocks the recovery physical check.
+
+**Alternatives not recommended.** (a) Execute nominal programs as exact prepared trajectories, like
+recovery: one proof method for both modes, but it replaces the native executor and drops its placement
+corrections, risking every insertion. (b) Keep the serial hold: smallest change, but no two programs move
+together, so production becomes much slower and the measured delay is mostly serialization.
+
+**Recovery side (for recovery validation, not this stage).** Recovery keeps exact prepared execution
+(paper Section 5.3). It needs N5 and the same gripper/routed-step preparation as N1 to prove recovery
+programs that grasp or release.
+
+**Tests.** Extend `test/test_nominal_safety_adapter.py` (gripper intervals, held part, routed moves, helper
+order, no collision flag), `test/test_recovery_environment_admission.py` (parallel claims, conflicting
+claim held, ordering rule held until `processCompleted`, send outside the claim refused).
+
+**Gazebo.** One seven-spec nominal order run (`run_nominal.py --safety-file
+safety_assembly_board-v1_plant.txt`), compared with `nominal_cca_05` (37 min): makespan, per-start
+admission latency, time each start was held and by which rule, and whether any send was refused.
+
+**Decisions (user, 2026-10-24: "approve").** D1 native execution + send guard; D2 parallel with region
+claims. A send outside the claim first tries to extend the claim; if a needed region is busy the robot
+waits at that primitive boundary (stopped, holding its part, inside its own claims), never mid-trajectory,
+with a timeout after which the task faults and becomes a failure for recovery (prevents two waiting robots
+from deadlocking). A task that has not started holds no claims and just waits.
 
 ## Nominal order run under B — October 24, 2026
 
 - Captures under B (recapture_v4_20261023, queue item 7): Conveyor `capture_225e2748…`, ur5e-1
   `capture_e3c8151b…`, Machining `capture_695ea223…` (KMR now `travelling`), Part slippage
-  `capture_98937559…` (ur5e-4 now `approaching_place`). UI defaults and the grounding test use them.
+  `capture_98937559…` (ur5e-4 now `approaching_place`). **Superseded 2026-10-24** by the v5 captures below.
+- **Captures after the ur5e-3 route restore and UR collision checks off (recapture_v5_20261024, queue item 8,
+  2026-10-24):** Conveyor `capture_3ad495d2bd7845269fa70f1a09963bc9`, Machining
+  `capture_37e090a54d0242f4948ae80c95d3cd76` (M1 stops at 6.5 %), Part slippage
+  `capture_ad64bf1628564c3fa7f928b7bdebd5d9`, ur5e-1 `capture_b7dea70c1db74e1e9e98849380c09655` (second try;
+  the first failed KMR readiness at launch). Same failure points, grounded rules and faulted resources as v4.
+  UI defaults (`_DEFAULT_OBSERVATIONS`) and the grounding test use them. Video 2 (ur5e-1 breakdown, 20x) is
+  in `monitor/recovery_gazebo_runs/videos-20x-20261024/`.
 - Full 11-part order, CCA on with `safety_none.txt` (`run_nominal.py`): with the Eq. 13 admission it ran
   6 minutes with 42 start and 42 finish records (CCA `ack_cursor` 42) and ur5e-4 placed all three gears.
   It then stops deterministically: ur5e-3's `place_approach` of KET4 to the board fails motion validation

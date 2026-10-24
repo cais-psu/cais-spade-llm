@@ -228,6 +228,11 @@ OFFICIAL = {
     "capture_695ea22349284bf99563fed688c54c11": (["A2", "B2"], ["M1"], "environment_24", "complete_job"),
     "capture_225e2748e32a43259960e6067fd2286d": (["B2"], ["Conveyor"], "cff7bd9081d348968f4062b4c5adfb2c_pending_0", "place_approach"),
     "capture_e3c8151b96e6473a9bdba7d83f339236": (["B2"], ["ur5e-1"], "bc3d1c3826854d39a7ec0714723850d7_pending_1", "pick_grasp"),
+    # Restored ur5e-3 route and URs without collision checks (2026-10-24): the same faults.
+    "capture_ad64bf1628564c3fa7f928b7bdebd5d9": (["A1", "B2", "C1"], ["ur5e-4"], "environment_8", "place_approach"),
+    "capture_37e090a54d0242f4948ae80c95d3cd76": (["A2", "B2"], ["M1"], "environment_25", "complete_job"),
+    "capture_3ad495d2bd7845269fa70f1a09963bc9": (["B2"], ["Conveyor"], "cf4b66ddc51348a2987d5207878e5eea_pending_0", "place_approach"),
+    "capture_b7dea70c1db74e1e9e98849380c09655": (["B2"], ["ur5e-1"], "67689d8a6f1a4b9c87a47a16f000e313_pending_1", "pick_grasp"),
 }
 
 
