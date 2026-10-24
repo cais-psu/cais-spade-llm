@@ -10,6 +10,7 @@ from typing import Any
 
 from nicegui import context, ui
 
+from cais_spade_llm.resources.nominal_des import outcome_events
 from cais_spade_llm.ui.bridge import SystemBridge
 
 
@@ -26,7 +27,8 @@ def resource_function_rows(model: dict[str, Any]) -> dict[str, list[dict[str, An
     executable = model.get("executable_tasks")
     owned: dict[tuple[str, str], dict[str, Any]] = {}
     participating: list[dict[str, Any]] = []
-    for event in sorted(model["events"], key=lambda row: row["event_id"]):
+    # A function is an activity: its start's program with its observed finish's effects.
+    for event in sorted(outcome_events(model["events"]), key=lambda row: row["event_id"]):
         actor = str(event["parameter_bindings"]["resource_id"]["equals"])
         variant = {
             "event_id": event["event_id"],

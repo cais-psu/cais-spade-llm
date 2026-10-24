@@ -175,15 +175,16 @@ def build_environment_models(
             for event in model["events"]
         ]
         model["events"] = [event for event in model["events"] if event is not None]
-        # These names bind executors. Shared DES events use event_id and the
-        # complete parameter binding, since names repeat across unrelated tasks.
-        model["local_event_alphabet"] = list(
-            dict.fromkeys(e["event_name"] for e in model["events"])
-        )
-        model["controllable_event_alphabet"] = model["local_event_alphabet"][:]
-        model["observable_event_alphabet"] = model["local_event_alphabet"][:]
     if schema_version == 3:
         _declare_printer_state(models, scene["3D Printing Station"])
+    # These names bind executors. Shared DES events use event_id and the complete parameter binding,
+    # since names repeat across unrelated tasks. An observed event is not controllable.
+    for model in models.values():
+        model["local_event_alphabet"] = list(dict.fromkeys(e["event_name"] for e in model["events"]))
+        model["controllable_event_alphabet"] = list(
+            dict.fromkeys(e["event_name"] for e in model["events"] if e.get("controllable") is True))
+        model["observable_event_alphabet"] = list(
+            dict.fromkeys(e["event_name"] for e in model["events"] if e.get("observable") is True))
     _append_resource_models(models, scene, registered, schema_version, program_revision)
     # Removing product-owned assembly guards also removes passive participants.
     for model in models.values():
@@ -233,22 +234,21 @@ def _declare_machine_jobs(models: dict, scene: dict) -> None:
         # A part whose job paused or stopped may be unloaded like a completed one; it keeps its job state.
         access_events = [event['event_id'] for event in model['events']
             if event['event_name'] in {'pick_approach', 'pick_grasp', 'pick_part'}
-            and event['guards'].get('resource_state') == {'equals': 'completed'}]
+            and event['guards'].get('resource_state') == {'equals': 'completed'}
+            and 'start_event_id' not in event]
         for identifier in access_events:
             for state in ('paused', 'stopped'):
                 event_id = max(event['event_id'] for peer in models.values() for event in peer['events']) + 1
+                copies = set(_copy_activity(models, identifier, event_id).values())
                 for owner, peer in models.items():
-                    original = next((event for event in peer['events'] if event['event_id'] == identifier), None)
-                    if original is None:
-                        continue
-                    event = deepcopy(original)
-                    event['event_id'] = event_id
-                    if owner == rid:
-                        event['guards']['resource_state'] = {'equals': state}
-                    source = event['capability_transition']['source']
-                    if f"{rid}.resource_state" in source:
-                        source[f"{rid}.resource_state"] = state
-                    peer['events'].append(event)
+                    for event in peer['events']:
+                        if event['event_id'] not in copies:
+                            continue
+                        if owner == rid and 'resource_state' in event['guards']:
+                            event['guards']['resource_state'] = {'equals': state}
+                        source = event['capability_transition']['source']
+                        if f"{rid}.resource_state" in source:
+                            source[f"{rid}.resource_state"] = state
         bindings = {"resource_id": rid}
         tasks._event(models, "select_program", bindings, {rid: {"resource_state": {"not_equals": "running"}}},
                      {rid: {"selected_program": {"set_from_param": "program"}}},
@@ -369,24 +369,50 @@ def _declare_printer_state(models: dict[str, dict], configuration: dict) -> None
             if event["event_name"] != "pick_grasp":
                 continue
             # The shared pickup has two exclusive outcomes, selected by the
-            # remaining outputs rather than by a caller-supplied state.
-            event["updates"]["resource_state"] = {"set": "completed"}
+            # remaining outputs rather than by a caller-supplied state. Its start
+            # selects one, since no print begins before the bed is idle; its
+            # observed finish sets the printer's state.
+            finish = next(peer for peer in printer["events"] if peer["event_id"] == event["finish_event_id"])
+            finish["guards"]["resource_state"] = {"equals": "completed"}
+            finish["updates"]["resource_state"] = {"set": "completed"}
             event["collection_guards"] = {
                 "output.{part_name}": {"any_other_equals": True}
             }
-            for model in models.values():
-                for peer in list(model["events"]):
-                    if peer["event_id"] != event["event_id"]:
-                        continue
-                    last_pickup = deepcopy(peer)
-                    last_pickup["event_id"] = next_id
-                    if model is printer:
-                        last_pickup["updates"]["resource_state"] = {"set": "idle"}
-                        last_pickup["collection_guards"] = {
-                            "output.{part_name}": {"all_other_equals": False}
-                        }
-                    model["events"].append(last_pickup)
-            next_id += 1
+            copies = _copy_activity(models, event["event_id"], next_id)
+            for last_pickup in printer["events"]:
+                if last_pickup["event_id"] == copies[event["event_id"]]:
+                    last_pickup["collection_guards"] = {
+                        "output.{part_name}": {"all_other_equals": False}
+                    }
+                elif last_pickup["event_id"] == copies[finish["event_id"]]:
+                    last_pickup["updates"]["resource_state"] = {"set": "idle"}
+            next_id += len(copies)
+
+
+def _copy_activity(models: dict[str, dict], event_id: int, next_id: int) -> dict[int, int]:
+    """Copy an event, with its observed finish when it starts an activity, into every participant.
+
+    The copies take new ids from ``next_id`` and stay linked to each other, so a variant of an
+    activity keeps its own start and finish.
+
+    Returns:
+        The new event id for each copied event id.
+    """
+    start = next(event for model in models.values() for event in model["events"] if event["event_id"] == event_id)
+    copies = {event_id: next_id}
+    if "finish_event_id" in start:
+        copies[start["finish_event_id"]] = next_id + 1
+    for model in models.values():
+        for peer in list(model["events"]):
+            if peer["event_id"] not in copies:
+                continue
+            event = deepcopy(peer)
+            event["event_id"] = copies[peer["event_id"]]
+            for link in ("finish_event_id", "start_event_id"):
+                if link in event:
+                    event[link] = copies[event[link]]
+            model["events"].append(event)
+    return copies
 
 
 def _check_printer_state(values: dict) -> None:
@@ -531,7 +557,7 @@ def _parameterized_event(
             "loading_position": "The configured loading area must be empty before approach or release",
             "validation_source": "cais_spade_llm.resources.nominal_conveyor.conveyor_load_parameters",
         }
-    if rid == "Conveyor" and name in {"place_release", "advance_conveyor"}:
+    if rid == "Conveyor" and name in {"place_release" + tasks.FINISH_SUFFIX, "advance_conveyor" + tasks.FINISH_SUFFIX}:
         event["collection_effects"] = {
             "part_location.{part_name}": "acknowledged shared belt occupancy",
             "part_order.{part_name}": "contiguous downstream order for every resident part",
@@ -542,6 +568,9 @@ def _parameterized_event(
         for key, value in event["parameter_bindings"].items()
         if value == {"equals": True}
     }
+    if "start_event_id" in event:
+        # An observed finish commands nothing; its activity's start runs the program.
+        return event
     actor = event["parameter_bindings"]["resource_id"]["equals"]
     # place_release is the capability event; the robot executes place_insert.
     # KMR owns a separate place_release function and keeps its own program.
@@ -601,15 +630,18 @@ def _declare_product_effects(event: dict, schema_version: int) -> None:
     elif event["event_name"] == "print_part":
         event["product_effects"]["processCompleted"] = [{"process": "print_part"}]
     elif event["event_name"] == "place_insert":
+        # The insertion's preconditions are the command's; its effect on the part is the observed finish's.
+        event["parameter_bindings"]["target"] = {"required": True, "type": "string"}
+        event["product_guards"] = {
+            "ordered_requirements": "preceding results must be acknowledged",
+            "target": "must equal the product geometry target",
+        }
+    elif event["event_name"] == "place_insert" + tasks.FINISH_SUFFIX:
         event["parameter_bindings"]["target"] = {"required": True, "type": "string"}
         event["product_effects"] = {
             "state": "assembled",
             "target": {"set_from_param": "target"},
             "processCompleted": [],
-        }
-        event["product_guards"] = {
-            "ordered_requirements": "preceding results must be acknowledged",
-            "target": "must equal the product geometry target",
         }
         if schema_version == 3:
             event["product_effects"]["processCompleted"] = [
@@ -700,7 +732,8 @@ def candidates(model: dict, valuation: dict, part: str, desired: dict, requireme
                     yield task
         return
     for event in model["events"]:
-        if event["parameter_bindings"]["resource_id"]["equals"] != model["resource_id"]:
+        # An activity's observed finish follows its start; it is never proposed on its own.
+        if event["parameter_bindings"]["resource_id"]["equals"] != model["resource_id"] or "start_event_id" in event:
             continue
         params = event_bindings(event, part, desired, requirements)
         if params is None:
@@ -866,13 +899,12 @@ def owners(models: dict, valuation: dict, products: dict, product_name: str) -> 
                 if part not in products or part in result:
                     raise ValueError("Unknown or duplicate part custody")
                 result[part] = rid
-        if "held_part" in values and (
-            (values["resource_state"] in {"carrying", "picked", "positioned"})
-            != (values["held_part"] is not None)
+        if "held_part" in values and values["resource_state"] in tasks.HOLDING_STATES | tasks.FREE_STATES and (
+            (values["resource_state"] in tasks.HOLDING_STATES) != (values["held_part"] is not None)
         ):
             raise ValueError("Resource state disagrees with held_part")
         if "approached_part" in values and (
-            (values["resource_state"] == "at_pick") != (values["approached_part"] is not None)
+            (values["resource_state"] in tasks.APPROACH_STATES) != (values["approached_part"] is not None)
         ):
             raise ValueError("KMR approach state disagrees with approached_part")
         if "staging_part" in values and (
@@ -1088,6 +1120,7 @@ def project_transition(
         _check_product_guards(event, products.get(params["part_name"]), params)
     after, predicted = deepcopy(valuation), deepcopy(products)
     if task["event_name"] == "place_approach" and params.get("destination_location") == "Conveyor":
+        # The command checks the loading area; the observed release fills it.
         loading = models["Conveyor"]["assignments"]["loading_positions"][task["resource_id"]]
         conveyor_load_parameters(
             models["Conveyor"],
@@ -1097,7 +1130,8 @@ def project_transition(
         )
     _apply_resource_effects(models, valuation, after, event, params,
                             defer_resource_guards=defer_resource_guards)
-    if task["event_name"] == "place_release" and params.get("destination_location") == "Conveyor":
+    if (task["event_name"] == "place_release" + tasks.FINISH_SUFFIX
+            and params.get("destination_location") == "Conveyor"):
         derived = conveyor_load_parameters(
             models["Conveyor"],
             valuation["Conveyor"],
@@ -1107,7 +1141,7 @@ def project_transition(
         after["Conveyor"].update(
             {field.removeprefix("next_"): value for field, value in derived.items()}
         )
-    elif task["event_name"] == "advance_conveyor":
+    elif task["event_name"] == "advance_conveyor" + tasks.FINISH_SUFFIX:
         derived = conveyor_advance_parameters(
             models["Conveyor"],
             valuation["Conveyor"],
@@ -1118,7 +1152,7 @@ def project_transition(
             {field.removeprefix("next_"): value for field, value in derived.items()}
         )
     part = params.get("part_name")
-    if task["event_name"] == "place_insert":
+    if task["event_name"] == "place_insert" + tasks.FINISH_SUFFIX:
         predicted[part].update(location=product_name, target=params["target"])
     if part:
         for result in _process_effects(event, params):
@@ -1138,6 +1172,38 @@ def project_transition(
             continue
         predicted[name].update(product_state_from_custody(name, owner, after[owner], product_name))
     return after, predicted
+
+
+def finish_task(models: dict, task: dict) -> dict | None:
+    """Return the observed finish of a commanded activity as a task, or None when the event has none.
+
+    The finish shares its start's parameters, so one execution's acknowledgement completes the task
+    its start began.
+    """
+    event = next((e for e in models[task["resource_id"]]["events"] if e["event_id"] == task["event_id"]), None)
+    finish = (event or {}).get("finish_event_id")
+    if finish is None:
+        return None
+    name = next(e["event_name"] for e in models[task["resource_id"]]["events"] if e["event_id"] == finish)
+    return {**deepcopy(task), "event_id": finish, "event_name": name}
+
+
+def project_activity(
+    models: dict, valuation: dict, products: dict, task: dict, product_name: str, requirements: dict,
+    *, defer_resource_guards: bool = False,
+) -> tuple[dict, dict]:
+    """Project a commanded activity through its start and, when it has one, its observed finish.
+
+    Planning treats an activity as one task; the running state between its two events is not a place
+    where a plan stops.
+    """
+    after, products = project_transition(models, valuation, products, task, product_name, requirements,
+                                          defer_resource_guards=defer_resource_guards)
+    finish = finish_task(models, task)
+    if finish is None:
+        return after, products
+    return project_transition(models, after, products, finish, product_name, requirements,
+                              defer_resource_guards=defer_resource_guards)
 
 
 def product_state_from_custody(part_name: str, owner: str, values: dict, product_name: str) -> dict:

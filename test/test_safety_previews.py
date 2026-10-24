@@ -207,7 +207,8 @@ def test_reference_bindings_come_from_declared_board_capabilities() -> None:
             prefix, actor = definition["kind"], definition["resource"]
             symbol = definition["state" if prefix == "ap_state" else "event"]["symbol"]
             if prefix == "ap_event":
-                assert any(event["function_name"] == symbol for event in models[actor]["events"])
+                # An observed finish commands nothing, so only a start carries a function.
+                assert any(event.get("function_name") == symbol for event in models[actor]["events"])
             else:
                 field, value = symbol.split("=", 1)
                 if field == "part_location":

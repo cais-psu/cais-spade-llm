@@ -27,6 +27,27 @@ from cais_spade_llm.resources.nominal_conveyor import (
 )
 from cais_spade_llm.resources.robot.robot_task_registry import robot_task_registry
 
+# Each activity is a commanded start into a running state and an observed finish out of it, as in the
+# Ramadge-Wonham machine: the start is controllable, the finish uncontrollable. The finish is named after
+# its start.
+FINISH_SUFFIX = "_done"
+_ROBOT_RUNNING_STATES = {
+    "pick_approach": "approaching_pick", "pick_grasp": "grasping", "place_approach": "approaching_place",
+    "place_insert": "releasing", "place_release": "releasing", "move_home": "moving_home",
+}
+_KMR_RUNNING_STATES = {
+    "pick_approach": "approaching", "pick_part": "grasping", "move_to_resource": "travelling",
+    "place_approach": "positioning", "place_release": "releasing",
+}
+# Every running state, between an activity's start and its finish; the belt and buffer move.
+RUNNING_STATES = frozenset({*_ROBOT_RUNNING_STATES.values(), *_KMR_RUNNING_STATES.values(), "moving"})
+# The states in which a resource holds its part, and those in which it holds none. A KMR travelling with
+# or without a part is in neither, so its held_part alone decides.
+HOLDING_STATES = frozenset({"picked", "approaching_place", "positioned", "releasing", "carrying", "positioning"})
+FREE_STATES = frozenset({"idle", "approaching_pick", "at_pick", "grasping", "placed", "moving_home", "approaching"})
+# A KMR has approached a part from its approach finish until its pick finish.
+APPROACH_STATES = frozenset({"at_pick", "grasping"})
+
 
 def _model(resource_id: str, assignments: dict[str, Any], support: str) -> dict[str, Any]:
     return {
@@ -51,6 +72,10 @@ def _variable(
     model["current_valuation"][name] = deepcopy(initial)
 
 
+def _next_event_id(models: dict) -> int:
+    return sum(len(model["events"]) for model in models.values())
+
+
 def _event(
     models: dict,
     name: str,
@@ -61,17 +86,18 @@ def _event(
     capability: tuple[dict, dict],
     parameters: dict | None = None,
     notes: str = "",
+    controllable: bool = True,
 ) -> None:
     participants = [
         rid for rid in dict.fromkeys([*guards, *updates]) if guards.get(rid) or updates.get(rid)
     ]
-    event_id = sum(len(model["events"]) for model in models.values())
+    event_id = _next_event_id(models)
     for resource_id in participants:
         models[resource_id]["events"].append(
             {
                 "event_id": event_id,
                 "event_name": name,
-                "controllable": True,
+                "controllable": controllable,
                 "observable": True,
                 "parameter_bindings": {
                     **{key: {"equals": value} for key, value in bindings.items()},
@@ -82,8 +108,8 @@ def _event(
                     "target": deepcopy(capability[1]),
                 },
                 "product_effects": {
-                    "processCompleted": [{"process": name}]
-                    if name in {"machine_part", "print_part", "place_insert"}
+                    "processCompleted": [{"process": name.removesuffix(FINISH_SUFFIX)}]
+                    if name in {"machine_part", "print_part", "place_insert" + FINISH_SUFFIX}
                     else [],
                 },
                 "participants": participants,
@@ -92,6 +118,138 @@ def _event(
                 "notes": notes,
             }
         )
+
+
+def _activity(
+    models: dict,
+    name: str,
+    actor: str,
+    running: str,
+    bindings: dict,
+    guards: dict,
+    updates: dict,
+    *,
+    capability: tuple[dict, dict],
+    parameters: dict | None = None,
+    notes: str = "",
+    start_updates: dict | None = None,
+    finish_guards: dict | None = None,
+) -> None:
+    """Declare an activity as its commanded start and its observed finish.
+
+    The start carries every precondition, puts the actor in its running state and fixes a commanded
+    target (a task context it sets). The finish leaves the running state with the activity's effects. It
+    is guarded only by the running state and by the values it changes, so another resource's unrelated
+    state never blocks an observed completion. Both events share the bindings and are linked by id.
+
+    Args:
+        models: Resource descriptors, updated in place.
+        name: The activity's function name, which the start keeps.
+        actor: The resource that performs it.
+        running: The actor's state between start and finish.
+        bindings: Fixed parameter values of both events.
+        guards: Every participant's preconditions, as for a one-event activity.
+        updates: Every participant's effects, as for a one-event activity.
+        capability: The part's source and target product state.
+        parameters: Free parameters of both events.
+        notes: Text kept on both events.
+        start_updates: Other participants' values the start sets, such as a loading reservation.
+        finish_guards: Extra finish guards that tell apart variants of one activity.
+    """
+    intent = {field: rule for field, rule in updates.get(actor, {}).items()
+              if field.startswith("task_ctx.") and rule != {"set": None}}
+    start = {actor: {**deepcopy(intent), "resource_state": {"set": running}}}
+    for rid, rows in (start_updates or {}).items():
+        start.setdefault(rid, {}).update(deepcopy(rows))
+    finish = {rid: {field: deepcopy(rule) for field, rule in rows.items() if not (rid == actor and field in intent)}
+              for rid, rows in updates.items()}
+    ending = {rid: {field: deepcopy(rule) for field, rule in rows.items() if field in finish.get(rid, {})}
+              for rid, rows in guards.items()}
+    ending.setdefault(actor, {})["resource_state"] = {"equals": running}
+    # A finish observes the reservation its own start made, so no other activity's finish can match it.
+    for rid, rows in (start_updates or {}).items():
+        ending.setdefault(rid, {}).update({field: {"equals": rule["set"]} for field, rule in rows.items()})
+    for rid, rows in (finish_guards or {}).items():
+        ending.setdefault(rid, {}).update(deepcopy(rows))
+    start_id = _next_event_id(models)
+    _event(models, name, bindings, guards, start, capability=(capability[0], deepcopy(capability[0])),
+           parameters=parameters, notes=notes)
+    finish_id = _next_event_id(models)
+    _event(models, name + FINISH_SUFFIX, bindings, ending, finish, capability=capability,
+           parameters=parameters, notes=notes, controllable=False)
+    for model in models.values():
+        for event in model["events"]:
+            if event["event_id"] == start_id:
+                event["finish_event_id"] = finish_id
+            elif event["event_id"] == finish_id:
+                event["start_event_id"] = start_id
+
+
+def outcome_models(models: dict[str, dict]) -> dict[str, dict]:
+    """Return every resource's events with each activity as one outcome-level event.
+
+    Recovery and safety evidence reason over activities, so the running state between a start and its
+    finish is never a recovery step. An activity keeps its start's identity, preconditions and program
+    and takes its finish's effects. Every participant's copy carries the same participants, product
+    effects and capability, including a resource that only consults the start.
+
+    Args:
+        models: Resource descriptors.
+
+    Returns:
+        New descriptors; events that are not part of an activity are copied unchanged.
+    """
+    events = {event["event_id"]: event for model in models.values() for event in model["events"]}
+    activities = {}
+    for event in events.values():
+        finish = events.get(event.get("finish_event_id"))
+        if finish is not None:
+            activities[event["event_id"]] = {
+                "participants": list(dict.fromkeys([*event["participants"], *finish["participants"]])),
+                "product_effects": deepcopy(finish["product_effects"]),
+                "capability_transition": deepcopy(finish["capability_transition"]),
+            }
+    return {rid: {**model, "events": _outcome_rows(model["events"], activities)} for rid, model in models.items()}
+
+
+def outcome_events(events: list[dict]) -> list[dict]:
+    """Return one resource's events with each activity as one outcome-level event.
+
+    Args:
+        events: One resource's declared events.
+
+    Returns:
+        New event rows, as ``outcome_models`` folds them from these events alone.
+    """
+    return outcome_models({None: {"events": events}})[None]["events"]
+
+
+def _outcome_rows(events: list[dict], activities: dict) -> list[dict]:
+    starts = {event["event_id"] for event in events if "finish_event_id" in event}
+    finishes = {event["start_event_id"]: event for event in events if "start_event_id" in event}
+    outcome = []
+    for event in events:
+        if event.get("start_event_id") in starts:
+            continue
+        row = deepcopy(event)
+        if "start_event_id" in event:
+            row["event_id"] = row.pop("start_event_id")
+            row["event_name"] = event["event_name"].removesuffix(FINISH_SUFFIX)
+            row["controllable"] = True
+        row.pop("finish_event_id", None)
+        row.update(deepcopy(activities.get(row["event_id"], {})))
+        finish = finishes.get(event["event_id"])
+        if finish is not None:
+            # A finish guard on a value the start set describes the running activity, not its outcome.
+            row["guards"] = {
+                **{field: deepcopy(rule) for field, rule in finish["guards"].items() if field not in event["updates"]},
+                **row["guards"],
+            }
+            row["updates"].update(deepcopy(finish["updates"]))
+            if "collection_effects" in finish:
+                row["collection_effects"] = deepcopy(finish["collection_effects"])
+        outcome.append(row)
+    return outcome
 
 
 def _part_parameter(resource_id: str, field: str = "nominal_parts") -> dict:
@@ -181,7 +339,9 @@ def _declare_states(models: dict, scene: dict) -> None:
             parts, sources, destinations = [], [], []
         locations = list(dict.fromkeys([*sources, *destinations, "home"]))
         _variable(
-            model, "resource_state", ["idle", "at_pick", "picked", "positioned", "placed"], "idle"
+            model, "resource_state",
+            ["idle", "at_pick", "picked", "positioned", "placed", *dict.fromkeys(_ROBOT_RUNNING_STATES.values())],
+            "idle",
         )
         _variable(model, "held_part", [None, *parts], None)
         _variable(model, "resource_location", [None, *locations], None)
@@ -209,16 +369,19 @@ def _declare_states(models: dict, scene: dict) -> None:
             "Initially idle with empty workholding and staging is a modeling assumption."
         ]
     storage = models["Storage"]
+    # Storage acts only as a participant in others' picks; its state names that it is passive.
+    _variable(storage, "resource_state", ["idle"], "idle")
     for part in scene["Storage"]["slots"]:
         _variable(storage, f"inventory.{part}", [False, True], True)
     storage["marked_state_conditions"] = [
-        {field: {"equals": False} for field in storage["state_variables"]}
+        {field: {"equals": False} for field in storage["state_variables"] if field.startswith("inventory.")}
     ]
     kmr = models["KMR"]
     route_resources = list(
         dict.fromkeys(rid for route in scene["KMR"]["predefined_routes"] for rid in route)
     )
-    _variable(kmr, "resource_state", ["idle", "at_pick", "carrying", "positioned"], "idle")
+    _variable(kmr, "resource_state",
+              ["idle", "at_pick", "carrying", "positioned", *_KMR_RUNNING_STATES.values()], "idle")
     _variable(kmr, "held_part", [None, *pegs], None)
     _variable(kmr, "approached_part", [None, *pegs], None)
     _variable(kmr, "resource_location", [None, *route_resources], "Storage")
@@ -244,7 +407,8 @@ def _declare_states(models: dict, scene: dict) -> None:
             sorted(scene["machines"], key=lambda row: row["conveyor_loading_pose"][0]), 1
         )
     }
-    _variable(conveyor, "belt_stopped", [False, True], True)
+    # The belt is idle between advances and moving during one.
+    _variable(conveyor, "resource_state", ["idle", "moving"], "idle")
     _variable(
         conveyor, "loading_reserved_by", [None, *conveyor["assignments"]["loading_positions"]], None
     )
@@ -253,7 +417,7 @@ def _declare_states(models: dict, scene: dict) -> None:
         _variable(conveyor, f"part_order.{part}", [None, *range(len(pegs))], None)
     conveyor["marked_state_conditions"] = [
         {
-            **_equals(belt_stopped=True, loading_reserved_by=None),
+            **_equals(resource_state="idle", loading_reserved_by=None),
             **{f"part_location.{part}": {"equals": None} for part in pegs},
         }
     ]
@@ -266,10 +430,12 @@ def _declare_states(models: dict, scene: dict) -> None:
     ]
     buffer = models["Buffer For Machined parts"]
     buffer["assignments"]["nominal_parts"] = pegs
+    _variable(buffer, "resource_state", ["idle", "moving"], "idle")
     for zone in scene["Buffer For Machined parts"]["zones"]:
         _variable(buffer, f"zone_{zone['zone']}_part", [None, *pegs], zone["initial_part"])
     buffer["marked_state_conditions"] = [
-        {field: {"equals": None} for field in buffer["state_variables"]}
+        {"resource_state": {"equals": "idle"},
+         **{field: {"equals": None} for field in buffer["state_variables"] if field.startswith("zone_")}}
     ]
     printer = models["3D Printing Station"]
     for part in gears:
@@ -301,24 +467,32 @@ def _declare_states(models: dict, scene: dict) -> None:
 def _machine_and_mobile_events(models: dict, scene: dict) -> None:
     for source, target in scene["KMR"]["predefined_routes"]:
         for start, end in ((source, target), (target, source)):
-            _event(
-                models,
-                "move_to_resource",
-                {
-                    "resource_id": "KMR",
-                    "target_resource": end,
-                    "source_resource": start,
-                    "arrival_acknowledged": True,
-                    "arm_parked": True,
-                },
-                {"KMR": _equals(resource_location=start)},
-                {"KMR": _sets(resource_location=end)},
-                capability=({"resource_location": start}, {"resource_location": end}),
-                notes="Retain held_part while moving along the configured route.",
-            )
-    _event(
+            # Travel keeps what the KMR holds: a loaded KMR arrives carrying, an empty one idle. Its
+            # held part tells the two observed arrivals apart.
+            for state, held in (("carrying", {"not_equals": None}), ("idle", {"equals": None})):
+                _activity(
+                    models,
+                    "move_to_resource",
+                    "KMR",
+                    _KMR_RUNNING_STATES["move_to_resource"],
+                    {
+                        "resource_id": "KMR",
+                        "target_resource": end,
+                        "source_resource": start,
+                        "arrival_acknowledged": True,
+                        "arm_parked": True,
+                    },
+                    {"KMR": _equals(resource_location=start, resource_state=state)},
+                    {"KMR": _sets(resource_location=end, resource_state=state)},
+                    capability=({"resource_location": start}, {"resource_location": end}),
+                    notes="Retain held_part while moving along the configured route.",
+                    finish_guards={"KMR": {"held_part": held}},
+                )
+    _activity(
         models,
         "pick_approach",
+        "KMR",
+        _KMR_RUNNING_STATES["pick_approach"],
         {
             "resource_id": "KMR",
             "origin_resource_location": "Storage",
@@ -332,9 +506,11 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
         parameters={"part_name": _part_parameter("Storage", "slots")},
         capability=({"part_location": "Storage"}, {"part_location": "Storage"}),
     )
-    _event(
+    _activity(
         models,
         "pick_part",
+        "KMR",
+        _KMR_RUNNING_STATES["pick_part"],
         {
             "resource_id": "KMR",
             "origin_resource_location": "Storage",
@@ -358,9 +534,11 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
     for machine in scene["machines"]:
         rid = machine["resource_id"]
         parameters = {"part_name": _part_parameter(rid)}
-        _event(
+        _activity(
             models,
             "place_approach",
+            "KMR",
+            _KMR_RUNNING_STATES["place_approach"],
             {
                 "resource_id": "KMR",
                 "destination_location": rid,
@@ -376,9 +554,11 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
             parameters=parameters,
             capability=({"part_location": "KMR"}, {"part_location": "KMR"}),
         )
-        _event(
+        _activity(
             models,
             "place_release",
+            "KMR",
+            _KMR_RUNNING_STATES["place_release"],
             {
                 "resource_id": "KMR",
                 "destination_location": rid,
@@ -445,9 +625,11 @@ def _robot_task_event(
     if task.program.entry_state != "any":
         local_guards.setdefault(robot, {})["resource_state"] = {"equals": task.program.entry_state}
     local_updates.setdefault(robot, {})["resource_state"] = {"set": task.program.success_state}
-    _event(
+    _activity(
         models,
         name,
+        robot,
+        _ROBOT_RUNNING_STATES[name],
         {"resource_id": robot, **bindings},
         local_guards,
         local_updates,
@@ -599,9 +781,14 @@ def _robot_place_events(
             capability=(positioned, {"part_location": destination}),
         )
     else:
-        _event(
+        # A robot releasing onto the belt holds its loading position until the release is observed,
+        # so the belt cannot start under it.
+        reservation = {owner: {"loading_reserved_by": {"set": robot}}} if destination == "Conveyor" else None
+        _activity(
             models,
             "place_release",
+            robot,
+            _ROBOT_RUNNING_STATES["place_release"],
             {
                 "resource_id": robot,
                 **bindings,
@@ -611,6 +798,7 @@ def _robot_place_events(
             },
             guards,
             updates,
+            start_updates=reservation,
             parameters=parameters,
             capability=(
                 positioned,
@@ -673,7 +861,7 @@ def _robot_events(models: dict, scene: dict) -> None:
             "Conveyor",
             "Conveyor",
             {
-                **_equals(belt_stopped=True),
+                **_equals(resource_state="idle"),
                 "loading_reserved_by": {"not_equals": other_robot},
                 **{f"part_location.{peg}": {"not_equals": loading} for peg in pegs},
                 "part_location.{part_name}": {"equals": None},
@@ -789,36 +977,39 @@ def _robot_events(models: dict, scene: dict) -> None:
         _sets(resource_state="occupied", part_name=product, product_location="Exit"),
         fixed_part=product,
     )
+    # The saved move_home program enters from any state, but a start never interrupts a running
+    # activity: it starts from each rest state with an empty gripper.
     for row in scene["robots"]:
         robot = row["resource_id"]
-        _robot_task_event(
-            models,
-            robot,
-            "move_home",
-            {"home_available": True},
-            {robot: _equals(held_part=None)},
-            {
-                robot: {
-                    **_sets(resource_location="home"),
-                    **{
-                        field: {"set": None}
-                        for field in models[robot]["state_variables"]
-                        if field.startswith("task_ctx.")
+        for rest in ("idle", "at_pick", "placed"):
+            _robot_task_event(
+                models,
+                robot,
+                "move_home",
+                {"home_available": True},
+                {robot: _equals(resource_state=rest, held_part=None)},
+                {
+                    robot: {
+                        **_sets(resource_location="home"),
+                        **{
+                            field: {"set": None}
+                            for field in models[robot]["state_variables"]
+                            if field.startswith("task_ctx.")
+                        },
+                    }
+                },
+                capability=(
+                    {
+                        "resource_id": robot,
+                        "resource_state": robot_task_registry()["move_home"].program.entry_state,
                     },
-                }
-            },
-            capability=(
-                {
-                    "resource_id": robot,
-                    "resource_state": robot_task_registry()["move_home"].program.entry_state,
-                },
-                {
-                    "resource_id": robot,
-                    "resource_location": "home",
-                    "resource_state": robot_task_registry()["move_home"].program.success_state,
-                },
-            ),
-        )
+                    {
+                        "resource_id": robot,
+                        "resource_location": "home",
+                        "resource_state": robot_task_registry()["move_home"].program.success_state,
+                    },
+                ),
+            )
 
 
 def _transport_and_print_events(models: dict, scene: dict) -> None:
@@ -832,10 +1023,10 @@ def _transport_and_print_events(models: dict, scene: dict) -> None:
     common = {"resource_id": "Conveyor", "robot_clear": True, "drives_synchronized": True}
     for handoff in (False, True):
         guards = {
-            "Conveyor": _equals(belt_stopped=True, loading_reserved_by=None),
+            "Conveyor": _equals(resource_state="idle", loading_reserved_by=None),
             buffer: _equals(zone_1_part=None),
         }
-        updates = {"Conveyor": all_updates, buffer: {}}
+        updates = {"Conveyor": {**all_updates, "resource_state": {"set": "idle"}}, buffer: {}}
         bindings = {**common, "downstream_reserved": True}
         parameters = {}
         if handoff:
@@ -847,9 +1038,11 @@ def _transport_and_print_events(models: dict, scene: dict) -> None:
             )
         else:
             bindings["delivered_part"] = None
-        _event(
+        _activity(
             models,
             "advance_conveyor",
+            "Conveyor",
+            "moving",
             bindings,
             guards,
             updates,
@@ -865,9 +1058,11 @@ def _transport_and_print_events(models: dict, scene: dict) -> None:
         if downstream is None:
             continue
         src, dst = f"zone_{zone['zone']}_part", f"zone_{downstream}_part"
-        _event(
+        _activity(
             models,
             "advance_part",
+            buffer,
+            "moving",
             {
                 "resource_id": buffer,
                 "zone": zone["zone"],
@@ -878,8 +1073,9 @@ def _transport_and_print_events(models: dict, scene: dict) -> None:
                 "source_clear": True,
                 "destination_acknowledged": True,
             },
-            {buffer: {src: {"equals_from_param": "part_name"}, dst: {"equals": None}}},
-            {buffer: {src: {"set": None}, dst: {"set_from_param": "part_name"}}},
+            {buffer: {"resource_state": {"equals": "idle"}, src: {"equals_from_param": "part_name"},
+                      dst: {"equals": None}}},
+            {buffer: {"resource_state": {"set": "idle"}, src: {"set": None}, dst: {"set_from_param": "part_name"}}},
             parameters={"part_name": _part_parameter(buffer)},
             capability=(
                 {"part_location": buffer, "zone": zone["zone"]},
@@ -977,7 +1173,9 @@ def build_nominal_resource_des_models(scene: dict[str, Any]) -> dict[str, dict[s
         model["local_event_alphabet"] = list(
             dict.fromkeys(event["event_name"] for event in model["events"])
         )
-        model["controllable_event_alphabet"] = model["local_event_alphabet"][:]
+        model["controllable_event_alphabet"] = list(
+            dict.fromkeys(event["event_name"] for event in model["events"] if event["controllable"])
+        )
         model["observable_event_alphabet"] = model["local_event_alphabet"][:]
     _check_valuation(models, initial_nominal_valuation(models))
     return models
@@ -1045,11 +1243,10 @@ def _check_valuation(models: dict, valuation: dict) -> None:
     _part_owners(models, valuation)
     for rid in models:
         values = valuation[rid]
-        if "held_part" in values:
-            carrying = values["resource_state"] in {"carrying", "picked", "positioned"}
-            if carrying != (values["held_part"] is not None):
+        if "held_part" in values and values["resource_state"] in HOLDING_STATES | FREE_STATES:
+            if (values["resource_state"] in HOLDING_STATES) != (values["held_part"] is not None):
                 raise ValueError(f"Resource state disagrees with held_part: {rid}")
-        if "approached_part" in values and (values["resource_state"] == "at_pick") != (
+        if "approached_part" in values and (values["resource_state"] in APPROACH_STATES) != (
             values["approached_part"] is not None
         ):
             raise ValueError(f"KMR approach state disagrees with approached_part: {rid}")
@@ -1164,11 +1361,32 @@ def project_nominal_event(
         for event in models[resource_id]["events"]
         if event["event_name"] == event_name and _matches_bindings(models, event, supplied)
     ]
-    if len(matches) != 1:
+    if not matches:
         raise ValueError(f"Unknown or incomplete nominal event binding: {resource_id}.{event_name}")
-    event = matches[0]
+    # Variants of one activity share their bindings, such as loaded and empty travel; their guards
+    # decide which one applies.
+    errors = []
+    for event in matches:
+        try:
+            projected = _project_event(models, valuation, event, supplied, parameters)
+        except ValueError as exc:
+            errors.append(exc)
+            continue
+        # A start in this compatibility projection is followed by its observed finish, so the
+        # projection is the completed activity, as the acknowledged task it records.
+        finish = event.get("finish_event_id")
+        if finish is not None:
+            completion = next(item for item in models[resource_id]["events"] if item["event_id"] == finish)
+            projected = _project_event(models, projected, completion, supplied, parameters)
+        return projected
+    raise errors[0]
+
+
+def _project_event(models: dict, valuation: dict, event: dict, supplied: dict, parameters: dict) -> dict:
+    event_name = event["event_name"]
+    supplied = dict(supplied)
     participants = _event_participants(models, valuation, event, supplied)
-    if event_name == "place_release" and parameters.get("destination_location") == "Conveyor":
+    if event_name == "place_release" + FINISH_SUFFIX and parameters.get("destination_location") == "Conveyor":
         supplied.update(
             conveyor_load_parameters(
                 models["Conveyor"],
@@ -1177,7 +1395,7 @@ def project_nominal_event(
                 parameters["loading_position"],
             )
         )
-    if event_name == "advance_conveyor":
+    if event_name == "advance_conveyor" + FINISH_SUFFIX:
         supplied.update(
             conveyor_advance_parameters(
                 models["Conveyor"],

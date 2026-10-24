@@ -44,6 +44,12 @@ def task_for(context, resource, name, **params):
             for field, rule in event["parameter_bindings"].items()
         ):
             matches.append(event)
+    if len(matches) > 1:
+        # Variants of one activity share their bindings (loaded and empty KMR travel); the resource's
+        # current state selects the one whose guard holds.
+        current = context.snapshot()[resource].get("resource_state")
+        matches = [event for event in matches
+                   if event["guards"].get("resource_state", {}).get("equals") in (None, current)]
     if len(matches) != 1:
         raise ValueError("No exact nominal task binding")
     return {

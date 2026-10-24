@@ -158,8 +158,11 @@ def test_additional_model_keeps_existing_parameterized_inventory_declarations(co
     _additional(case)
     original = build_environment_models(case['scene'])
     model = case['scene']['resource_models']['test_resource']['model']
-    model['state_variables'].update(deepcopy(original['Storage']['state_variables']))
-    inventory = dict.fromkeys(original['Storage']['current_valuation'], False)
+    model['state_variables'].update(deepcopy({field: declaration for field, declaration
+                                              in original['Storage']['state_variables'].items()
+                                              if field.startswith('inventory.')}))
+    inventory = dict.fromkeys((field for field in original['Storage']['current_valuation']
+                               if field.startswith('inventory.')), False)
     model['current_valuation'].update(inventory)
     result = build_environment_models(case['scene'])['test_resource']
     assert result['state_variables'] == model['state_variables']
@@ -456,7 +459,7 @@ def test_buffer_declared_zone_update_and_part_motion_need_no_gripper(controller)
     params = {key: row['equals'] for key, row in event['parameter_bindings'].items() if 'equals' in row}
     params['part_name'] = part
     declaration = {'event_id': event['event_id'], 'event_name': event['event_name'], 'parameters': params}
-    case['snapshot']['resources'][rid].update(zone_1_part=part, zone_2_part=None)
+    case['snapshot']['resources'][rid].update(resource_state='idle', zone_1_part=part, zone_2_part=None)
     # The Buffer observes the part and computes its target before it moves it.
     program = case['programs'][0]
     move = program['step_results'][0]

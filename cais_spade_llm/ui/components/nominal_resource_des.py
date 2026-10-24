@@ -19,6 +19,7 @@ from cais_spade_llm.resources.function_contracts import validated_function_contr
 from cais_spade_llm.resources.gazebo_programs import (
     resource_program_revision, validate_resource_programs,
 )
+from cais_spade_llm.resources.nominal_des import outcome_events, outcome_models
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.resource_function_catalog import (
     render_resource_function_rows,
@@ -355,7 +356,7 @@ def nominal_function_graph(model: dict, models: dict) -> dict:
             nodes.append({"id": len(nodes), "state": state})
         return node_ids[state]
 
-    for event in sorted(model["events"], key=lambda row: row["event_id"]):
+    for event in sorted(outcome_events(model["events"]), key=lambda row: row["event_id"]):
         if event.get("controllable") is False:
             continue
         contract = validated_function_contract(models, event["event_id"])
@@ -644,6 +645,8 @@ def nominal_resource_product_diagram(model: dict, models: dict) -> dict:
         replacement for a part's history or evidence that a task is executable.
     """
     resource_id = model["resource_id"]
+    models = outcome_models({**models, resource_id: model})
+    model = models[resource_id]
     nodes: list[dict] = []
     edges: list[dict] = []
     node_ids: dict[str, str] = {}
@@ -731,10 +734,11 @@ def nominal_resource_default_fields(model: dict) -> list[str]:
         requested = ["resource_state", "resource_location"]
     elif resource_id == "Conveyor":
         requested = [
-            "part_location.{part_name}", "part_order.{part_name}", "loading_reserved_by"
+            "resource_state", "part_location.{part_name}", "part_order.{part_name}",
+            "loading_reserved_by",
         ]
     elif resource_id == "Buffer For Machined parts":
-        requested = [f"zone_{zone}_part" for zone in (1, 2, 3, 4)]
+        requested = ["resource_state", *(f"zone_{zone}_part" for zone in (1, 2, 3, 4))]
     elif resource_id == "Storage":
         requested = [field for field in model["state_variables"] if field.startswith("inventory.")]
     elif resource_id == "3D Printing Station":
@@ -874,6 +878,7 @@ def nominal_product_process_event_rows(models: dict, requirements: dict, part_na
     Returns:
         Potential event variants with their unchanged participant conditions.
     """
+    models = outcome_models(models)
     rows = []
     for step_number, step in enumerate(requirements[part_name], 1):
         for requirement in step["processesToComplete"]:
@@ -1066,14 +1071,11 @@ def nominal_resource_diagram(
         occupied; edge variants retain the individual zone conditions.
     """
     declarations = model["state_variables"]
-    if "resource_state" in declarations:
-        fields = ["resource_state"]
-    elif "belt_stopped" in declarations:
-        fields = ["belt_stopped"]
-    else:
-        fields = [field for field in declarations if field.startswith("zone_")]
-        if not fields:
-            fields = [field for field in declarations if "{part_name}" in field][:1]
+    # A buffer's state is the parts its zones hold; every other resource shows its resource_state.
+    fields = [field for field in declarations if field.startswith("zone_")]
+    if not fields:
+        fields = ["resource_state"] if "resource_state" in declarations else [
+            field for field in declarations if "{part_name}" in field][:1]
     occupancy = {field for field in fields if declarations[field].get("reference") == "part_name"}
     domains = [[False, True] if field in occupancy else declarations[field]["domain"]
                for field in fields]

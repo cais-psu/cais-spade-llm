@@ -16,8 +16,8 @@ _PROGRAMS: dict[str, dict[str, Any]] = {
     # Transport observes the parts it moves and computes their targets before it moves, as a robot does.
     "advance_conveyor": {
         "function_name": "move_parts_downstream",
-        "entry_state": "belt_stopped",
-        "success_state": "belt_stopped",
+        "entry_state": "idle",
+        "success_state": "idle",
         "status": "implemented",
         "steps": [
             {"id": "observe", "op": "detect_parts"},
@@ -27,8 +27,8 @@ _PROGRAMS: dict[str, dict[str, Any]] = {
     },
     "advance_part": {
         "function_name": "move_to_next_zone",
-        "entry_state": "occupied source zone",
-        "success_state": "occupied downstream zone",
+        "entry_state": "idle",
+        "success_state": "idle",
         "status": "implemented",
         "steps": [
             {"id": "observe", "op": "detect_parts"},

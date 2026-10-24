@@ -678,7 +678,7 @@ def _kmr_reconcile_fixture(primitive_state: dict, held_before=None):
     kmr = SimpleNamespace(valuation={"resource_state": "carrying" if held_before else "idle", "held_part": held_before,
                                      "approached_part": None, "resource_location": "M1"}, revision=0)
     machine = SimpleNamespace(valuation={"resource_state": "completed", "part_name": part}, revision=0)
-    pickup = {"event_name": "pick_grasp", "participants": ["ur5e-1", "M1"],
+    pickup = {"event_id": 0, "event_name": "pick_grasp", "participants": ["ur5e-1", "M1"],
               "parameter_bindings": {"resource_id": {"equals": "ur5e-1"}, "origin_resource_location": {"equals": "M1"}},
               "guards": {"resource_state": {"equals": "completed"}, "part_name": {"equals_from_param": "part_name"}},
               "updates": {"resource_state": {"set": "idle"}, "part_name": {"set": None}}}
@@ -844,7 +844,7 @@ def test_KMR_release_into_an_occupied_zone_or_onto_a_moving_belt_is_not_committe
     with pytest.raises(ValueError, match="already occupied"):
         asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
     part, context, runtime, owner, task = _kmr_release_fixture([-3.0, 0.5, 1.016, 0.0, 0.0, 0.0, 1.0])
-    context.resources["Conveyor"].valuation["belt_stopped"] = False
+    context.resources["Conveyor"].valuation["resource_state"] = "moving"
     with pytest.raises(ValueError, match="stopped and unreserved"):
         asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
     assert context.transitions == [] and context.part_tracker[part]["location"] == "KMR"

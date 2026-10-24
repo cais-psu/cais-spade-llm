@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from nicegui import ui
 
+from cais_spade_llm.resources.nominal_des import RUNNING_STATES
+
 _COLORS = {
     "idle": "grey",
     "at_pick": "blue",
@@ -23,5 +25,6 @@ _COLORS = {
 
 
 def status_badge(status: str) -> ui.badge:
-    color = _COLORS.get(status.lower(), "grey")
+    # A resource between an activity's start and its observed finish is shown as running.
+    color = _COLORS.get(status.lower(), "orange" if status in RUNNING_STATES else "grey")
     return ui.badge(status, color=color)

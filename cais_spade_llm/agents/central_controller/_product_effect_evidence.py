@@ -24,6 +24,7 @@ from cais_spade_llm.resources.environment_models import (
     check_value,
     declaration_for,
 )
+from cais_spade_llm.resources.nominal_des import outcome_models
 
 
 def _validate_owner_state_values(model: dict, contracts: dict, state_initial: dict, state_updates: list) -> None:
@@ -67,6 +68,8 @@ def _validate_owner_task_effects(model: dict, tasks: dict, models: dict, updates
     evidence = model.get("evidence", {})
     contracts = evidence.get("primitive_models", {})
     steps = evidence.get("owner_effects", [])
+    # A declared task is a commanded activity, completed with its observed finish's effects.
+    models = outcome_models(models)
     product_updates = {row["task_id"]: row for row in updates}
     needed = {identity for identity, row in product_updates.items() if row["resource_id"] in contracts}
     needed.update(row["task_id"] for row in state_updates if row["resource_id"] in contracts)
@@ -122,6 +125,7 @@ def _declared_product_effects(
 ) -> dict:
     """Resolve exact supported product fields from a configured task declaration."""
     declaration = _object(declaration, "declared_task")
+    models = outcome_models(models)
     if set(declaration) != {"event_id", "event_name", "parameters"}:
         raise ValueError("declared_task requires the exact event and parameter bindings")
     if type(declaration["event_id"]) is not int or resource_id not in models:

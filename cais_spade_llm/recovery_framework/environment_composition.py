@@ -14,7 +14,7 @@ from cais_spade_llm.agents.central_controller.local_composition import (
 )
 from cais_spade_llm.product.environment import fingerprint
 from cais_spade_llm.resources.environment_models import (
-    candidates, event_bindings, feasibility, matches_requirement, project_transition,
+    candidates, event_bindings, feasibility, finish_task, matches_requirement, project_activity, project_transition,
 )
 
 
@@ -464,9 +464,16 @@ class EnvironmentPlant:
                 raise ValueError(cached[1])
             return cached[1]
         try:
-            values, products = project_transition(
-                self.context.models, state["resources"], state["products"], action.task,
-                self.context.product_name, self.context.requirements)
+            if action.task.get("task_id") in getattr(self.context, "started_tasks", {}):
+                # A running activity's start is already in the committed values; only its finish remains.
+                values, products = project_transition(
+                    self.context.models, state["resources"], state["products"],
+                    finish_task(self.context.models, action.task), self.context.product_name,
+                    self.context.requirements)
+            else:
+                values, products = project_activity(
+                    self.context.models, state["resources"], state["products"], action.task,
+                    self.context.product_name, self.context.requirements)
         except ValueError as exc:
             self._projection_cache[key] = (state, str(exc))
             raise

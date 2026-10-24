@@ -154,7 +154,9 @@ def expected_state(raw: dict) -> dict:
     parts = deepcopy(raw["part_tracker_before"])
     conflicts = []
     if raw["transitions"]:
-        latest = max(raw["transitions"], key=lambda row: (row.get("acknowledgement") or {}).get("revision") or 0)
+        # An activity's start and finish share their task's revision; the later record is the latest.
+        latest = max(reversed(raw["transitions"]),
+                     key=lambda row: (row.get("acknowledgement") or {}).get("revision") or 0)
         task = (latest.get("acknowledgement") or {}).get("task_id")
         for rid, values in (latest.get("after") or {}).items():
             for field, value in (values or {}).items():

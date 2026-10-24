@@ -27,7 +27,8 @@ class KMRPrimitives:
             if previous is None:
                 for transition in reversed(runtime.context.transitions):
                     acknowledgement = transition['acknowledgement']
-                    if acknowledgement.get('resource_id') == 'KMR':
+                    # Only a finish carries the custody the KMR observed.
+                    if acknowledgement.get('resource_id') == 'KMR' and transition.get('kind', 'finish') == 'finish':
                         previous = transition.get('observations') or acknowledgement.get('observations')
                         break
             valuation = runtime.context.snapshot()

@@ -16,8 +16,10 @@ from cais_spade_llm.resources.environment_models import (
     build_environment_models,
     candidates,
     feasibility,
+    finish_task,
     matches_requirement,
     owners,
+    project_activity,
     project_transition,
 )
 
@@ -95,7 +97,7 @@ class EnvironmentResourceContext:
             if not context.allows_task(task):
                 continue
             try:
-                after, predicted = project_transition(
+                after, predicted = project_activity(
                     context.models,
                     valuation,
                     products,
@@ -271,6 +273,8 @@ class EnvironmentProductContext:
         # Each resource's own fault report, kept apart from the product's beliefs.
         self.fault_reports: dict[str, dict] = {}
         self.pending_tasks: dict[str, dict] = {}
+        # The participants' revisions each started activity left, against which its finish is checked.
+        self.started_tasks: dict[str, dict] = {}
         self.reservations: dict[str, str] = {}
         self.acknowledgements: dict[str, dict] = {}
         self.transitions: list[dict] = []
@@ -324,6 +328,7 @@ class EnvironmentProductContext:
         snapshot.unavailable_resources = set(self.unavailable_resources)
         snapshot.reservations = dict(self.reservations)
         snapshot.pending_tasks = deepcopy(self.pending_tasks)
+        snapshot.started_tasks = deepcopy(self.started_tasks)
         # Calculation workers use copied current values, never replay live history.
         snapshot.completed_task_ids = frozenset(self.acknowledgements)
         snapshot.acknowledgements = {}
@@ -505,7 +510,7 @@ class EnvironmentProductContext:
             unresolved.extend(
                 {"resource_id": actor.resource_id, "reason": reason} for reason in reasons
             )
-            valuation, products = project_transition(
+            valuation, products = project_activity(
                 self.models, valuation, products, task, self.product_name, self.requirements
             )
         goal = model.get("resource_goal")
@@ -555,7 +560,7 @@ class EnvironmentProductContext:
             raise ValueError("; ".join(reasons))
         if not simulated and task["event_name"] not in actor.executors:
             raise ValueError("No execution adapter and completion evidence validator for this task")
-        project_transition(
+        project_activity(
             self.models,
             self.snapshot(),
             self.part_tracker,
@@ -587,12 +592,11 @@ class EnvironmentProductContext:
         return deepcopy(pending)
 
     def _task_participants(self, task: dict) -> list[str]:
-        event = next(
-            event
-            for event in self.models[task["resource_id"]]["events"]
-            if event["event_id"] == task["event_id"]
-        )
-        return list(event["participants"])
+        events = {event["event_id"]: event for event in self.models[task["resource_id"]]["events"]}
+        event = events[task["event_id"]]
+        finish = events.get(event.get("finish_event_id"), {})
+        # An activity's finish can change a resource its start only consulted.
+        return list(dict.fromkeys([*event["participants"], *finish.get("participants", [])]))
 
     def _task_reservations(self, task: dict, part: str) -> set[str]:
         """Name controller, custody, and shared-workspace reservations."""
@@ -658,7 +662,7 @@ class EnvironmentProductContext:
     @admission_transaction
     def relevant_revisions_match(self, task: dict) -> bool:
         """Check only resources whose state or controller the task can change."""
-        expected = task.get("participant_revisions", {})
+        expected = self.started_tasks.get(task.get("task_id"), task.get("participant_revisions", {}))
         current = self.revisions(expected)
         return bool(expected) and all(current.get(rid) == value for rid, value in expected.items())
 
@@ -668,14 +672,99 @@ class EnvironmentProductContext:
         pending = self.pending_tasks.pop(task_id, None)
         if pending is None:
             return None
+        self.started_tasks.pop(task_id, None)
         for key in pending.get("reservations", []):
             if self.reservations.get(key) == task_id:
                 self.reservations.pop(key, None)
         return deepcopy(pending)
 
+    def _commit(self, record: dict, after: dict, products: dict, task: dict) -> None:
+        for part, state in products.items():
+            if state != self.part_tracker[part]:
+                state["last_task"] = task["task_id"]
+        record["product_after"] = deepcopy(products)
+        for rid, values in after.items():
+            if values != self.resources[rid].valuation:
+                self.resources[rid].revision += 1
+                self.resources[rid].valuation = values
+                self.resources[rid].evidence = task["evidence"]
+        self.part_tracker = products
+        self.revision += 1
+        self.transitions.append(record)
+
+    @admission_transaction
+    def start(self, task_id: str) -> bool:
+        """Commit the observed start of a prepared activity once.
+
+        The start puts the actor in its running state and makes its start's reservations;
+        ``acknowledge`` commits the observed finish. An event that is not an activity has no
+        separate start.
+
+        Args:
+            task_id: The prepared task its resource reported running.
+
+        Returns:
+            Whether this call committed a start.
+        """
+        pending = self.pending_tasks.get(str(task_id or ""))
+        if pending is None:
+            raise ValueError("No pending task")
+        if task_id in self.started_tasks or finish_task(self.models, pending) is None:
+            return False
+        if not self.relevant_revisions_match(pending):
+            raise ValueError("Start does not match pending task or current configuration")
+        before = self.snapshot()
+        after, products = project_transition(
+            self.models, before, self.part_tracker, pending, self.product_name, self.requirements
+        )
+        self._commit({
+            "kind": "start",
+            "acknowledgement": {**deepcopy(pending), "status": "running"},
+            "before": before,
+            "after": deepcopy(after),
+            "product_before": deepcopy(self.part_tracker),
+        }, after, products, pending)
+        self.started_tasks[task_id] = self.revisions(self._task_participants(pending))
+        if self.acknowledgement_observer is not None:
+            self.acknowledgement_observer()
+        return True
+
+    @admission_transaction
+    def record_fault(self, task_id: str, report: dict) -> bool:
+        """Record a resource's reported failure of a prepared task without changing any value.
+
+        The actor stays where the failure found it, such as in the running state of a started
+        activity.
+
+        Args:
+            task_id: The prepared task.
+            report: The resource's reply, with its status and reason.
+
+        Returns:
+            Whether a fault was recorded.
+        """
+        pending = self.pending_tasks.get(str(task_id or ""))
+        if pending is None:
+            return False
+        values = self.snapshot()
+        self.transitions.append({
+            "kind": "fault",
+            "acknowledgement": {**deepcopy(pending), "status": report.get("status"),
+                                "reason": report.get("reason", "")},
+            "before": values,
+            "after": deepcopy(values),
+            "product_before": deepcopy(self.part_tracker),
+            "product_after": deepcopy(self.part_tracker),
+        })
+        if self.acknowledgement_observer is not None:
+            self.acknowledgement_observer()
+        return True
+
     @admission_transaction
     def acknowledge(self, acknowledgement: dict) -> bool:
         """Commit exactly matching acknowledged effects once, atomically.
+
+        An activity's start is committed first when its resource did not report it running.
 
         Args:
             acknowledgement: Exact resource task acknowledgement and status.
@@ -703,35 +792,26 @@ class EnvironmentProductContext:
             and actor.validated_completions.get(task_id) != expected
         ):
             raise ValueError("Resource has not validated completion evidence")
+        self.start(task_id)
         before = self.snapshot()
         after, products = project_transition(
             self.models,
             before,
             self.part_tracker,
-            pending,
+            finish_task(self.models, pending) or pending,
             self.product_name,
             self.requirements,
         )
-        for part, state in products.items():
-            if state != self.part_tracker[part]:
-                state["last_task"] = task_id
         record = {
+            "kind": "finish",
             "acknowledgement": deepcopy(acknowledgement),
             "before": before,
             "after": deepcopy(after),
             "product_before": deepcopy(self.part_tracker),
-            "product_after": deepcopy(products),
         }
         if pending["evidence"] == "resource":
             record["observations"] = deepcopy(actor.completion_observations[task_id])
-        for rid, values in after.items():
-            if values != self.resources[rid].valuation:
-                self.resources[rid].revision += 1
-                self.resources[rid].valuation = values
-                self.resources[rid].evidence = pending["evidence"]
-        self.part_tracker = products
-        self.revision += 1
-        self.transitions.append(record)
+        self._commit(record, after, products, pending)
         self.acknowledgements[task_id] = deepcopy(acknowledgement)
         self.cancel_pending(task_id)
         if self.acknowledgement_observer is not None:
@@ -819,10 +899,16 @@ def verify_environment_run(report: dict) -> None:
             raise ValueError(
                 "Controller evidence requires its resource validator; cannot replay as simulated"
             )
-        task = {key: ack[key] for key in ("resource_id", "event_id", "event_name", "parameters")}
-        task.update({key: deepcopy(ack[key]) for key in ('offer_request_id', 'offer_resource_revisions', 'offer_product_state') if key in ack})
-        context.prepare(task, simulated=True)
-        context.acknowledge(ack)
+        if ack["task_id"] not in context.pending_tasks:
+            task = {key: ack[key] for key in ("resource_id", "event_id", "event_name", "parameters")}
+            task.update({key: deepcopy(ack[key]) for key in ('offer_request_id', 'offer_resource_revisions', 'offer_product_state') if key in ack})
+            context.prepare(task, simulated=True)
+        if record.get("kind") == "start":
+            context.start(ack["task_id"])
+        elif record.get("kind") == "fault":
+            context.record_fault(ack["task_id"], ack)
+        else:
+            context.acknowledge(ack)
         if context.transitions[-1] != record:
             raise ValueError("Saved transition differs from acknowledged effects")
     if (

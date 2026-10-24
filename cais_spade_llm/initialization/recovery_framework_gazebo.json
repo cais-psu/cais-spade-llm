@@ -1737,7 +1737,7 @@
     }
   },
   "resource_programs": {
-    "revision": 6,
+    "revision": 7,
     "resources": {
       "ur5e-1": {
         "functions": {
@@ -11130,8 +11130,8 @@
             "function_name": "move_parts_downstream",
             "status": "implemented",
             "program": {
-              "entry_state": "belt_stopped",
-              "success_state": "belt_stopped",
+              "entry_state": "idle",
+              "success_state": "idle",
               "steps": [
                 {
                   "id": "observe",
@@ -11173,8 +11173,8 @@
             "function_name": "move_to_next_zone",
             "status": "implemented",
             "program": {
-              "entry_state": "occupied source zone",
-              "success_state": "occupied downstream zone",
+              "entry_state": "idle",
+              "success_state": "idle",
               "steps": [
                 {
                   "id": "observe",

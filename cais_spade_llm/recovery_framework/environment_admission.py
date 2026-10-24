@@ -56,8 +56,12 @@ class EnvironmentAdmission:
         self.contexts: dict[str, dict] = {}
         self.components: list[CachedComposition] = []
         self.epoch = 0
+        # ack_cursor and acknowledgement_history count completions, the monitor ticks; record_cursor
+        # reads every committed record, and starts and faults are kept in activity_history.
         self.ack_cursor = 0
+        self.record_cursor = 0
         self.acknowledgement_history: list[dict] = []
+        self.activity_history: list[dict] = []
         self.last_results: dict[str, dict] = {}
         self._prepared_admissions: dict[str, dict] = {}
         self.invalid_reason = ""
@@ -77,13 +81,40 @@ class EnvironmentAdmission:
     def _running_labels(self) -> set[str]:
         return {label for action in self.grants.values() for label in action.labels}
 
+    def _observe(self, record: dict, task: dict) -> None:
+        for rid in self.context._task_participants(task):
+            self.contexts[rid] = {**task["parameters"], "task_id": task["task_id"]}
+        for rid, values in record["after"].items():
+            jid = self.runtime.jids[rid]
+            self.monitor.resource_state_aps[jid] = set(state_labels(
+                self.monitor, {rid: values}, record["product_after"],
+                self.runtime.jids, self.contexts))
+            self.monitor.resource_states[jid] = {
+                "current_state": values.get("resource_state", ""),
+                "params": {**self.contexts.get(rid, {}), **values},
+            }
+
     def synchronize(self) -> None:
         """Consume ordered committed acknowledgements exactly once."""
         with self.context.admission_lock:
-            while self.ack_cursor < len(self.context.transitions):
-                record = self.context.transitions[self.ack_cursor]
+            while self.record_cursor < len(self.context.transitions):
+                record = self.context.transitions[self.record_cursor]
+                self.record_cursor += 1
                 task = record["acknowledgement"]
                 before_states = deepcopy(self.monitor.current_states)
+                kind = record.get("kind", "finish")
+                if kind != "finish":
+                    # A start or a fault keeps the action's grant and steps no specification monitor,
+                    # as the local composition steps them only when an action is done.
+                    self._observe(record, task)
+                    self.activity_history.append({
+                        "record": self.record_cursor, "run_id": self.context.run_id, "kind": kind,
+                        "task_id": task["task_id"], "task": deepcopy(task),
+                        "admitted": task["task_id"] in self.grants, "states": before_states,
+                    })
+                    self.epoch += 1
+                    self._prepared_admissions.clear()
+                    continue
                 action = self.grants.pop(task["task_id"], None)
                 # An observed event commands nothing, so it is acknowledged without a grant.
                 model = (getattr(self.context, "models", None) or {}).get(task["resource_id"]) or {}
@@ -113,15 +144,7 @@ class EnvironmentAdmission:
                     next_states[rule] = evidence["to"]
                 self.monitor.current_states = next_states
                 self.monitor.running_aps = self._running_labels()
-                for rid, values in record["after"].items():
-                    jid = self.runtime.jids[rid]
-                    self.monitor.resource_state_aps[jid] = set(state_labels(
-                        self.monitor, {rid: values}, record["product_after"],
-                        self.runtime.jids, self.contexts))
-                    self.monitor.resource_states[jid] = {
-                        "current_state": values.get("resource_state", ""),
-                        "params": {**self.contexts.get(rid, {}), **values},
-                    }
+                self._observe(record, task)
                 self.ack_cursor += 1
                 self.acknowledgement_history.append({
                     "cursor": self.ack_cursor, "run_id": self.context.run_id,

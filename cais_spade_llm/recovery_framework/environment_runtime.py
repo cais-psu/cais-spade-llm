@@ -33,6 +33,7 @@ from cais_spade_llm.resources.environment_models import (
     feasibility,
     matches_requirement,
     process_json,
+    project_activity,
     project_transition,
 )
 from cais_spade_llm.resources.function_contracts import validated_function_contract
@@ -684,7 +685,7 @@ class EnvironmentRuntime:
         """Build the existing DAG/FSA interface for one rechecked next task."""
         name = f"environment_{self.context.revision + 1}"
         actor = self.context.resources[task["resource_id"]]
-        after, _ = project_transition(
+        after, _ = project_activity(
             self.context.models,
             self.context.snapshot(),
             self.context.part_tracker,
@@ -715,7 +716,7 @@ class EnvironmentRuntime:
         nodes = []
         for index, task in enumerate(tasks):
             actor = self.context.resources[task["resource_id"]]
-            after, _ = project_transition(
+            after, _ = project_activity(
                 self.context.models,
                 self.context.snapshot(),
                 self.context.part_tracker,
@@ -1289,7 +1290,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
                 while cache["path"]:
                     task = cache["path"][0]
                     try:
-                        after, products = project_transition(
+                        after, products = project_activity(
                             context.models, valuation, context.part_tracker, task,
                             context.product_name, context.requirements,
                         )
@@ -1366,7 +1367,19 @@ class EnvironmentProductLoop(CyclicBehaviour):
             "resource_id": task["resource_id"], "status": payload.get("status"),
             "timestamp": time.time(),
         })
-        if payload.get("status") in {"accepted", "running"}:
+        if payload.get("status") == "accepted":
+            return True
+        if payload.get("status") == "running":
+            # The resource began the activity after its start conditions and the CCA grant held.
+            try:
+                started = runtime.context.start(task["task_id"])
+            except ValueError as exc:
+                runtime.stop("Resource start did not match the product's state")
+                await runtime.cancel_owned()
+                runtime.outcome = {"status": "blocked", "reason": str(exc), "details": payload}
+                return False
+            if started:
+                runtime.queue_save()
             return True
         if payload.get("status") == "held":
             runtime.context.cancel_pending(task["task_id"])
@@ -1389,6 +1402,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
             runtime.queue_save()
             return True
         if payload.get("status") != "completed":
+            runtime.context.record_fault(task["task_id"], payload)
             runtime.stop("Resource did not complete negotiated work")
             await runtime.cancel_owned()
             runtime.outcome = {"status": "blocked", "reason": "Resource did not complete negotiated work", "details": payload}
@@ -1534,7 +1548,7 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
         status, reasons = feasibility(actor.model, task, context.geometry.get(part, {}))
         if status != "FEASIBLE":
             raise ValueError("; ".join(reasons))
-        project_transition(
+        project_activity(
             context.models,
             context.snapshot(),
             context.part_tracker,

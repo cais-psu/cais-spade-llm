@@ -136,6 +136,10 @@ class NominalProductContext:
             for row in self.models[task["resource_id"]]["events"]
             if row["event_id"] == task["event_id"]
         )
+        # An acknowledged task completes its activity, so its part effects are its observed finish's.
+        if event.get("finish_event_id") is not None:
+            event = next(row for row in self.models[task["resource_id"]]["events"]
+                         if row["event_id"] == event["finish_event_id"])
         products, affected = project_product_states(
             self.models, before, after, self.part_tracker, task, event
         )

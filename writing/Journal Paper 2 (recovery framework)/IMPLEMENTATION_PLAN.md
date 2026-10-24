@@ -1,6 +1,6 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
-## Aligned part model — October 23, 2026 — DONE offline and verified (full suite = baseline), uncommitted; Gazebo/recapture pending after activity model B
+## Aligned part model — October 23, 2026 — DONE offline, verified (full suite = baseline), committed `d981a3f`; Gazebo/recapture pending after activity model B
 
 **Decision (user, October 23).** Align the part model with the semiconductor framework
 (`/home/jongh/projects/SemiconductorSimulation_testing-master`). Do it before the RA rebuild, and batch it
@@ -259,7 +259,7 @@ with the RA step 1 constraints (next section) into one recapture.
 **Paper.** Section 3 states the part state as (location, current process, process ledger), citing the
 semiconductor `ProductState`/`ProductHistory`. The interrupted-process status is the extension.
 
-## Activity model B — stage plan, October 23, 2026 — APPROVED (B-D1…B-D6 as recommended), not started
+## Activity model B — stage plan, October 23, 2026 — APPROVED (B-D1…B-D6 as recommended); B1–B7 and the B8 offline checks done (uncommitted); Gazebo steps await the go-ahead
 
 **Decision (user, October 23).** "b makes sense"; "do not implement yet"; "come up with the detailed plan
 for B including the resources that are not aligned correctly right now". Ordered after the aligned part
@@ -427,6 +427,112 @@ controllable, finish uncontrollable, breakdown uncontrollable).
    - Then **one recapture of all four failures** (shared queue, runbook flags), the UI defaults switch,
      archiving first, and four draft reruns.
 
+### Progress (uncommitted; base `d981a3f`)
+
+**B1 model, first pass:**
+- `nominal_des`:
+  - `_activity(models, name, actor, running, …)` declares a start and its `<name>_done` finish, linked by
+    `finish_event_id`/`start_event_id`.
+  - The start carries every precondition, the running state and the commanded task-context target.
+  - The finish is guarded by the running state and the values it changes, so no other resource's
+    unrelated state can block an observed completion.
+  - Running states are declared in the model builder (`_ROBOT_RUNNING_STATES`, `_KMR_RUNNING_STATES`),
+    not in the saved programs; the robots' programs and real end states are unchanged.
+  - KMR travel has loaded and empty variants, told apart at the finish by `held_part`.
+  - The robot's release onto the belt sets `loading_reserved_by` at its start.
+  - Conveyor `resource_state` idle/moving replaces `belt_stopped`; Buffer idle/moving; Storage idle.
+  - `HOLDING_STATES`/`FREE_STATES`/`APPROACH_STATES` replace the held-part invariants.
+  - The v1 `project_nominal_event` chooses the variant whose guards hold and applies a start followed by
+    its finish, so v1 planning and delivery still see completed activities.
+  - The v1 ledger effect is on `place_insert_done`.
+- `environment_models`:
+  - Finishes get no program.
+  - The Conveyor's collection effects are on `place_release_done`/`advance_conveyor_done`.
+  - `place_insert` keeps the guards; `place_insert_done` gets the product effects unchanged
+    (`"state": "assembled"`, the target, the ledger entry). A first pass dropped `"state"`; it was
+    restored because the CCA's product-effect evidence reads it.
+  - Event lists are computed after the printer split and filtered by `controllable` (fixes the machine
+    list listing `complete_job` and the printer list missing it).
+  - `finish_task`/`project_activity`; `candidates` never proposes a finish.
+- `function_contracts`: a start's contract has the start's in-state and the finish's out-state, success
+  state and product effects.
+- Programs: only the Conveyor/Buffer placeholder states changed (`belt_stopped`, "occupied … zone" →
+  `idle`), in `workflow_task_programs.py` and the scene `resource_programs` (**revision 6 → 7**).
+- `slippage_execution`: belt idle check.
+
+**B2 planning, first pass:** every planning or check projection uses `project_activity`
+(`product/environment.py` alternatives, bid check, prepare; `environment_runtime` `set_plan(s)`, the cached
+path, the RA pre-check; `environment_composition` local composition). The acknowledgement temporarily
+commits the whole activity until B3 splits it.
+
+**B1/B2 second pass (model holes found by the UI diagrams):**
+- `move_home` starts from each rest state with an empty gripper (`idle`, `at_pick`, `placed`). Before,
+  its only guard was `held_part = None`, so it could start during another running activity. Every start
+  now has a rest-state guard (checked over schema 2 and 3).
+- A finish observes the reservation its start made (`loading_reserved_by = <robot>`), so the belt can
+  no longer record a placement while it moves.
+- `_copy_activity` copies a start together with its finish, linked. Used by the printer's last-pickup
+  outcome (its finish, not its start, now sets the printer state) and the machines' paused/stopped unload
+  variants (before, a copied start stayed linked to the original finish).
+- `nominal_des.outcome_events` folds each activity into one outcome-level event: the start's identity,
+  guards and program with the finish's effects (B-D5). Used by the recovery descriptor
+  (`environment_recovery_descriptor`), the function catalog and graph, and the product/process views.
+- v1 nominal acknowledgement takes the finish's product effects.
+
+**B6 UI, first pass:** resource-state diagrams show starts into running states and finishes out of them;
+part-level views (function graph, product graph, process rows, function catalog) show activities; the
+belt's diagram shows `resource_state` (idle/moving) instead of `belt_stopped`; default fields add
+`resource_state` for the Conveyor and Buffer; the Buffer's one-graph diagram keeps zone occupancy.
+
+**B3 runtime, first pass:**
+- `EnvironmentProductContext.start(task_id)` commits an activity's start when its resource reports
+  `"running"` (`environment_runtime._collect_acknowledgement`). `acknowledge` commits the finish, and
+  first the start when none was reported. A reported failure is `record_fault` (no value changes), so a
+  failure mid-activity leaves the actor in its running state. Records carry `kind` start/finish/fault.
+- B-D3 without changing the task: `started_tasks` keeps the participants' revisions the start left, and
+  `relevant_revisions_match` checks a started task against them (PA and RA share the context).
+- `_task_participants` includes the finish's participants (none differ today).
+- CCA (B-D4): `environment_admission.synchronize` reads every record with `record_cursor`. Start and fault
+  records go to `activity_history`, keep the grant and step no monitor; finishes step the monitors as
+  before, so `ack_cursor`/`acknowledgement_history` still count completions (the recovery coordinator
+  and `gazebo_safety_preparation` audits rely on that). The monitors step only on finishes, as the local
+  composition commits DFA history only at "done" (the user chose finish-only, 2026-10-23; see the Paper note).
+- `EnvironmentPlant.project` applies only the finish of a running action whose start is committed.
+- `verify_environment_run` replays start/finish/fault records.
+- Readers: `kmr_primitives` takes custody from finish records; `failure_grounding` takes the later record
+  on a revision tie; v1 `nominal_planner` never plans a finish. v1 delivery stays atomic.
+- Checked unchanged: `delivery.py` 242-248 and `kmr_agent.py` 191-194 (v1 rest states),
+  `environment_runtime` 1169/1263 (rest-state checks), workers read only fields a start never changes.
+
+**B4 started:** `failure_checkpoints.acknowledged_pickup` reads custody from the latest finish and accepts
+a robot that has started its placement (`approaching_place`); the robot-breakdown records skip starts.
+
+**CCA and safety evidence (found by the full suite):**
+- `nominal_des.outcome_models` folds activities across all models, so a resource that only consults a
+  start carries the same participants and product effects as the actor.
+- `_product_effect_evidence` and `slippage_execution._declared_consequence` read activities.
+- Test fixtures: `ppr_ap_migration` gives transports `idle` in/out states and re-binds archived declared
+  tasks to the renumbered events (`migrate_declared_tasks`).
+
+**B4–B7 status (October 23):**
+- B4: `failure_checkpoints` done. Checked unchanged: `conveyor_fault` (`complete_job` stays atomic;
+  the placement capture already sees `approaching_place` from the committed start), `evaluation_capture`
+  (reads finish records), rule A1 (the cancelled goal's task is the started activity; its running state
+  comes from the start record).
+- B5: covered by the fold. The environment descriptor folds across all models; robot descriptors are
+  compiled from the saved programs (activity-level, guarded by `held_part`, not `resource_state`);
+  `multi_turn_diagnostic` reads descriptors; `multi_turn_outline_facts` reads bindings and part-field
+  updates that the finishes carry.
+- B6: `status_badge` shows `RUNNING_STATES` as running. The bridge's robot state maps compare the
+  robot agent's own rest states, so the bridge is unchanged.
+- B7: tests updated; new regressions: start then finish, completion without a start, a fault leaves the
+  activity running, a start keeps the CCA grant without a monitor tick, event alphabets, no `move_home`
+  from a running state, belt placement needs its own reservation.
+
+**B8 offline (October 23):** full suite 152 failed / 4,476 passed, the same 152 as the baseline (no new
+failures); `poetry check` (deprecation warnings only); `compileall`; `ui_main --help`. **Not run:**
+`make bootstrap-gazebo`, the nominal Gazebo run and the recapture (they need the user's go-ahead).
+
 ### Risks
 
 - **The main pipeline runtime changes:** two commits per execution, CCA stepping, and capture checkpoints.
@@ -441,7 +547,10 @@ controllable, finish uncontrollable, breakdown uncontrollable).
 
 - Section 3: one resource template (`resource_state` + variables; activities as start/finish with
   controllability; faults from any state).
-- Section 5.3: the monitors step on start and finish records.
+- Section 5.3: the CCA checks a controllable start before granting it (its running label and projected
+  end state) and the monitors step on observed finishes, the same rule in the composition check, the
+  live monitor and the recovery monitor histories. "During an activity" is the activity's running label;
+  rules do not name running states as state APs. (The user chose finish-only, 2026-10-23. Stepping on starts too, in all four CCA parts together, is a possible later stage.)
 - State the outcome-level recovery event convention (B-D5).
 
 ## RA feasibility validation — October 23, 2026 — plan approved by the user, not started

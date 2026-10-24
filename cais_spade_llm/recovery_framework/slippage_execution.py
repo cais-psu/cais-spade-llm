@@ -284,9 +284,11 @@ def _declared_consequence(context, event_names: set[str], location_field: str, l
     robot they were declared for, with ``{part_name}`` fields bound to the part.
     """
     from cais_spade_llm.resources.environment_models import _bound
+    from cais_spade_llm.resources.nominal_des import outcome_models
 
     params = {"part_name": part}
-    for rid, model in context.models.items():
+    # A handoff's consequence is its whole activity: the start's guards and the finish's updates.
+    for rid, model in outcome_models(context.models).items():
         resource = context.resources.get(rid)
         if resource is None:
             continue
@@ -325,7 +327,7 @@ def _observed_release(context, part: str, pose: list, settled: bool) -> tuple[st
     rid, area = receiver
     values = context.resources[rid].valuation
     if rid == "Conveyor":
-        if values.get("belt_stopped") is not True or values.get("loading_reserved_by") is not None:
+        if values.get("resource_state") != "idle" or values.get("loading_reserved_by") is not None:
             raise ValueError("The Conveyor must be stopped and unreserved to receive a part")
         order = conveyor_place_parameters(context.models[rid], values, part, area)
         updates = {f"part_location.{part}": area,

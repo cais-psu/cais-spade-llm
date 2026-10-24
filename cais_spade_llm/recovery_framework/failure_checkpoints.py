@@ -25,15 +25,18 @@ ROBOT_BREAKDOWN_GRIPPER_CONDITION = "not working (hardware fault, needs repair)"
 
 
 def acknowledged_pickup(context, resource_id: str, part: str) -> dict | None:
-    """Require the latest robot acknowledgement to establish its current custody."""
+    """Require the robot's latest finished activity to be the pickup that established its custody.
+
+    The robot may since have started its placement, whose start changes no custody.
+    """
     actor = context.resources[resource_id]
     if (actor.valuation.get("held_part") != part
-            or actor.valuation.get("resource_state") != "picked"
+            or actor.valuation.get("resource_state") not in {"picked", "approaching_place"}
             or context.part_tracker.get(part, {}).get("location") != resource_id):
         return None
     for record in reversed(context.transitions):
         task = record["acknowledgement"]
-        if task["resource_id"] != resource_id:
+        if task["resource_id"] != resource_id or record.get("kind", "finish") != "finish":
             continue
         if (task.get("run_id") != context.run_id
                 or task["event_name"] != "pick_grasp" or task.get("evidence") != "resource"
@@ -137,7 +140,8 @@ def checkpoint(context, configuration: dict) -> dict | None:
         # M1's last acknowledgement is the observed completion of its job.
         for rid, name in (("M1", "complete_job"), ("ur5e-1", "pick_approach")):
             record = next((row for row in reversed(context.transitions)
-                           if row["acknowledgement"]["resource_id"] == rid), None)
+                           if row["acknowledgement"]["resource_id"] == rid
+                           and row.get("kind", "finish") == "finish"), None)
             task = record["acknowledgement"] if record is not None else {}
             if (task.get("run_id") != context.run_id or task.get("event_name") != name
                     or task.get("evidence") != "resource"

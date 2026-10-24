@@ -92,6 +92,50 @@ def test_acknowledged_after_snapshot_survives_a_later_robot_fault():
     assert context.transitions[-1]['after']['ur5e-1']['resource_state'] == 'idle'
 
 
+def _prepared_move_home():
+    from cais_spade_llm.ui.recovery_setup import default_setup, validate_setup
+
+    inputs = validate_setup(default_setup())
+    context = EnvironmentProductContext(inputs['scene'], inputs['product_order'], inputs['geometry'])
+    event = next(row for row in context.models['ur5e-1']['events'] if row['event_name'] == 'move_home'
+                 and row['guards'].get('resource_state') == {'equals': 'idle'})
+    task = {'resource_id': 'ur5e-1', 'event_id': event['event_id'], 'event_name': event['event_name'],
+            'parameters': {key: rule['equals'] for key, rule in event['parameter_bindings'].items()}}
+    return context, context.prepare(task, simulated=True)
+
+
+def test_an_activity_commits_its_start_then_its_observed_finish():
+    context, pending = _prepared_move_home()
+    assert context.start(pending['task_id']) and not context.start(pending['task_id'])
+    assert [row['kind'] for row in context.transitions] == ['start']
+    assert context.resources['ur5e-1'].valuation['resource_state'] == 'moving_home'
+    # The finish is checked against the values its start left, not those the task was prepared on.
+    assert context.relevant_revisions_match(pending)
+    assert context.acknowledge({**pending, 'status': 'completed'})
+    assert [row['kind'] for row in context.transitions] == ['start', 'finish']
+    assert context.resources['ur5e-1'].valuation['resource_state'] == 'idle'
+    assert context.resources['ur5e-1'].valuation['resource_location'] == 'home'
+    assert not context.pending_tasks and not context.started_tasks
+
+
+def test_a_completion_reported_without_a_start_commits_both():
+    context, pending = _prepared_move_home()
+    assert context.acknowledge({**pending, 'status': 'completed'})
+    assert [row['kind'] for row in context.transitions] == ['start', 'finish']
+    assert context.transitions[0]['after']['ur5e-1']['resource_state'] == 'moving_home'
+
+
+def test_a_reported_failure_leaves_a_started_activity_running():
+    context, pending = _prepared_move_home()
+    context.start(pending['task_id'])
+    assert context.record_fault(pending['task_id'], {'status': 'blocked', 'reason': 'gripper fault'})
+    fault = context.transitions[-1]
+    assert [row['kind'] for row in context.transitions] == ['start', 'fault']
+    assert fault['before'] == fault['after'] and fault['acknowledgement']['reason'] == 'gripper fault'
+    assert context.resources['ur5e-1'].valuation['resource_state'] == 'moving_home'
+    assert pending['task_id'] in context.pending_tasks
+
+
 @asynccontextmanager
 async def network(inputs, permitted=None, *, diagnostic_cca_bypass=False):
     """Drive real SPADE inbox dispatch locally without XMPP, LLM calls, or robots."""

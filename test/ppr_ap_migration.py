@@ -66,6 +66,11 @@ def migrate_resource_programs(programs: dict) -> None:
                             {"id": "targets", "op": "compute_transport_targets"}, *program["steps"]]
         bundle["primitives"] = {name: {"status": "executable", "recovery_selectable": True}
                                 for name in ("detect_parts", "compute_transport_targets", "move_relative")}
+    for rid, event in (("Conveyor", "advance_conveyor"), ("Buffer For Machined parts", "advance_part")):
+        bundle = resources.get(rid)
+        if isinstance(bundle, dict) and event in bundle.get("functions", {}):
+            # A transport is idle between its moves and moving during one.
+            bundle["functions"][event]["program"].update(entry_state="idle", success_state="idle")
     kmr = resources.get("KMR")
     if isinstance(kmr, dict):
         # Coordinate travel is composed from move_base; it is no longer a saved KMR function.
@@ -94,6 +99,27 @@ def migrate_scene(scene: dict) -> None:
              if isinstance(printer, dict) and isinstance(printer.get("state_variables"), dict) else None)
     if isinstance(state, dict) and state.get("domain") == ["idle", "completed"]:
         state["domain"] = ["idle", "printing", "completed"]
+
+
+def migrate_declared_tasks(value: Any, models: dict) -> Any:
+    """Re-bind archived declared tasks to the current event identities.
+
+    Activity starts and finishes renumbered the events; a declared task keeps its name and bindings.
+    """
+    if isinstance(value, list):
+        return [migrate_declared_tasks(item, models) for item in value]
+    if not isinstance(value, dict):
+        return deepcopy(value)
+    result = {key: migrate_declared_tasks(item, models) for key, item in value.items()}
+    if set(result) == {"event_id", "event_name", "parameters"}:
+        params = result["parameters"]
+        matches = [event["event_id"] for event in models.get(params.get("resource_id"), {}).get("events", [])
+                   if event["event_name"] == result["event_name"]
+                   and all(params.get(name) == rule["equals"]
+                           for name, rule in event["parameter_bindings"].items() if "equals" in rule)]
+        if len(matches) == 1:
+            result["event_id"] = matches[0]
+    return result
 
 
 def migrate_ppr_fixture(value: Any) -> Any:

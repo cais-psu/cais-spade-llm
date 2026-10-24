@@ -45,8 +45,14 @@ def validated_function_contract(models: dict[str, dict], event_id: int) -> dict[
             raise ValueError(f"Function event_id {event_id} has invalid saved steps")
     if status == "planned" and any(candidate["steps"] for candidate in candidates):
         raise ValueError(f"Planned function event_id {event_id} has executable steps")
+    # A function runs a whole activity: its start's preconditions in, its observed finish's effects out.
+    finish_id = owner.get("finish_event_id")
+    completion = {rid: event for rid, model in models.items() for event in model["events"]
+                  if finish_id is not None and event["event_id"] == finish_id}
+    if finish_id is not None and actor not in completion:
+        raise ValueError(f"Function event_id {event_id} has no observed finish")
     guard = owner["guards"].get("resource_state", {}).get("equals")
-    update = owner["updates"].get("resource_state", {}).get("set")
+    update = (completion.get(actor) or owner)["updates"].get("resource_state", {}).get("set")
     if guard is not None and not any(
         candidate.get("entry_state") in {guard, "any"}
         and (update is None or candidate.get("success_state") == update)
@@ -90,9 +96,9 @@ def validated_function_contract(models: dict[str, dict], event_id: int) -> dict[
                 "updates": deepcopy(event["updates"]),
                 "collection_effects": deepcopy(event.get("collection_effects", {})),
             }
-            for rid, event in participants.items()
+            for rid, event in (completion or participants).items()
         },
-        "product_effects": deepcopy(owner.get("product_effects", {})),
+        "product_effects": deepcopy((completion.get(actor) or owner).get("product_effects", {})),
         "steps": deepcopy(program["steps"]),
         "program_variants": {
             name: deepcopy(candidate["steps"]) for name, candidate in variants.items()

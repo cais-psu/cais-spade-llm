@@ -23,7 +23,7 @@ from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety 
 from cais_spade_llm.product.environment import EnvironmentProductContext
 from cais_spade_llm.recovery_framework import PRODUCT_PATH, ROOT, SCENE_PATH, read_json
 from cais_spade_llm.recovery_framework.environment_admission import EnvironmentAdmission
-from cais_spade_llm.resources.environment_models import project_transition
+from cais_spade_llm.resources.environment_models import project_activity
 
 _PRODUCT = "assembly_board-v1@localhost"
 _RECOVERY = "KMR_storage_interruption_nominal_ack"
@@ -61,7 +61,8 @@ def _environment_ack_case(*, self_loop=False):
     # the real pending task, reservation, projection, and observer implementation.
     admission.grants[task["task_id"]] = Action(task["task_id"], deepcopy(task), frozenset(), labels)
     monitor.running_aps = set(labels)
-    after, products = project_transition(context.models, context.snapshot(), context.part_tracker,
+    # A completed task is its whole activity, start and observed finish.
+    after, products = project_activity(context.models, context.snapshot(), context.part_tracker,
                                          task, context.product_name, context.requirements)
     updates = {resource: {key: value for key, value in values.items()
                           if value != context.snapshot()[resource][key]}
@@ -120,6 +121,17 @@ def _acknowledge(case, *, physical=True):
     if physical:
         case.owner["observations"].append({"kind": "task_completion", "time_exact": "1",
                                            "task_id": case.task["task_id"], "status": "completed"})
+
+
+def test_a_started_activity_keeps_its_grant_and_steps_no_monitor():
+    case = _environment_ack_case()
+    assert case.context.start(case.task["task_id"])
+    assert case.admission.ack_cursor == 0 and case.admission.acknowledgement_history == []
+    assert [row["kind"] for row in case.admission.activity_history] == ["start"]
+    assert case.task["task_id"] in case.admission.grants
+    assert case.monitor.transition_evidence.call_count == 0
+    _acknowledge(case)
+    assert case.monitor.transition_evidence.call_count == 1
 
 
 def test_real_nominal_acknowledgement_is_reused_without_second_dfa_tick():

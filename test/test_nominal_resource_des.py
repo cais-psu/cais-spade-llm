@@ -13,6 +13,7 @@ import pytest
 
 from cais_spade_llm.resources.nominal_conveyor import conveyor_parts
 from cais_spade_llm.resources.nominal_des import (
+    FINISH_SUFFIX,
     build_nominal_resource_des_models,
     initial_nominal_valuation,
     project_nominal_event,
@@ -234,11 +235,10 @@ def test_catalog_preserves_assignments_and_only_nominal_tasks(models, scene):
     assert models["M1"]["assignments"]["nominal_parts"] == list(scene["Storage"]["slots"])[:4]
     assert models["M2"]["assignments"]["nominal_parts"] == list(scene["Storage"]["slots"])[4:]
     names = {row["event_name"] for model in models.values() for row in model["events"]}
-    assert names == {
+    activities = {
         "move_to_resource",
         "pick_part",
         "place_release",
-        "machine_part",
         "pick_approach",
         "pick_grasp",
         "place_approach",
@@ -246,8 +246,9 @@ def test_catalog_preserves_assignments_and_only_nominal_tasks(models, scene):
         "move_home",
         "advance_conveyor",
         "advance_part",
-        "print_part",
     }
+    # Each activity is a commanded start and its observed finish; v1 processing stays one event.
+    assert names == activities | {name + FINISH_SUFFIX for name in activities} | {"machine_part", "print_part"}
     assert "DockKMR" not in names and "load_machine" not in names
     assert models["KMR"]["assignments"]["docking_action"] == "/KMR/dock"
     assert set(robot_task_registry()) == {
@@ -278,7 +279,7 @@ def test_finite_domains_declared_updates_and_shared_bindings(models):
                 for part in models[reference["resource_id"]]["assignments"][reference["field"]]:
                     assert field.replace("{" + parameter + "}", part) in fields
             assert "recovery_visible_steps" not in row
-            assert row["controllable"] and row["observable"]
+            assert row["controllable"] == ("start_event_id" not in row) and row["observable"]
             assert row["capability_transition"]["source"]
             assert row["capability_transition"]["target"]
             for peer in row["participants"]:
@@ -399,7 +400,7 @@ def test_additional_robot_preserves_existing_behavior_without_invented_handling_
     assert {resource: projected[resource] for resource in models} == reference
     additional = expanded["ur5e-5"]
     assert additional["assignments"] == robot
-    assert additional["local_event_alphabet"] == ["move_home"]
+    assert additional["local_event_alphabet"] == ["move_home", "move_home" + FINISH_SUFFIX]
     fields = additional["state_variables"]
     for field in ("held_part", "task_ctx.part_name", "task_ctx.origin_resource_location",
                   "task_ctx.destination_location"):
@@ -660,7 +661,7 @@ def test_full_buffer_applies_backpressure_and_pickup_permits_progress(models):
 
 
 @pytest.mark.parametrize(
-    "field,value", [("belt_stopped", False), ("loading_reserved_by", "ur5e-2")]
+    "field,value", [("resource_state", "moving"), ("loading_reserved_by", "ur5e-2")]
 )
 def test_loading_and_movement_do_not_overlap(models, field, value):
     state = load(models, initial_nominal_valuation(models), "M1", SQUARE)
@@ -748,9 +749,10 @@ def test_nominal_trace_assembles_all_parts_and_delivers_product_to_exit(models):
         "part_name": "assembly_board-v1",
         "product_location": "Exit",
     }
-    assert not any(state["Storage"].values())
+    assert state["Storage"]["resource_state"] == "idle" and state[BUFFER]["resource_state"] == "idle"
+    assert not any(value for field, value in state["Storage"].items() if field != "resource_state")
     assert not any(state["3D Printing Station"].values())
-    assert not any(state[BUFFER].values())
+    assert not any(value for field, value in state[BUFFER].items() if field != "resource_state")
     assert conveyor_parts(models["Conveyor"], state["Conveyor"]) == []
 
 
@@ -828,7 +830,7 @@ def test_ui_rows_and_diagrams_use_the_same_des_definitions(models, scene, schema
             for row in event_rows:
                 assert set(json.loads(row["guards"])) <= set(models)
                 assert set(json.loads(row["updates"])) <= set(models)
-    release_rows = nominal_event_rows(models, "M1", "place_release")
+    release_rows = nominal_event_rows(models, "M1", "place_release" + FINISH_SUFFIX)
     assert any("KMR" in row["updates"] and "M1" in row["updates"] for row in release_rows)
 
 
@@ -876,7 +878,9 @@ def test_function_graph_uses_saved_ur5e_in_and_out_states(scene):
         assert "event_id=" not in nominal_function_mermaid(models[robot], models)
         home = [edge for edge in graph["edges"] if edge["function_name"] == "move_home"]
         assert all(edge["saved_in_state"] == "any" for edge in home)
-        assert all(edge["event_ids"] == [home[0]["event_ids"][0]] for edge in home)
+        # move_home starts from each rest state with an empty gripper, one declared start each.
+        assert all(len(edge["event_ids"]) == 1 for edge in home)
+        assert len({edge["event_ids"][0] for edge in home}) == 3
 
     ordinary = models["ur5e-1"]
     place = next(edge for edge in nominal_function_graph(ordinary, models)["edges"]
@@ -919,10 +923,26 @@ def test_function_graph_handles_variants_planned_and_unowned_resources(scene):
         }
 
 
+def test_event_alphabets_list_commanded_starts_and_observed_finishes(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    for model in models.values():
+        assert not any(name.endswith(FINISH_SUFFIX) for name in model["controllable_event_alphabet"])
+        assert set(model["observable_event_alphabet"]) == set(model["local_event_alphabet"])
+    # A job's or a print's completion is observed, never commanded.
+    assert "complete_job" not in models["M1"]["controllable_event_alphabet"]
+    assert "complete_job" in models["3D Printing Station"]["observable_event_alphabet"]
+    assert "complete_job" not in models["3D Printing Station"]["controllable_event_alphabet"]
+    assert "advance_conveyor" + FINISH_SUFFIX in models["Conveyor"]["observable_event_alphabet"]
+
+
 def test_capability_graph_excludes_events_that_only_consult_resource_guards(models):
     names = {row["event"] for row in nominal_capability_rows(models[BUFFER])}
-    assert "advance_conveyor" in names
-    assert "pick_grasp" in names
+    # The starts only consult the buffer's zones; their observed finishes change them.
+    assert "advance_conveyor" + FINISH_SUFFIX in names
+    assert "pick_grasp" + FINISH_SUFFIX in names
+    assert "advance_conveyor" not in names and "pick_grasp" not in names
     assert "place_approach" not in names
     assert "place_release" not in names
 
@@ -961,11 +981,17 @@ def test_robot_product_graph_keeps_move_home_guard_in_event_details(scene):
     diagram = nominal_resource_capability_diagram(model)
     values = {node["id"]: node["value"] for node in diagram["nodes"]}
     assert model["state_variables"]["resource_state"]["domain"] == [
-        "idle", "at_pick", "picked", "positioned", "placed"
+        "idle", "at_pick", "picked", "positioned", "placed",
+        "approaching_pick", "grasping", "approaching_place", "releasing", "moving_home",
     ]
+    # The start keeps the robot's capability state; its observed finish reaches home.
     home = next(edge for edge in diagram["edges"] if edge["event_name"] == "move_home")
-    assert values[home["source"]] == {"resource_id": "ur5e-1", "resource_state": "any"}
-    assert values[home["target"]] == {
+    assert values[home["source"]] == values[home["target"]] == {
+        "resource_id": "ur5e-1", "resource_state": "any"
+    }
+    done = next(edge for edge in diagram["edges"] if edge["event_name"] == "move_home" + FINISH_SUFFIX)
+    assert values[done["source"]] == {"resource_id": "ur5e-1", "resource_state": "any"}
+    assert values[done["target"]] == {
         "resource_id": "ur5e-1", "resource_location": "home", "resource_state": "idle"
     }
     original = next(event for event in model["events"] if event["event_id"] in home["event_ids"])
@@ -1133,7 +1159,7 @@ def test_product_state_transport_and_printer_keep_declared_part_effects(scene):
     assert "print_part (planned)" in printer["mermaid"]
 
 
-def test_resource_state_diagram_follows_the_five_robot_states_and_guards(scene):
+def test_resource_state_diagram_follows_robot_activities_and_guards(scene):
     from cais_spade_llm.resources.environment_models import build_environment_models
 
     models = build_environment_models(scene)
@@ -1141,19 +1167,30 @@ def test_resource_state_diagram_follows_the_five_robot_states_and_guards(scene):
         model = models[robot]
         diagram = nominal_resource_state_diagram(model, "resource_state")
         values = {node["id"]: node["value"] for node in diagram["nodes"]}
-        assert list(values.values()) == ["idle", "at_pick", "picked", "positioned", "placed"]
+        assert list(values.values()) == [
+            "idle", "at_pick", "picked", "positioned", "placed",
+            "approaching_pick", "grasping", "approaching_place", "releasing", "moving_home",
+        ]
         assert values[diagram["initial_id"]] == "idle"
         arrows = {
             (values[edge["source"]], edge["event_name"], values[edge["target"]])
             for edge in diagram["edges"]
         }
-        assert {("idle", "pick_approach", "at_pick"),
-                ("at_pick", "pick_grasp", "picked"),
-                ("picked", "place_approach", "positioned"),
-                ("placed", "move_home", "idle")} <= arrows
+        # Each activity is a commanded start into a running state and an observed finish out of it.
+        assert {("idle", "pick_approach", "approaching_pick"),
+                ("approaching_pick", "pick_approach" + FINISH_SUFFIX, "at_pick"),
+                ("at_pick", "pick_grasp", "grasping"),
+                ("grasping", "pick_grasp" + FINISH_SUFFIX, "picked"),
+                ("picked", "place_approach", "approaching_place"),
+                ("approaching_place", "place_approach" + FINISH_SUFFIX, "positioned"),
+                ("placed", "move_home", "moving_home"),
+                ("moving_home", "move_home" + FINISH_SUFFIX, "idle")} <= arrows
         assert {source for source, name, _ in arrows if name == "move_home"} == {
             "idle", "at_pick", "placed"
         }
+        # No activity starts while another one runs.
+        running = {"approaching_pick", "grasping", "approaching_place", "releasing", "moving_home"}
+        assert all(name.endswith(FINISH_SUFFIX) for source, name, _ in arrows if source in running)
         approach = next(
             edge for edge in diagram["edges"]
             if values[edge["source"]] == "idle"
@@ -1184,17 +1221,18 @@ def test_resource_state_diagrams_use_exact_fields_events_and_symbolic_effects(sc
             assert len(diagram["state_rows"]) == len(diagram["nodes"])
 
     kmr = nominal_resource_state_diagram(models["KMR"], "resource_location")
-    assert {edge["event_name"] for edge in kmr["edges"]} == {"move_to_resource"}
+    assert {edge["event_name"] for edge in kmr["edges"]} == {"move_to_resource" + FINISH_SUFFIX}
     buffer = nominal_resource_state_diagram(models[BUFFER], "zone_1_part")
     assert {json.dumps(node["value"], sort_keys=True) for node in buffer["nodes"]} == {
         "null", '{"reference": "delivered_part"}', '{"reference": "part_name"}'
     }
     zone_4 = nominal_resource_state_diagram(models[BUFFER], "zone_4_part")
     assert {edge["event_name"] for edge in zone_4["edges"]} == {
-        "advance_part", "pick_grasp"
+        "advance_part" + FINISH_SUFFIX, "pick_grasp" + FINISH_SUFFIX
     }
     conveyor = nominal_resource_state_diagram(models["Conveyor"], "part_location.{part_name}")
-    movement = [edge for edge in conveyor["edges"] if edge["event_name"] == "advance_conveyor"]
+    movement = [edge for edge in conveyor["edges"]
+                if edge["event_name"] == "advance_conveyor" + FINISH_SUFFIX]
     values = {node["id"]: node["value"] for node in conveyor["nodes"]}
     assert all(isinstance(values[edge["target"]], dict) for edge in movement)
     assert all(values[edge["target"]] == {
@@ -1213,10 +1251,10 @@ def test_all_resource_default_diagrams_retain_exact_event_variants(scene):
         "M2": ["resource_state", "staging_part"],
         "KMR": ["resource_state", "resource_location"],
         "Conveyor": [
-            "part_location.{part_name}", "part_order.{part_name}",
+            "resource_state", "part_location.{part_name}", "part_order.{part_name}",
             "loading_reserved_by",
         ],
-        BUFFER: ["zone_1_part", "zone_2_part", "zone_3_part", "zone_4_part"],
+        BUFFER: ["resource_state", "zone_1_part", "zone_2_part", "zone_3_part", "zone_4_part"],
         "Storage": ["inventory.{part_name}"],
         "3D Printing Station": ["output.{part_name}"],
         "Exit": ["resource_state", "product_location"],
@@ -1323,10 +1361,13 @@ def test_resource_diagrams_show_kmr_routes_buffer_handoffs_and_shared_belt(scene
     values = {node["id"]: node["value"] for node in kmr["nodes"]}
     routes = {
         (values[edge["source"]]["resource_location"], values[edge["target"]]["resource_location"])
-        for edge in kmr["edges"] if edge["event_name"] == "move_to_resource"
+        for edge in kmr["edges"] if edge["event_name"] == "move_to_resource" + FINISH_SUFFIX
     }
     assert routes == {("Storage", "M1"), ("M1", "Storage"),
                       ("Storage", "M2"), ("M2", "Storage")}
+    # A start keeps the capability state that its observed finish changes.
+    assert all(edge["source"] == edge["target"] for edge in kmr["edges"]
+               if edge["event_name"] == "move_to_resource")
 
     buffer = nominal_resource_capability_diagram(models[BUFFER])
     states = {node["id"]: node["value"] for node in buffer["nodes"]}
@@ -1342,16 +1383,17 @@ def test_resource_diagrams_show_kmr_routes_buffer_handoffs_and_shared_belt(scene
 
     gripper = {"part_location": "ur5e-3"}
     for source, event_name, target in [
-        (conveyor_state, "advance_conveyor", zone(1)),
-        *((zone(number), "advance_part", zone(number + 1)) for number in (1, 2, 3)),
-        (zone(4), "pick_grasp", gripper),
+        (conveyor_state, "advance_conveyor" + FINISH_SUFFIX, zone(1)),
+        *((zone(number), "advance_part" + FINISH_SUFFIX, zone(number + 1)) for number in (1, 2, 3)),
+        (zone(4), "pick_grasp" + FINISH_SUFFIX, gripper),
     ]:
         assert (json.dumps(source, sort_keys=True), event_name,
                 json.dumps(target, sort_keys=True)) in transitions
 
     conveyor = nominal_resource_capability_diagram(models["Conveyor"])
     values = {node["id"]: node["value"] for node in conveyor["nodes"]}
-    movement = [edge for edge in conveyor["edges"] if edge["event_name"] == "advance_conveyor"]
+    movement = [edge for edge in conveyor["edges"]
+                if edge["event_name"] == "advance_conveyor" + FINISH_SUFFIX]
     assert {(json.dumps(values[edge["source"]], sort_keys=True),
              json.dumps(values[edge["target"]], sort_keys=True)) for edge in movement} == {
         (json.dumps(conveyor_state, sort_keys=True), json.dumps(conveyor_state, sort_keys=True)),
@@ -1359,30 +1401,31 @@ def test_resource_diagrams_show_kmr_routes_buffer_handoffs_and_shared_belt(scene
     }
     movement_ids = {
         event["event_id"] for event in models["Conveyor"]["events"]
-        if event["event_name"] == "advance_conveyor"
+        if event["event_name"] == "advance_conveyor" + FINISH_SUFFIX
     }
     assert {event_id for edge in movement for event_id in edge["event_ids"]} == movement_ids
     assert "next_locations" not in conveyor["mermaid"]
     detailed = nominal_capability_graph(models["Conveyor"], models)
     assert all(edge["collection_effects"]["Conveyor"] for edge in detailed["edges"]
-               if edge["event"]["event_name"] == "advance_conveyor")
+               if edge["event"]["event_name"] == "advance_conveyor" + FINISH_SUFFIX)
 
 
 def test_repeated_endpoint_arrows_keep_original_event_ids(scene):
     from cais_spade_llm.resources.environment_models import build_environment_models
 
     model = build_environment_models(scene)["Storage"]
-    second = deepcopy(model["events"][0])
+    pickup = "pick_part" + FINISH_SUFFIX
+    second = deepcopy(next(event for event in model["events"] if event["event_name"] == pickup))
     second["event_id"] += 1000
     second["parameter_bindings"]["handoff_acknowledged"] = {"equals": False}
     model["events"].append(second)
     diagram = nominal_resource_capability_diagram(model)
     assert len(diagram["edges"]) == 1
     assert diagram["edges"][0]["event_ids"] == sorted(
-        event["event_id"] for event in model["events"] if event["event_name"] == "pick_part"
+        event["event_id"] for event in model["events"] if event["event_name"] == pickup
     )
     detailed = nominal_capability_graph(model, {"Storage": model})
-    for original in (event for event in model["events"] if event["event_name"] == "pick_part"):
+    for original in (event for event in model["events"] if event["event_name"] == pickup):
         variant = next(
             edge for edge in detailed["edges"] if edge["event_id"] == original["event_id"]
         )
@@ -1397,17 +1440,26 @@ def test_loading_capabilities_connect_to_the_shared_conveyor_movement(scene):
 
     models = build_environment_models(scene)
     rows = nominal_capability_rows(models["Conveyor"])
-    loading = [row for row in rows if row["event"] == "place_release"]
+    loading = [row for row in rows if row["event"] == "place_release" + FINISH_SUFFIX]
     assert {row["resource_id"] for row in loading} == {"ur5e-1", "ur5e-2"}
     for row in loading:
         position = "loading_position_1" if row["resource_id"] == "ur5e-1" else "loading_position_2"
         assert f"Conveyor.part_location.{{part_name}} = {position}" in row["target"]
-    assert {row["event"] for row in rows} == {"place_release", "advance_conveyor"}
+        # The placement's finish observes the reservation its start made.
+        reserved = json.dumps({"equals": row["resource_id"]})
+        assert f"Conveyor.loading_reserved_by = {reserved}" in row["source"]
+    assert {row["event"] for row in rows} == {
+        "place_release", "advance_conveyor",
+        "place_release" + FINISH_SUFFIX, "advance_conveyor" + FINISH_SUFFIX,
+    }
     for row in rows:
-        assert "Conveyor.belt_stopped" in row["source"]
-        assert "Conveyor.part_order.{part_name}" in row["target"]
+        if row["event"].endswith(FINISH_SUFFIX):
+            assert "Conveyor.part_order.{part_name}" in row["target"]
+        else:
+            assert 'Conveyor.resource_state = {"equals": "idle"}' in row["source"]
     assert _graph_paths(nominal_capability_graph(models["Conveyor"], models),
-                        ["place_release", "advance_conveyor"])
+                        ["place_release", "place_release" + FINISH_SUFFIX,
+                         "advance_conveyor", "advance_conveyor" + FINISH_SUFFIX])
 
 
 def _graph_paths(graph, names):
@@ -1501,11 +1553,13 @@ def test_kmr_graph_preserves_custody_while_moving_and_does_not_invent_routes(sce
 
     models = build_environment_models(scene)
     graph = nominal_capability_graph(models["KMR"], models)
-    paths = _graph_paths(graph, ["pick_approach", "pick_part", "move_to_resource",
-                                "place_approach", "place_release"])
+    activities = ["pick_approach", "pick_part", "move_to_resource", "place_approach", "place_release"]
+    paths = _graph_paths(graph, [name for activity in activities
+                                 for name in (activity, activity + FINISH_SUFFIX)])
     assert {graph["nodes"][path[-1]["target"]]["state"]["KMR.resource_location"] for path in paths} == {"M1", "M2"}
     for path in paths:
-        for edge in path[1:4]:
+        # Custody starts at the observed pick and ends at the observed release.
+        for edge in path[3:9]:
             assert graph["nodes"][edge["target"]]["state"]["KMR.held_part"] == {"reference": "part_name"}
         assert graph["nodes"][path[-1]["target"]]["state"]["KMR.held_part"] is None
     for edge in graph["edges"]:
@@ -1588,8 +1642,10 @@ def test_shared_collection_effects_remain_visible_without_scalar_updates(scene):
     from cais_spade_llm.resources.environment_models import build_environment_models
 
     model = build_environment_models(scene)["Conveyor"]
-    movement = next(event for event in model["events"] if event["event_name"] == "advance_conveyor")
-    assert movement["updates"] == {}
+    movement = next(event for event in model["events"]
+                    if event["event_name"] == "advance_conveyor" + FINISH_SUFFIX)
+    assert movement["collection_effects"]
+    movement["updates"] = {}
     movement["parameter_bindings"]["resource_id"] = {"equals": "ur5e-1"}
     model["events"] = [movement]
     graph = nominal_capability_graph(model)
@@ -1623,10 +1679,16 @@ def test_shared_movement_buffer_backpressure_and_handoff_are_visible(scene):
 
     models = build_environment_models(scene)
     conveyor = nominal_capability_graph(models["Conveyor"], models)
-    assert _graph_paths(conveyor, ["place_release", "advance_conveyor", "advance_conveyor"])
+    assert _graph_paths(conveyor, ["place_release", "place_release" + FINISH_SUFFIX,
+                                   "advance_conveyor", "advance_conveyor" + FINISH_SUFFIX,
+                                   "advance_conveyor", "advance_conveyor" + FINISH_SUFFIX])
     for edge in conveyor["edges"]:
-        assert edge["guards"][BUFFER]["zone_1_part"] == {"equals": None}
-        if edge["event"]["event_name"] != "advance_conveyor":
+        # Every start waits for a free first buffer zone; a finish is guarded only by what it changes.
+        if not edge["event"]["event_name"].endswith(FINISH_SUFFIX):
+            assert edge["guards"][BUFFER]["zone_1_part"] == {"equals": None}
+            if "part_location.{delivered_part}" in edge["guards"]["Conveyor"]:
+                assert edge["guards"]["Conveyor"]["part_location.{delivered_part}"] == {"equals": "output_nest"}
+        if edge["event"]["event_name"] != "advance_conveyor" + FINISH_SUFFIX:
             continue
         assert "Conveyor" in edge["collection_effects"]
         target = conveyor["nodes"][edge["target"]]["state"]
@@ -1634,30 +1696,38 @@ def test_shared_movement_buffer_backpressure_and_handoff_are_visible(scene):
             assert target[f"Conveyor.{field}"] == {
                 "collection_effect": edge["collection_effects"]["Conveyor"][field]
             }
-        if edge["updates"][BUFFER]:
-            assert edge["guards"]["Conveyor"]["part_location.{delivered_part}"] == {"equals": "output_nest"}
+        if edge["updates"].get(BUFFER):
+            assert edge["guards"][BUFFER]["zone_1_part"] == {"equals": None}
             assert edge["updates"][BUFFER]["zone_1_part"] == {"set_from_param": "delivered_part"}
     buffer = nominal_capability_graph(models[BUFFER], models)
-    paths = _graph_paths(buffer, ["advance_conveyor", "advance_part", "advance_part", "advance_part",
-                                "pick_grasp"])
+    advance = ["advance_part", "advance_part" + FINISH_SUFFIX]
+    paths = _graph_paths(buffer, ["advance_conveyor" + FINISH_SUFFIX, *advance, *advance, *advance,
+                                  "pick_grasp" + FINISH_SUFFIX])
     paths = [path for path in paths
              if [edge["event"]["parameter_bindings"]["zone"]["equals"]
-                 for edge in path[1:4]] == [1, 2, 3]]
+                 for edge in path[2:7:2]] == [1, 2, 3]]
     assert paths
     for path in paths:
         assert path[0]["guards"][BUFFER]["zone_1_part"] == {"equals": None}
         assert buffer["nodes"][path[0]["target"]]["state"][f"{BUFFER}.zone_1_part"] == {"reference": "delivered_part"}
         assert path[-1]["updates"][BUFFER]["zone_4_part"] == {"set": None}
-        for index, edge in enumerate(path[1:4], 2):
+        # The buffer starts an advance only into a free downstream zone.
+        for index, edge in enumerate(path[1:7:2], 2):
             assert edge["guards"][BUFFER][f"zone_{index}_part"] == {"equals": None}
+    robot = ["pick_approach", "pick_grasp", "place_approach"]
     for rid, names in {
-        "ur5e-1": ["pick_approach", "pick_grasp", "place_approach", "place_release", "move_home"],
-        "ur5e-2": ["pick_approach", "pick_grasp", "place_approach", "place_release", "move_home"],
-        "ur5e-3": ["pick_approach", "pick_grasp", "place_approach", "place_insert", "move_home"],
-        "ur5e-4": ["pick_approach", "pick_grasp", "place_approach", "place_insert", "move_home"],
-        "Storage": ["pick_part"],
-        "3D Printing Station": ["print_part", "complete_job", "pick_grasp"],
-        "Exit": ["pick_grasp", "place_release"],
+        "ur5e-1": [*robot, "place_release", "move_home"],
+        "ur5e-2": [*robot, "place_release", "move_home"],
+        "ur5e-3": [*robot, "place_insert", "move_home"],
+        "ur5e-4": [*robot, "place_insert", "move_home"],
+    }.items():
+        activities = [name for activity in names for name in (activity, activity + FINISH_SUFFIX)]
+        assert _graph_paths(nominal_capability_graph(models[rid], models), activities), rid
+    # A resource that only takes part in another resource's activity changes on its observed finish.
+    for rid, names in {
+        "Storage": ["pick_part" + FINISH_SUFFIX],
+        "3D Printing Station": ["print_part", "complete_job", "pick_grasp" + FINISH_SUFFIX],
+        "Exit": ["pick_grasp" + FINISH_SUFFIX, "place_release" + FINISH_SUFFIX],
     }.items():
         assert _graph_paths(nominal_capability_graph(models[rid], models), names), rid
 
@@ -1865,7 +1935,7 @@ def test_live_status_cards_use_each_resource_domain_and_valuation(scene):
             assert {"field": "inventory.KET4_Square_4mm", "value": "true"} in rows
             assert any(row["value"] == "false" for row in rows)
         if name == "Conveyor":
-            assert "belt_stopped" in texts and "true" in texts
+            assert domain == ["idle", "moving"]
             assert {"part_name": SQUARE, "part_location": "null", "part_order": "null"} in rows
         if name == BUFFER:
             assert {"field": "zone_1_part", "value": "null"} in rows
@@ -2134,7 +2204,8 @@ def test_resource_refresh_uses_revisions_and_preserves_expanded_controls(scene, 
 
             state["revision"] = 4
             models["Conveyor"]["events"] = [
-                e for e in models["Conveyor"]["events"] if e["event_name"] != "advance_conveyor"
+                e for e in models["Conveyor"]["events"]
+                if e["event_name"] not in {"advance_conveyor", "advance_conveyor" + FINISH_SUFFIX}
             ]
             await refresh()
             assert product_id in client.elements
@@ -2414,12 +2485,12 @@ def test_one_resource_diagram_hides_identities_and_preserves_guarded_events(scen
         assert set(states.values()) == {"idle", "loaded", "running", "paused", "stopped", "completed"}
         assert states[diagram["initial_id"]] == "idle"
         assert {
-            ("idle", "place_release", "loaded"),
+            ("idle", "place_release" + FINISH_SUFFIX, "loaded"),
             ("loaded", "start_job", "running"),
             ("running", "complete_job", "completed"),
             ("running", "pause_job", "paused"),
-            ("paused", "pick_grasp", "idle"),
-            ("completed", "pick_grasp", "idle"),
+            ("paused", "pick_grasp" + FINISH_SUFFIX, "idle"),
+            ("completed", "pick_grasp" + FINISH_SUFFIX, "idle"),
         } <= {(states[e["source"]], e["event_name"], states[e["target"]])
               for e in diagram["edges"]}
         staging_ids = {e["event_id"] for e in models[resource_id]["events"]
@@ -2431,7 +2502,10 @@ def test_one_resource_diagram_hides_identities_and_preserves_guarded_events(scen
     conveyor = nominal_resource_diagram(models["Conveyor"], models)
     assert all(field not in conveyor["mermaid"]
                for field in ("part_location", "part_order", "loading_reserved_by"))
-    assert all("belt_stopped" in node["label"] for node in conveyor["nodes"])
+    assert {node["label"] for node in conveyor["nodes"]} == {"idle", "moving"}
+    assert {(e["event_name"], e["source"] == e["target"]) for e in conveyor["edges"]
+            if e["event_name"].startswith("advance_conveyor")} == {
+        ("advance_conveyor", False), ("advance_conveyor" + FINISH_SUFFIX, False)}
     printer = nominal_resource_diagram(models["3D Printing Station"], models)
     states = {node["id"]: node["label"] for node in printer["nodes"]}
     assert states[printer["initial_id"]] == "completed"
@@ -2439,8 +2513,8 @@ def test_one_resource_diagram_hides_identities_and_preserves_guarded_events(scen
             for e in printer["edges"]} == {
         ("idle", "print_part", "printing"),
         ("printing", "complete_job", "completed"),
-        ("completed", "pick_grasp", "completed"),
-        ("completed", "pick_grasp", "idle"),
+        ("completed", "pick_grasp" + FINISH_SUFFIX, "completed"),
+        ("completed", "pick_grasp" + FINISH_SUFFIX, "idle"),
     }
     assert "print_part (planned)" in printer["mermaid"]
 
@@ -2453,16 +2527,18 @@ def test_buffer_graph_preserves_empty_downstream_and_pickup_conditions(scene):
     states = {node["id"]: node["label"] for node in diagram["nodes"]}
     assert len(states) == 2 and set(states.values()) == {"empty", "occupied"}
     assert states[diagram["initial_id"]] == "empty"
-    assert len(diagram["edges"]) == 5
+    assert len(diagram["edges"]) == 6
+    # The zones change on observed finishes; the buffer's own start only consults them.
     assert {(states[edge["source"]], edge["resource_id"], edge["event_name"], states[edge["target"]])
             for edge in diagram["edges"]} == {
-        ("empty", "Conveyor", "advance_conveyor", "occupied"),
-        ("occupied", "Conveyor", "advance_conveyor", "occupied"),
+        ("empty", "Conveyor", "advance_conveyor" + FINISH_SUFFIX, "occupied"),
+        ("occupied", "Conveyor", "advance_conveyor" + FINISH_SUFFIX, "occupied"),
         ("occupied", BUFFER, "advance_part", "occupied"),
-        ("occupied", "ur5e-3", "pick_grasp", "occupied"),
-        ("occupied", "ur5e-3", "pick_grasp", "empty"),
+        ("occupied", BUFFER, "advance_part" + FINISH_SUFFIX, "occupied"),
+        ("occupied", "ur5e-3", "pick_grasp" + FINISH_SUFFIX, "occupied"),
+        ("occupied", "ur5e-3", "pick_grasp" + FINISH_SUFFIX, "empty"),
     }
-    assert sum(len(edge["variants"]) for edge in diagram["edges"]) == 28
+    assert sum(len(edge["variants"]) for edge in diagram["edges"]) == 40
     for edge in diagram["edges"]:
         assert set(edge["event_ids"]) == {variant["event_id"] for variant in edge["variants"]}
         for variant in edge["variants"]:
@@ -2470,7 +2546,7 @@ def test_buffer_graph_preserves_empty_downstream_and_pickup_conditions(scene):
             before, after = variant["source_conditions"], variant["target_conditions"]
             event = next(e for e in models[BUFFER]["events"] if e["event_id"] == event_id)
             assert edge["resource_id"] == event["parameter_bindings"]["resource_id"]["equals"]
-            assert edge["program_status"] == event["program_status"]
+            assert edge["program_status"] == event.get("program_status")
             assert states[edge["source"]] == (
                 "empty" if all(rule == {"equals": None} for rule in before.values()) else "occupied"
             )
@@ -2478,13 +2554,15 @@ def test_buffer_graph_preserves_empty_downstream_and_pickup_conditions(scene):
                 "empty" if all(rule == {"equals": None} for rule in after.values()) else "occupied"
             )
             for field, guard in event["guards"].items():
-                assert before[field] == (
-                    {"equals": None} if guard == {"equals": None} else {"not_equals": None}
-                )
+                if field in before:
+                    assert before[field] == (
+                        {"equals": None} if guard == {"equals": None} else {"not_equals": None}
+                    )
             for field, update in event["updates"].items():
-                assert after[field] == (
-                    {"equals": None} if update == {"set": None} else {"not_equals": None}
-                )
+                if field in after:
+                    assert after[field] == (
+                        {"equals": None} if update == {"set": None} else {"not_equals": None}
+                    )
             assert all(after[field] == before[field] for field in before
                        if field not in event["updates"])
 
@@ -2494,9 +2572,9 @@ def test_buffer_graph_initial_condition_uses_configured_zone_occupancy(scene):
 
     models = build_environment_models(scene)
     model = models[BUFFER]
-    fields = list(model["state_variables"])
+    fields = [field for field in model["state_variables"] if field.startswith("zone_")]
     parts = list(scene["Storage"]["slots"])[:len(fields)]
-    model["current_valuation"] = dict(zip(fields, parts, strict=True))
+    model["current_valuation"] = {"resource_state": "idle", **dict(zip(fields, parts, strict=True))}
     for occupied in product((False, True), repeat=len(fields)):
         initial = {field: part if present else None
                    for field, part, present in zip(fields, parts, occupied, strict=True)}
@@ -2516,11 +2594,12 @@ def test_buffer_graph_follows_declared_transitions(scene):
 
     models = build_environment_models(scene)
     model = models[BUFFER]
-    model["events"] = [event for event in model["events"] if event["event_name"] != "advance_part"]
+    model["events"] = [event for event in model["events"]
+                       if event["event_name"] not in {"advance_part", "advance_part" + FINISH_SUFFIX}]
     diagram = nominal_resource_diagram(model, models)
     assert len(diagram["nodes"]) == 2
     assert len(diagram["edges"]) == 4
-    assert all(edge["event_name"] != "advance_part" for edge in diagram["edges"])
+    assert all(not edge["event_name"].startswith("advance_part") for edge in diagram["edges"])
 
 
 def test_conveyor_names_observed_belt_locations_and_orders_a_placed_part(models):

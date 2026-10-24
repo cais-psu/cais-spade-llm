@@ -36,7 +36,8 @@ def _templates(models: dict, part_name: str) -> list[dict]:
     templates = []
     for rid, model in models.items():
         for event in model["events"]:
-            if event["parameter_bindings"]["resource_id"]["equals"] != rid:
+            # An activity's observed finish follows its start; it is never planned on its own.
+            if event["parameter_bindings"]["resource_id"]["equals"] != rid or "start_event_id" in event:
                 continue
             params: dict[str, Any] = {}
             for field, rule in event["parameter_bindings"].items():

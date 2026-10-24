@@ -1690,7 +1690,7 @@ def test_grounded_additional_configured_resource_generates_78_pairs_and_detects_
     _grounded_extra_resource(case)
     models = build_environment_models(case["scene"])
     assert len(models) == 13
-    assert models["ur5e-5"]["local_event_alphabet"] == ["move_home"]
+    assert models["ur5e-5"]["local_event_alphabet"] == ["move_home", "move_home_done"]
     result = _grounded_check(case, trace_complete=True)
     assert result["status"] == "satisfied", result["reason"]
     pairs = [row for row in result["bindings"] if row["specification"] == "shared_area_mutex"]
@@ -1996,11 +1996,18 @@ def _grounded_state_field(case: dict, resource: str, field: str, value: str, obs
 
 
 def test_grounded_boolean_state_cannot_silently_become_false() -> None:
-    case = _grounded_case()
-    _grounded_state_field(case, "Conveyor", "belt_stopped", "true", True)
-    result = _grounded_check(case, trace_complete=True)
-    assert result["status"] == "violated", result["reason"]
-    assert result["counterexample"]["ap_values"] == {"ap001": True}
+    from cais_spade_llm.agents.central_controller.offline_safety_grounding import (
+        _scalar_symbol,
+        _state_binding_value,
+    )
+
+    # No configured resource keeps a plain boolean field now that each one has a resource_state (the belt's
+    # belt_stopped became its idle state), so the boolean binding is checked where AP values are compared.
+    declaration = {"domain": [False, True]}
+    _state_binding_value("true", declaration, {})
+    assert _scalar_symbol(True) == "true" and _scalar_symbol(False) == "false"
+    with pytest.raises(ValueError, match="outside its declared type or domain"):
+        _state_binding_value("True", declaration, {})
 
 
 def test_grounded_state_ledger_cannot_contradict_primitive_custody() -> None:
@@ -2064,9 +2071,15 @@ def part_slippage_checker(tmp_path_factory):
     for name in ("initial_context.json", "mutex.json", "precedence.json", "safe.json"):
         shutil.copyfile(archived / name, directory / name)
     context = json.loads((directory / "initial_context.json").read_text())
-    from ppr_ap_migration import migrate_scene
+    from ppr_ap_migration import migrate_declared_tasks, migrate_scene
+
+    from cais_spade_llm.resources.environment_models import build_environment_models
 
     migrate_scene(context["scene"])
+    models = build_environment_models(context["scene"])
+    for name in ("mutex.json", "precedence.json", "safe.json"):
+        candidate = migrate_declared_tasks(json.loads((directory / name).read_text()), models)
+        (directory / name).write_text(json.dumps(candidate))
     source = context["sources"]["predefined_safety"]
     source["sha256"] = hashlib.sha256((module["ROOT"] / source["path"]).read_bytes()).hexdigest()
     (directory / "initial_context.json").write_text(json.dumps(context))
@@ -2207,8 +2220,14 @@ def test_mock_part_slippage_report_keeps_supplied_formulas_aps_and_saved_results
         assert compiled["ltlf"] == supplied["formula"]
         assert compiled["aps"] == supplied["aps"]
         assert "digraph" in compiled["dfa_dot"]
+    from ppr_ap_migration import migrate_declared_tasks
+
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
     archived = part_slippage_checker["ARCHIVED_FIXTURES"]
-    saved = json.loads((archived / "report.json").read_text())
+    scene = json.loads((directory / "initial_context.json").read_text())["scene"]
+    saved = migrate_declared_tasks(json.loads((archived / "report.json").read_text()),
+                                   build_environment_models(scene))
     for old, current in zip(saved["cases"], part_slippage_report["cases"], strict=True):
         for field in ("case_id", "events", "expected", "status", "configured_resources",
                       "concrete_rule_count", "modeled_final_state", "expectations_met"):

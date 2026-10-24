@@ -11,6 +11,7 @@ from cais_spade_llm.agents.shared_information.recovery_validation_protocol impor
 from cais_spade_llm.resources.environment_models import feasibility
 from cais_spade_llm.resources.machine.machine_jobs import machine_public_state
 from cais_spade_llm.resources.nominal_conveyor import conveyor_location_at
+from cais_spade_llm.resources.nominal_des import outcome_models
 from cais_spade_llm.resources.recovery_feasibility import derive_primitive_union
 
 
@@ -310,7 +311,9 @@ def environment_recovery_descriptor(evidence: dict, snapshot: dict, *, resource_
         if field not in variables:
             variables[field] = {'scope': 'part', 'domain': [], 'domain_complete': False}
     events, shared_events, unresolved, assignments = [], [], [], 0
-    for declared in model.get('events', []):
+    # Every resource's copy of an activity carries the same participants and product effects.
+    activities = outcome_models(evidence.get('environment_models', {})).get(rid, {}).get('events', [])
+    for declared in activities:
         owned = declared.get('parameter_bindings', {}).get('resource_id', {}).get('equals') == rid
         target = events if owned else shared_events
         if declared.get('collection_effects'):
