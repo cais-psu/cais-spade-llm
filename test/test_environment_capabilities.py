@@ -92,6 +92,18 @@ def test_acknowledged_after_snapshot_survives_a_later_robot_fault():
     assert context.transitions[-1]['after']['ur5e-1']['resource_state'] == 'idle'
 
 
+def test_machine_workload_counts_assigned_parts_not_yet_on_the_product():
+    from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentProductLoop
+
+    product = "assembly_board-v1"
+    context = SimpleNamespace(product_name=product, part_tracker={
+        "a": {"location": "KMR"}, "b": {"location": product}, "c": {"location": "Storage"}})
+    runtime = SimpleNamespace(context=context, intake_assignments={"a": "M1", "b": "M1", "c": "M2"})
+    # The aligned part model has no tracker state: a part is assembled once it is on the product.
+    assert EnvironmentProductLoop._machine_workload(runtime, "M1") == 1
+    assert EnvironmentProductLoop._machine_workload(runtime, "M2") == 1
+
+
 def _prepared_move_home():
     from cais_spade_llm.ui.recovery_setup import default_setup, validate_setup
 

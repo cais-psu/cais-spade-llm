@@ -1213,7 +1213,9 @@ class EnvironmentProductLoop(CyclicBehaviour):
 
     @staticmethod
     def _machine_workload(runtime, machine: str | None) -> int:
-        return sum(assigned == machine and runtime.context.part_tracker[part]["state"] != "assembled"
+        # A part is assembled once it is located on the product.
+        context = runtime.context
+        return sum(assigned == machine and context.part_tracker[part].get("location") != context.product_name
                    for part, assigned in runtime.intake_assignments.items())
 
     @staticmethod
