@@ -3,6 +3,7 @@ from __future__ import annotations
 """Physical admission of nominal starts and their native sends against predefined specifications."""
 
 import asyncio
+import math
 import time
 from copy import deepcopy
 from threading import RLock
@@ -314,3 +315,76 @@ def test_a_job_start_applies_the_completion_its_uncontrollable_end_records(monke
     assert gate._completions(task) == {("RGOCG4", "trim", "result", "circle")}
     context.pending_tasks = {"end": {**task, "task_id": "end", "event_id": 2, "event_name": "complete_job"}}
     assert gate._base(_observation(), None)["completions"] == {("RGOCG4", "trim", "result", "circle"): _UNKNOWN}
+
+
+def _two_link_arm() -> dict:
+    return {"joint_names": ["shoulder", "elbow"], "interpolation": "splines", "root": "base",
+            "root_xyz": [0, 0, 0], "root_rpy": [0, 0, 0], "reference_link": "tcp",
+            "joints": [
+                {"name": "shoulder", "parent": "base", "child": "upper", "type": "revolute",
+                 "xyz": [0, 0, 0.3], "rpy": [0, 0, 0], "axis": [0, 0, 1]},
+                {"name": "elbow", "parent": "upper", "child": "fore", "type": "revolute",
+                 "xyz": [0, 0, 0.4], "rpy": [0, 0, 0], "axis": [0, 1, 0]},
+                {"name": "tool", "parent": "fore", "child": "tcp", "type": "fixed",
+                 "xyz": [0, 0, 0.4], "rpy": [0, 0, 0]},
+                {"name": "finger", "parent": "fore", "child": "finger_link", "type": "fixed",
+                 "xyz": [0.05, 0, 0.35], "rpy": [0, 0, 0]}],
+            "components": [{"id": "upper_box", "link": "upper", "bounds": [[-0.05, 0.05]] * 3},
+                           {"id": "fore_box", "link": "fore", "bounds": [[-0.04, 0.04]] * 3},
+                           {"id": "finger_box", "link": "finger_link", "bounds": [[-0.01, 0.01]] * 3}]}
+
+
+def test_arm_links_stay_near_the_gripper_positions_they_can_reach():
+    from cais_spade_llm.recovery_framework.nominal_physical_gate import arm_chain, arm_link_bounds
+    from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms
+
+    configuration = _two_link_arm()
+    chain = arm_chain(configuration, kinematic_transforms(
+        configuration, {"shoulder": interval(0.0), "elbow": interval(0.0)}))
+    assert chain["links"] == ["upper", "fore", "tcp"]
+    assert chain["from_first"] == pytest.approx([0.0, 0.4, 0.8])
+    assert chain["to_reference"] == pytest.approx([0.8, 0.4, 0.0])
+    # The finger rides with its chain link, so that link's thickness covers it.
+    assert chain["owners"]["finger_link"] == 1 and chain["radius"][1] >= 0.05
+    upper, fore, tcp = arm_link_bounds(chain, [0.0, 0.0, 0.3], [[0.7, 0.0, 0.3]], 0.0)
+    assert upper[0] == pytest.approx([-chain["radius"][0], 0.4 + chain["radius"][0]])
+    # The elbow must lie within 0.4 of both the shoulder and the gripper, so the forearm stays on its side.
+    assert fore[0] == pytest.approx([0.3 - chain["radius"][1], 0.7 + chain["radius"][1]])
+    assert tcp[0] == pytest.approx([0.7, 0.7])
+    # An unreachable target falls back to each frame's full reach around the first frame.
+    far = arm_link_bounds(chain, [0.0, 0.0, 0.3], [[5.0, 0.0, 0.3]], 0.0)
+    assert far[1][0] == pytest.approx([-0.8 - chain["radius"][1], 0.8 + chain["radius"][1]])
+
+
+def test_arm_link_bounds_contain_the_arm_in_any_configuration_reaching_the_gripper_position():
+    import random
+
+    from cais_spade_llm.recovery_framework.nominal_physical_gate import arm_chain, arm_link_bounds
+    from cais_spade_llm.resources.continuous_motion import (
+        interval,
+        kinematic_transforms,
+        transformed_box,
+    )
+
+    configuration = _two_link_arm()
+    chain = arm_chain(configuration, kinematic_transforms(
+        configuration, {"shoulder": interval(0.0), "elbow": interval(0.0)}))
+    generator = random.Random(3)
+    for _ in range(100):
+        matrices = kinematic_transforms(configuration, {name: interval(generator.uniform(-3, 3))
+                                                        for name in configuration["joint_names"]})
+        first, tcp = ([(row[3][0] + row[3][1]) / 2 for row in matrices[name][:3]] for name in ("upper", "tcp"))
+        boxes = arm_link_bounds(chain, first, [tcp], 0.0)
+        for component in configuration["components"]:
+            box = transformed_box(matrices[component["link"]], component["bounds"], component["id"])
+            bound = boxes[chain["owners"][component["link"]]]
+            assert all(bound[i][0] - 1e-9 <= box["minimum"][i][0] and box["maximum"][i][1] <= bound[i][1] + 1e-9
+                       for i in range(3))
+
+
+def test_the_transfer_arc_turns_the_short_way_at_the_higher_end():
+    from cais_spade_llm.recovery_framework.nominal_physical_gate import _transfer_arc
+
+    points = _transfer_arc([0.0, 0.0, 0.0], [0.5, 0.0, 1.0], [0.0, 0.5, 1.2], 0.5)
+    assert all(math.isclose(math.hypot(x, y), 0.5) and z == 1.2 for x, y, z in points)
+    assert all(x >= -1e-9 and y >= -1e-9 for x, y, _ in points)

@@ -89,6 +89,197 @@ def _configured_route(step_id: str, settings: dict) -> list[list[float]]:
     return [list(point[:3]) for point in route]
 
 
+def _location_dock(scene: dict, location: str) -> list:
+    """A location's recorded KMR dock as planar x, y, yaw."""
+    from cais_spade_llm.recovery_framework.kmr_recovery import recorded_location
+
+    source, _ = recorded_location(scene, location)
+    dock = source["KMR_docking_pose"]
+    return [dock[0], dock[1], dock[-1]]
+
+
+def _transfer_arc(center: list, start: list, end: list, radius: float) -> list:
+    """Gripper positions on the configured transfer arc around the arm mount between two positions."""
+    left = math.atan2(start[1] - center[1], start[0] - center[0])
+    right = math.atan2(end[1] - center[1], end[0] - center[0])
+    angle = math.atan2(math.sin(right - left), math.cos(right - left))
+    count = max(1, math.ceil(abs(angle) / 0.1))
+    height = max(start[2], end[2])
+    return [[center[0] + radius * math.cos(left + angle * index / count),
+             center[1] + radius * math.sin(left + angle * index / count), height] for index in range(count + 1)]
+
+
+def arm_chain(configuration: dict, matrices: dict) -> dict:
+    """Arm links from the first commanded joint to the reference link, with chain lengths and sizes.
+
+    Args:
+        configuration: Configured URDF kinematics with commanded joint names and link components.
+        matrices: Link transforms at one configuration, used to size links and their side branches.
+
+    Returns:
+        The chain links; for each link frame, the summed joint offsets from the first link frame and
+        to the reference link; each link's thickness around the segment from its frame to the next
+        (side branches such as fingers included); and the chain link that owns every arm link.
+    """
+    from itertools import product as corners
+
+    from cais_spade_llm.resources.continuous_motion import transformed_box
+
+    rows = {row["child"]: row for row in configuration["joints"]}
+    first = next(row["child"] for row in configuration["joints"] if row["name"] == configuration["joint_names"][0])
+    links, link = [], configuration["reference_link"]
+    while link != first:
+        links.append(link)
+        link = rows[link]["parent"]
+    links = [first, *reversed(links)]
+    lengths = [0.0]
+    for link in links[1:]:
+        lengths.append(lengths[-1] + math.hypot(*rows[link]["xyz"]))
+    children = {}
+    for row in configuration["joints"]:
+        children.setdefault(row["parent"], []).append(row["child"])
+    owners = {}
+    for index, link in enumerate(links):
+        stack = [link]
+        while stack:
+            name = stack.pop()
+            owners[name] = index
+            stack.extend(child for child in children.get(name, []) if child not in links)
+
+    def origin(name):
+        return [(row[3][0] + row[3][1]) / 2 for row in matrices[name][:3]]
+
+    def to_segment(point, start, end):
+        span = [b - a for a, b in zip(start, end, strict=True)]
+        length = sum(value * value for value in span)
+        fraction = 0.0 if length == 0 else max(0.0, min(1.0, sum(
+            (p - a) * s for p, a, s in zip(point, start, span, strict=True)) / length))
+        return math.dist(point, [a + fraction * s for a, s in zip(start, span, strict=True)])
+
+    thickness = [0.0] * len(links)
+    for component in configuration["components"]:
+        index = owners.get(component["link"])
+        if index is None:
+            continue
+        box = transformed_box(matrices[component["link"]], component["bounds"], component["id"])
+        start, end = origin(links[index]), origin(links[min(index + 1, len(links) - 1)])
+        thickness[index] = max(thickness[index], max(to_segment(point, start, end) for point in corners(
+            *[(box["minimum"][i][0], box["maximum"][i][1]) for i in range(3)])))
+    return {"links": links, "from_first": lengths,
+            "to_reference": [lengths[-1] - value for value in lengths], "radius": thickness, "owners": owners}
+
+
+def arm_link_bounds(chain: dict, first: list, points: list, margin: float) -> list:
+    """Bound every arm link from its frames' chain distances to the first arm frame and the gripper.
+
+    Each link frame lies within its chain length of the first arm frame and of the reference link;
+    a link lies within its thickness of the segment between its frame and the next. So any joint
+    solution that puts the reference link at one of ``points``, or on the straight paths between
+    them, keeps each link within these boxes.
+    """
+    low = [min(point[i] for point in points) for i in range(3)]
+    high = [max(point[i] for point in points) for i in range(3)]
+    frames = []
+    for near, far in zip(chain["from_first"], chain["to_reference"], strict=True):
+        box = [[max(first[i] - near, low[i] - far), min(first[i] + near, high[i] + far)] for i in range(3)]
+        if any(axis[0] > axis[1] for axis in box):
+            # Unreachable as stated: fall back to the frame's whole reach around the first frame.
+            box = [[first[i] - near, first[i] + near] for i in range(3)]
+        frames.append(box)
+    boxes = []
+    for index, size in enumerate(chain["radius"]):
+        ends = _hull([frames[index], frames[min(index + 1, len(frames) - 1)]])
+        boxes.append([[axis[0] - size - margin, axis[1] + size + margin] for axis in ends])
+    return boxes
+
+_ARM_OPERATIONS = frozenset({"move_cartesian", "move_relative", "move_to_named_pose", "grasp_part", "release_part",
+                             "open_gripper", "close_gripper", "compute_pick_targets", "compute_place_targets"})
+
+
+class _KMRGeometry:
+    """The KMR's configured kinematics and observed body, placed at any base pose along its route."""
+
+    def __init__(self, owner, record: dict, configuration: dict, settings: dict, margin: float) -> None:
+        from cais_spade_llm.recovery_framework.gazebo_safety_preparation import _links
+        from cais_spade_llm.resources.continuous_geometry import observed_joint_configuration
+        from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms
+
+        self.model = record["models"][configuration["model"]]
+        self.observed = owner.recovery_safety_observer.motion_configuration
+        self.root = self.model["links"][self.observed["root"]]["pose"]
+        self.configuration = observed_joint_configuration(self.observed, self.model["joints"], self.root)
+        names = list(self.configuration["joint_names"])
+        self.current = {name: interval(self.model["joints"][name]["position"]) for name in names}
+        self.chain = arm_chain(self.configuration, kinematic_transforms(self.configuration, self.current))
+        self.base_boxes = [row["bounds"] for name, link in _links(record, configuration).items()
+                           if name not in self.chain["owners"] for row in link["collisions"]]
+        root = self.root
+        self.here = [root[0], root[1], math.atan2(2 * (root[6] * root[5] + root[3] * root[4]),
+                                                  1 - 2 * (root[4] ** 2 + root[5] ** 2))]
+        waypoints = settings["task_execution"]["cartesian_waypoints"]
+        self.transport_offset = waypoints["transport_tcp_position_in_base_frame_m"]
+        self.turn = waypoints["turn_radius_m"]
+        self.mount = settings["arm_mount_xyz"]
+        self.parked = [self.current, *({name: interval(value) for name, value in zip(names, joints, strict=True)}
+                                       for joints in (settings["parked_arm_configuration"],
+                                                      settings["task_execution"]["carrying_arm_configuration"]))]
+        self.margin = margin
+
+    def at(self, dock: list, offset: list) -> list:
+        # The KMR worker composes base-frame offsets with the KMR model pose.
+        cosine, sine = math.cos(dock[2]), math.sin(dock[2])
+        return [dock[0] + cosine * offset[0] - sine * offset[1], dock[1] + sine * offset[0] + cosine * offset[1],
+                self.model["pose"][2] + offset[2]]
+
+    def transport(self, dock: list) -> list:
+        return self.at(dock, self.transport_offset)
+
+    def body(self, dock: list) -> list:
+        dx, dy = dock[0] - self.here[0], dock[1] - self.here[1]
+        return [[[box[0][0] + dx, box[0][1] + dx], [box[1][0] + dy, box[1][1] + dy], list(box[2])]
+                for box in self.base_boxes]
+
+    def _placed(self, dock: list) -> dict:
+        from cais_spade_llm.resources.continuous_geometry import observed_joint_configuration
+
+        pose = [dock[0], dock[1], self.root[2], 0.0, 0.0, math.sin(dock[2] / 2), math.cos(dock[2] / 2)]
+        return observed_joint_configuration(self.observed, self.model["joints"], pose)
+
+    def tcp(self) -> list:
+        from cais_spade_llm.resources.continuous_motion import kinematic_transforms
+
+        matrix = kinematic_transforms(self.configuration, self.current)[self.chain["links"][-1]]
+        return [(row[3][0] + row[3][1]) / 2 for row in matrix[:3]]
+
+    def arm(self, dock: list, points: list) -> list:
+        from cais_spade_llm.resources.continuous_motion import kinematic_transforms
+
+        first = kinematic_transforms(self._placed(dock), self.current)[self.chain["links"][0]]
+        return arm_link_bounds(self.chain, [(row[3][0] + row[3][1]) / 2 for row in first[:3]], points, self.margin)
+
+    def parked_arm(self, dock: list) -> list:
+        """Exact arm geometry of the current, parked and carrying configurations at a base pose."""
+        from cais_spade_llm.resources.continuous_motion import kinematic_transforms, transformed_box
+
+        boxes = []
+        for joints in self.parked:
+            matrices = kinematic_transforms(self._placed(dock), joints)
+            for component in self.configuration["components"]:
+                if component["link"] in self.chain["owners"]:
+                    box = transformed_box(matrices[component["link"]], component["bounds"], component["id"])
+                    boxes.append([[box["minimum"][i][0] - self.margin, box["maximum"][i][1] + self.margin]
+                                  for i in range(3)])
+        return boxes
+
+    def gripper_points(self, dock: list, work: list) -> list:
+        """The gripper's positions at a dock: transport, work and their transfer arcs, with lifts above."""
+        center, points = self.at(dock, self.mount), [self.transport(dock), *work]
+        points += [[point[0], point[1], point[2] + 0.3] for point in points]
+        arcs = [arc for start in points[:1] + work for end in points
+                for arc in _transfer_arc(center, start, end, self.turn)]
+        return points + arcs
+
+
 def grounded_rules(cca, runtime, geometry: dict) -> list[dict]:
     """Ground the CCA's predefined specifications over the complete configured scene.
 
@@ -583,74 +774,90 @@ class NominalPhysicalGate:
         return path
 
     def _kmr_cells(self, owner, task: dict, observation: dict) -> list:
-        """Envelope the KMR body along its configured route and its arm's reach where the arm moves.
+        """Envelope the KMR base along its route and its arm around the task's gripper positions.
 
         The KMR runs a whole task in its worker process, so no single trajectory reaches the send
-        check; this envelope is the only physical check of a KMR task and stays conservative.
+        check; this envelope is its only physical check. Where the arm works, each arm link is
+        bounded by its configured chain lengths around the gripper positions the worker computes
+        from, whatever joint solution the planner picks. While the base moves the arm stays parked,
+        so the exact geometry of its current, parked and carrying configurations is swept piece by
+        piece along each route segment.
         """
-        from cais_spade_llm.recovery_framework.gazebo_safety_preparation import _links
-        from cais_spade_llm.recovery_framework.geometry import rotate
-
         rid, record = owner.agent_name, observation["record"]
         scene = self.runtime.context.inputs["scene"]
-        settings = scene["KMR"]
-        boxes = [row["bounds"] for link in _links(record, self.resources[rid]).values() for row in link["collisions"]]
-        base = record["models"][self.resources[rid]["model"]]["pose"]
-        routes = settings.get("predefined_route_waypoints", [])
-        ends = {}
-        for route in routes:
-            ends[route["resources"][0]], ends[route["resources"][-1]] = route["poses"][0], route["poses"][-1]
-        here = min(ends, key=lambda name: math.dist(ends[name][:2], base[:2])) if ends else None
-        targets = {value for value in task["parameters"].values() if isinstance(value, str)} & set(ends) - {here}
-        yaw = math.atan2(2 * (base[6] * base[5] + base[3] * base[4]), 1 - 2 * (base[4] ** 2 + base[5] ** 2))
-        path = [[base[0], base[1], yaw]]
-        for route in routes:
-            if here in route["resources"] and targets & set(route["resources"]):
-                poses = route["poses"] if route["resources"][0] == here else list(reversed(route["poses"]))
-                path.extend(list(pose) for pose in poses)
-                break
+        kmr = _KMRGeometry(owner, record, self.resources[rid], scene["KMR"], self.margin)
         steps = [row["op"] for row in scene["resource_programs"]["resources"][rid]["functions"]
                  [task["event_name"]]["program"]["steps"]]
         split = steps.index("move_base") if "move_base" in steps else len(steps)
-        arm = {"move_cartesian", "move_relative", "move_to_named_pose", "grasp_part", "release_part",
-               "open_gripper", "close_gripper"}
-        reach = float(settings["arm_reach_m"]) + 0.25 + self.margin
-        mount = settings["arm_mount_xyz"]
-
-        def body(point):
-            return [[[box[0][0] + point[0] - base[0], box[0][1] + point[0] - base[0]],
-                     [box[1][0] + point[1] - base[1], box[1][1] + point[1] - base[1]], list(box[2])] for box in boxes]
-
-        def arm_reach(point):
-            center = rotate([0.0, 0.0, math.sin(point[2] / 2), math.cos(point[2] / 2)], list(mount))
-            return [[point[0] + center[0] - reach, point[0] + center[0] + reach],
-                    [point[1] + center[1] - reach, point[1] + center[1] + reach],
-                    [mount[2] - 0.3, mount[2] + reach]]
-
-        held = self._held_part(rid)
-        part = held or self._task_part(task)
-        carried = held is not None or "grasp_part" in steps
+        part = self._held_part(rid) or self._task_part(task)
+        path = self._kmr_route(kmr.here, task["parameters"], part) if split < len(steps) else [kmr.here]
+        # Without a base move the arm works at the current dock; otherwise it only parks there.
+        work = self._kmr_work(task["parameters"], part, record)
+        work_here = [kmr.tcp(), *(work if split == len(steps) else [])]
+        carried = self._held_part(rid) is not None or "grasp_part" in steps
         resting = ({name: (value,) for name, value in observation["parts"][part].items()}
                    if part in observation["parts"] else {})
+        half = self._part_half(record, part) + self.margin if carried and resting else 0.0
 
-        def cell(phase, envelope):
-            hull = _hull(envelope)
-            occupancy = {name: _possible([hull], bounds) for name, bounds in self.regions.items()}
-            moved = occupancy if carried and resting else resting
+        def cell(phase, boxes, points):
+            occupancy = {name: _possible(boxes, bounds) for name, bounds in self.regions.items()}
+            moved = resting
+            if carried and resting:
+                spot = _hull([[[point[i] - half, point[i] + half] for i in range(3)] for point in points])
+                moved = {name: _possible([spot], bounds) for name, bounds in self.regions.items()}
             return self._cell(phase, rid, occupancy, part if moved else None, moved)
 
         cells = [self._cell("at", rid, {name: (value,) for name, value in observation["occupancy"][rid].items()},
                             part if resting else None, resting)]
-        if arm & set(steps[:split]):
-            cells += [cell("between", [*body(path[0]), arm_reach(path[0])]),
-                      cell("at", [*body(path[0]), arm_reach(path[0])])]
-        if split < len(steps):
-            for start, end in zip(path, path[1:], strict=False):
-                cells += [cell("between", body(start) + body(end)), cell("at", body(end))]
-        if arm & set(steps[split + 1:]):
-            cells += [cell("between", [*body(path[-1]), arm_reach(path[-1])]),
-                      cell("at", [*body(path[-1]), arm_reach(path[-1])])]
+        if _ARM_OPERATIONS & set(steps[:split]):
+            points = kmr.gripper_points(kmr.here, work_here)
+            boxes = kmr.body(kmr.here) + kmr.arm(kmr.here, points)
+            cells += [cell("between", boxes, points), cell("at", boxes, points)]
+        for start, end in zip(path, path[1:], strict=False):
+            ends = [kmr.transport(start), kmr.transport(end)]
+            pieces = kmr.body(end) + kmr.parked_arm(end)
+            # Each piece translates with the base, so its sweep is the hull of its two ends.
+            swept = [_hull([first, last]) for first, last in zip(
+                kmr.body(start) + kmr.parked_arm(start), pieces, strict=True)]
+            cells += [cell("between", swept, ends), cell("at", pieces, ends[1:])]
+        if split < len(steps) and _ARM_OPERATIONS & set(steps[split + 1:]):
+            points = kmr.gripper_points(path[-1], work)
+            boxes = kmr.body(path[-1]) + kmr.arm(path[-1], points)
+            cells += [cell("between", boxes, points), cell("at", boxes, points)]
         return cells
+
+    def _kmr_route(self, here: list, parameters: dict, part: str | None) -> list:
+        """Base poses from the current dock through the configured route to the task's dock."""
+        from cais_spade_llm.recovery_framework.kmr_recovery import pickup_docking_pose
+
+        scene = self.runtime.context.inputs["scene"]
+        routes = scene["KMR"].get("predefined_route_waypoints", [])
+        docks = {location: _location_dock(scene, location)
+                 for location in {name for route in routes for name in route["resources"]}}
+        source = min(docks, key=lambda name: math.dist(docks[name][:2], here[:2]))
+        destination = (parameters.get("origin_resource_location") or parameters.get("target_resource")
+                       or parameters.get("destination_location"))
+        if destination not in docks:
+            raise ValueError("KMR task destination has no configured dock: " + str(destination))
+        target = (pickup_docking_pose(scene, destination, part) if "origin_resource_location" in parameters
+                  and part else docks[destination])
+        path = [here]
+        for route in routes:
+            if set(route["resources"]) == {source, destination}:
+                poses = route["poses"] if route["resources"][0] == source else list(reversed(route["poses"]))
+                path.extend(list(pose) for pose in poses)
+        return [*path, list(target)]
+
+    def _kmr_work(self, parameters: dict, part: str | None, record: dict) -> list:
+        """The gripper's work positions: the part where it lies, or the recorded fixture access poses."""
+        scene = self.runtime.context.inputs["scene"]
+        destination = parameters.get("destination_location") or parameters.get("target_resource")
+        machine = next((row for row in scene["machines"] if row["resource_id"] == destination), None)
+        if machine is not None and "KMR_access" in machine:
+            return [list(machine["KMR_access"][key][:3]) for key in ("approach_pose", "target_pose")]
+        if part is not None and self.part_models.get(part) in record["models"]:
+            return [list(record["models"][self.part_models[part]]["pose"][:3])]
+        return []
 
     def _static_cells(self, rid: str, observation: dict) -> list:
         """Static equipment keeps its body; a part it moves stays within its own extent."""

@@ -672,6 +672,18 @@ tolerance, CCA `ack_cursor` 202, no invalid reason). Against `nominal_cca_05` (n
 | robot sends checked / held / waited | 144 / 0 / 0 | – |
 | prediction mean / send check mean (max) | 0.18 s / 1.67 s (6.65 s) | – |
 
+**KMR envelope tightened (user, 2026-10-24: "yes can you fix that kmr").** The first envelope (full arm reach
+around the shoulder at every dock) made KMR work at Storage claim `M1.side_access`: 10 of run 04's 14 holds were
+false M1 conflicts. Now the base is swept along the route between the actual docks (including the part-specific
+Storage pick docks); while it drives, the exact geometry of the current, parked and carrying arm configurations
+is swept piece by piece; where the arm works, every arm link frame is bounded by its URDF chain length to the
+first arm frame and to the task's gripper positions (current, transport, part or `KMR_access` fixture poses, the
+0.5 m transfer arc), and each link is the hull of its two frames plus its thickness. This holds for any joint
+solution (checked on 200 random KMR configurations with the real URDF and as a unit property test).
+`nominal_7spec_08`: **PASSED**, 32.7 min wall / 31.7 min production, 4 holds (all ur5e-2 at M2, real M2-mutex
+turns), 144 sends checked, none held; KMR claims: Storage work none, trips to M1/M2 only that machine's side
+access, dock work only that machine's regions. Runs 05–07 were intermediate (outputs deleted).
+
 One run each, so the 2.4 min shorter total is within run-to-run variance, not a speedup; the specs cost about
 1 min of extra start waiting (spread over parallel work) and ~1.7 s per robot send. Comparison script:
 `nominal_physical_20261024/compare_runs.py`. Gate setup can miss the first start when a resource is not yet
