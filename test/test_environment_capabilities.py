@@ -111,6 +111,13 @@ def test_an_activity_commits_its_start_then_its_observed_finish():
     assert context.resources['ur5e-1'].valuation['resource_state'] == 'moving_home'
     # The finish is checked against the values its start left, not those the task was prepared on.
     assert context.relevant_revisions_match(pending)
+    # Plans over dispatched tasks project a running activity's finish only.
+    from cais_spade_llm.resources.environment_models import project_activity
+    args = (context.models, context.snapshot(), context.part_tracker, pending,
+            context.product_name, context.requirements)
+    assert project_activity(*args, started=True)[0]['ur5e-1']['resource_state'] == 'idle'
+    with pytest.raises(ValueError, match='Guard blocked: ur5e-1.resource_state'):
+        project_activity(*args)
     assert context.acknowledge({**pending, 'status': 'completed'})
     assert [row['kind'] for row in context.transitions] == ['start', 'finish']
     assert context.resources['ur5e-1'].valuation['resource_state'] == 'idle'

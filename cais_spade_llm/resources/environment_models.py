@@ -1190,15 +1190,18 @@ def finish_task(models: dict, task: dict) -> dict | None:
 
 def project_activity(
     models: dict, valuation: dict, products: dict, task: dict, product_name: str, requirements: dict,
-    *, defer_resource_guards: bool = False,
+    *, defer_resource_guards: bool = False, started: bool = False,
 ) -> tuple[dict, dict]:
     """Project a commanded activity through its start and, when it has one, its observed finish.
 
     Planning treats an activity as one task; the running state between its two events is not a place
-    where a plan stops.
+    where a plan stops. A started activity, whose start ``valuation`` already holds, has only its finish
+    left.
     """
-    after, products = project_transition(models, valuation, products, task, product_name, requirements,
-                                          defer_resource_guards=defer_resource_guards)
+    after = valuation
+    if not started:
+        after, products = project_transition(models, valuation, products, task, product_name, requirements,
+                                              defer_resource_guards=defer_resource_guards)
     finish = finish_task(models, task)
     if finish is None:
         return after, products

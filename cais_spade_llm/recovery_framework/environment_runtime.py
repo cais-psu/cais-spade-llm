@@ -692,6 +692,7 @@ class EnvironmentRuntime:
             task,
             self.context.product_name,
             self.context.requirements,
+            started=task.get("task_id") in self.context.started_tasks,
         )
         node = {
             "id": name,
@@ -716,6 +717,7 @@ class EnvironmentRuntime:
         nodes = []
         for index, task in enumerate(tasks):
             actor = self.context.resources[task["resource_id"]]
+            # A dispatched task may already be running; only its finish is left.
             after, _ = project_activity(
                 self.context.models,
                 self.context.snapshot(),
@@ -723,6 +725,7 @@ class EnvironmentRuntime:
                 task,
                 self.context.product_name,
                 self.context.requirements,
+                started=task.get("task_id") in self.context.started_tasks,
             )
             nodes.append(
                 {
