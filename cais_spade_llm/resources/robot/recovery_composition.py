@@ -238,7 +238,7 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                     return fail("The receiving zone is occupied", "INFEASIBLE")
                 values[field] = part_name
                 product = product_state_from_custody(part_name, destination, values, physical_evidence.get("product_name"))
-                part.update(part_state=product["state"], part_location=product["location"])
+                part.update(part_location=product["location"])
                 projected_resources[jid] = values
                 completed.append({"source": "product_state_from_custody", "owner": destination,
                     "resource_values": values, "contract_fingerprint": recovery_validation_fingerprint(model)})
