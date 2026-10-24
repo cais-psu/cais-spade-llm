@@ -95,7 +95,8 @@ def run(scene: dict, action: str) -> dict:
             if not client.wait_for_service(timeout_sec=8):
                 raise RuntimeError(f"Gazebo service unavailable: {name}")
             future = client.call_async(request)
-            rclpy.spin_until_future_complete(node, future, timeout_sec=8)
+            # With the Gazebo window open, a failure moment can delay a service reply beyond 8 s.
+            rclpy.spin_until_future_complete(node, future, timeout_sec=30)
             if not future.done() or future.result() is None:
                 raise RuntimeError(f"Gazebo service timed out: {name}")
             return future.result()
