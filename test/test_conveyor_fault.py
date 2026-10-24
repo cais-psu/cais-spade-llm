@@ -521,6 +521,8 @@ def test_partial_slippage_keeps_latch_and_reports_uncertainty(monkeypatch, stage
 def _frozen_machine_checkpoint(monkeypatch, runtime):
     """Stand in for the Gazebo machine capture and record what it observed."""
     seen = []
+    # A capture run has a recovery session that receives the frozen checkpoint.
+    runtime.part_slippage_recovery = SimpleNamespace(path=None, begin=Mock())
 
     async def capture(owner, failure):
         assert owner.recovery_checkpoint_capturing and owner.stopped
@@ -528,6 +530,19 @@ def _frozen_machine_checkpoint(monkeypatch, runtime):
 
     monkeypatch.setattr("cais_spade_llm.recovery_framework.recovery_observations.capture_machine_checkpoint", capture)
     return seen
+
+
+def test_a_run_without_a_recovery_session_stops_without_a_frozen_checkpoint(monkeypatch):
+    """A failure video has no recovery session, so the breakdown stops the run without capturing."""
+    runtime, _part, _ = runtime_with_failure("ur5e-1 breakdown")
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker",
+                        Mock(return_value={"status": "completed"}))
+    capture = Mock(side_effect=AssertionError("no recovery session to hold a checkpoint"))
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.recovery_observations.capture_machine_checkpoint", capture)
+    asyncio.run(runtime.conveyor_fault.trigger())
+    assert runtime.conveyor_fault.evidence["injection_status"] == "completed"
+    assert runtime.stopped and not getattr(runtime, "recovery_checkpoint_capturing", False)
+    capture.assert_not_called()
 
 
 def test_robot_breakdown_retains_completed_part_in_M1_and_observed_pose(monkeypatch):

@@ -414,8 +414,11 @@ class ConveyorFault:
                 context.revision += 1
                 if scenario == "Conveyor breakdown":
                     context.inputs["scene"]["Conveyor"]["transport_enabled"] = False
-                if (scenario == "Machining breakdown during part processing" and configuration["checkpoint"] == "during_processing"
-                        or scenario == "ur5e-1 breakdown"):
+                # A frozen checkpoint is saved into the recovery session; a run without one, such as a
+                # failure video, stops like the other scenarios.
+                if ((scenario == "Machining breakdown during part processing" and configuration["checkpoint"] == "during_processing"
+                        or scenario == "ur5e-1 breakdown")
+                        and getattr(runtime, "part_slippage_recovery", None) is not None):
                     # Stop dispatch first; worker cancellation follows the frozen observation.
                     runtime.stopped = True
                     runtime.recovery_checkpoint_capturing = True
