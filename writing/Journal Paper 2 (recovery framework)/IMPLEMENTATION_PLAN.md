@@ -776,6 +776,16 @@ checker skips the KMR's `approached_part` as bookkeeping, like `task_ctx.*` (no 
 KMR's two-step pick together), and the checker is built overnight, offline only. Marking `approached_part` private
 waits for the prompt decisions.
 
+**October 25, night: Machining with gpt-6.1-sol at high effort (user's request).** `draft_b0ae536a…`: 29 calls, 24
+events, 9.5 min, about 359k tokens; same capture, prompt and safety files. It looked up the remaining planned tasks
+of nine resources. It fixes gpt-5.4's main error: the KMR unloads RGOCG4 from M2 into Storage, carries KET4 from M1
+to M2, KET4's trim runs and completes on M2, then RGOCG4 is reloaded into M2 and its circle trim resumed (safety
+order kept). It still ends unconnected: the finished KET4 is stored in Storage, while normal production next expects
+it at M1 and then on the Conveyor. The RA check accepts all 24 events (the KMR's stated base poses fit the floor map;
+"resume KET4 on M2" is read as a fresh `start_job`). Conclusion: model strength matters for planning quality (a model
+comparison variable), and neither model reliably ends at a state normal production can continue from, which is the
+CCA nonblocking check's job.
+
 **October 25, evening: three more fact fixes and Machining regenerated (read this first).**
 
 From the LLM's own turn-by-turn reasoning in `draft_23c036c5…` (user approved, `ef088e5`): M2's line kept showing a
