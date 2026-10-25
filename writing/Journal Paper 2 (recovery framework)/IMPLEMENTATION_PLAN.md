@@ -725,18 +725,110 @@ send check time could drop with coarser sweeps; the prepared nominal path in `_c
   plan rebuild projecting a started activity from its start, and the protected `cca_safety_logic.json`
   being rewritten by nominal starts (the harness restores it).
 
-## RA feasibility validation — October 23, 2026 — plan approved by the user, not started
+## RA feasibility validation — October 23, 2026 — plan approved by the user; Step 1 revised October 24, machine, transport and KMR grasp/release contracts declared (uncommitted)
 
-**Resume here (2026-10-24, next chat session).** The physical nominal check is done (`87f9356`, `288c8de`), so
-recovery validation is next, starting with this plan. Re-checked against the code on 2026-10-24: the Step 1 list
-below still holds (UR5e primitives still declare no `capability_constraints`; `gripper_reach` is in
-`initialization/resources/robot_ur5e.json`; the Conveyor order is still the `nominal_conveyor.CONVEYOR_LOCATIONS`
-constant). The condition vocabulary lives in `cais_spade_llm/resources/recovery_transition_derivation.py`
-(`_CONDITIONS`), not under `resources/robot/`. New since activity model B: backward derivation should read each
-activity's combined result (start + finish, as `nominal_des.outcome_models` folds them), because end values such
-as `held_part` are set by `*_done` finishes. **Waiting for the user to approve the Step 1 list** (asked 2026-10-24,
-the user moved the discussion to a new session). Step 5 replays the four Oct 23 drafts on their v3 captures (no LLM
-cost); new drafts on the v5 captures come after the checker works.
+**Resume here (updated 2026-10-24).** The physical nominal check is done (`87f9356`, `288c8de`). On 2026-10-24 the
+user revised how backward derivation works: it goes from each changed state condition to the primitives whose
+declared effects produce it, never through nominal events (Steps 2 and 3). Later that day the user decided that the
+capability check covers every domain (Step 1 list, item 6), that pose places are covered (item 9), that any value
+type can be an end condition (item 10), and that job completion is a delayed effect (item 4). The machine and
+transport contracts, the declarations accessor and the scan test are in place; the KMR's grasp and release
+contracts are in, after two generic runtime fixes (see "Step 1 progress" below). Next: the KMR `move_base` pose
+shape, the decisions in "Open decisions (October 24)", then Θ and C_ρ, then the checker. Step 5 replays the four Oct 23 drafts on their v3 captures (no LLM cost): Part slippage
+`draft_8149840e…`, Conveyor `draft_1b233a1b…`, ur5e-1 `draft_9aea54b0…`, Machining `draft_b89cc88b…`. New drafts on
+the v5 captures come after the checker works.
+
+**Step 1 progress (October 24, uncommitted; base `391c93b`).**
+- Done:
+  - `resource_primitives.current_primitive_declarations(scene)` reads every resource's current declarations (robot
+    and KMR frontmatter, machine and transport contracts) for the scan test and the future checker. It is not routed
+    into `environment_primitive_catalog`, `build_environment_models`, captures or prompts.
+  - M1, M2: `machine_jobs.machine_primitive_contracts(machine)`, beside `MACHINE_PRIMITIVES`. The v5 machine model
+    has no `job_state` (a test asserts it): the job is the machine's `resource_state` plus the part's
+    `current_process`, which names its machine (the aligned part model).
+    - Both `resume_job` contracts (paused; or loaded with a job this machine paused) require
+      `job_control.resume_after_reload`, because `MachineJobs.command` refuses every resume without it.
+    - Completion is the machine's observed `complete_job` outcome, uncontrollable as in the machine automaton:
+      while running, after the job's remaining active time (`processing_time_sec` − `processing_active_sec` from
+      the job record, which is (1 − `processing_fraction`) × `processing_time_sec`). Pausing or stopping halts the
+      active time, so a job completes once, and a job already running at the failure (M2 in the Machining
+      capture) can complete. The review rejected a first version that attached completion to `start_job` and
+      `resume_job`: it let a stopped job complete, completed a paused-then-resumed job twice, and could not
+      complete a job running at the failure.
+  - Conveyor, Buffer: `workflow_gazebo.TRANSPORT_PRIMITIVE_CONTRACTS`; `move_relative` sets each observed part's x
+    to its computed `target_x`.
+  - Tests: `test_primitive_declarations_never_set_a_location_slot_or_custody` (the named-pose exception is
+    explicit; checked to catch injected location, slot and custody effects) and
+    `test_machine_contracts_follow_the_machine_automaton` (every contract against the automaton's events, except
+    the product's own plan-order guard, which the product declares).
+  - Verified: the focused suites have no new failures (13 pre-existing in `test_recovery_delivery.py` and 7 in
+    `test_recovery_feasibility.py`, which also fail at HEAD); the `resource_programs` revision is still
+    `39425952…aeed`; no capture file changed; ruff findings are unchanged; compileall passes.
+- Tried and reverted after an independent review (October 24):
+  - KMR frontmatter (`held_part` preconditions; `held_part` and `gripper_state` effects). Two regressions, both
+    reproduced: (1) the KMR's runtime snapshot (`get_resource_recovery_snapshot`) carries no `held_part`, because
+    the KMR profile has no facet, so `release_part` and `detach_part` macros were refused before any motion while
+    HEAD completes them; (2) the `held_part` effect needs `part_name`, but the KMR's own pick program calls
+    `grasp_part` with only `initial`, so such compositions became NEEDS_CONTEXT. Prerequisites before declaring
+    them: a KMR profile facet that exposes `held_part` and `gripper_state`, and a recovery catalog that requires
+    `part_name` for `grasp_part` and `attach_part` (the KMR profile's `event_fact_contract_map`).
+    - Prerequisite 1 DONE (October 24, uncommitted), generically rather than as a KMR facet (user):
+      `get_resource_recovery_snapshot` now keeps every field a resource's profile reports (`snapshot_fields`) or
+      its primitive declarations name, when the profile's facet left it out and the resource reported it. The
+      KMR's check snapshot now carries `held_part` and `gripper_state`; the UR5e's is unchanged (its facet already
+      had them). Covered in `test_kmr_owned_primitive_catalog_and_recovery_preserve_partial_custody`; both test
+      batches unchanged from the baseline.
+    - Prerequisite 2 DONE (October 24, uncommitted), generically rather than through the KMR's
+      `event_fact_contract_map` (that map is for observation primitives that publish event facts): a catalog now
+      requires every parameter a declared effect reads (`resource_primitives._effect_parameters`; an effect with
+      several alternatives requires none of them). No existing declaration changes, since every such parameter is
+      already required; once the KMR contracts are back, its `grasp_part` and `attach_part` will require
+      `part_name` in recovery while the Python signature stays optional for the nominal pick program. Covered in
+      `test_a_catalog_asks_for_every_parameter_a_declared_effect_reads`; both test batches unchanged.
+    - KMR contracts DONE (October 24, user approved, uncommitted): the UR5e's grasp and release contract on the
+      KMR's `open_gripper`, `close_gripper`, `grasp_part`, `release_part`, `attach_part` and `detach_part`
+      (`held_part` preconditions; `held_part` and `gripper_state` effects), without the UR5e's `current_state` and
+      without gripper preconditions on attach and detach (the KMR may not have reported `gripper_state` yet).
+      Descriptions and parameters are unchanged. The reviewer's reproductions now give: a release macro on a KMR
+      carrying a part completes (it was refused by the first attempt); composition of a grasp with `part_name` and
+      of a release becomes FEASIBLE (INFEASIBLE at HEAD, which declared no effect); a grasp without `part_name` is
+      refused with "'part_name' is a required property". Both test batches unchanged from the baseline.
+    - KMR `move_base` pose DONE (October 24, user approved, uncommitted): the composition parser accepts
+      `pose_absolute_from_<array parameter>` again, now writing into the shape the recorded pose already has. A
+      7-element base_pose keeps its height and takes x, y and a yaw-only quaternion (qz = sin(yaw/2),
+      qw = cos(yaw/2)); a dict pose takes the named fields. With no recorded starting pose, or a target field that is
+      not a pose, it fails closed (NEEDS_CONTEXT). Covered in `test_a_base_move_keeps_the_shape_of_the_recorded_pose`.
+      On the recorded v5 captures `move_base` now gets NEEDS_CONTEXT "Missing starting pose for 'base_pose'" (no
+      false INFEASIBLE): those captures recorded `base_pose` only in `resource_evidence.snapshot`, not in the
+      `recovery_snapshot` composition starts from. New captures should carry it through the snapshot fix above;
+      check at the next capture.
+    - Follow-up DONE (October 24, user approved, uncommitted): `recovery_composition_owner.validate_owner_composition`
+      starts a fact the owner's primitives declare but the composition prefix lacks from the owner's recorded
+      evidence snapshot (which its capability check already reads); a recorded fact never replaces a prefix fact.
+      On the Part slippage capture, through the saved KMR owner, `move_base` alone, `move_base` then
+      `move_to_named_pose`, and `move_base` twice are now FEASIBLE with `base_pose` kept as 7 numbers (HEAD:
+      NEEDS_CONTEXT, unsupported effect). Covered in
+      `test_an_owner_composition_starts_a_missing_declared_fact_from_recorded_evidence`.
+  - Composition support for `pose_absolute_from_<array parameter>` (the `move_base` effect). It projected
+    `base_pose` as {x, y, yaw}, while the KMR evaluator reads a 7-element pose and lets the projection replace the
+    recorded one, so `move_base` → `compute_pick_targets` became a false INFEASIBLE (HEAD: NEEDS_CONTEXT). The
+    composition check keeps rejecting that effect, as before; project into the derived `pose` condition or teach
+    the KMR evaluator a planar pose first.
+- Deferred:
+  - Pose places (item 9), revised October 24 with the user: no new part variable, effect or prompt line. The
+    frozen prompt already says "give an unnamed position as `pose`", so the LLM states the resource's release
+    `pose` and `held_part` = null; the part then rests there (location empty, `observed_pose` = the release pose,
+    the representation the v5 captures already use; decision 5). `PAPER_FRAMEWORK.md` now defines pose places in
+    one bullet (decision 6; decision 7's prompt line is not needed). The support and free checks and setting the
+    part's `observed_pose` come with the checker.
+  - KMR arm-move effects on `current_pose`: the KMR's recorded recovery snapshot has no `current_pose`, so a relative
+    effect would fail the composition check closed.
+  - "`move_base` needs a parked arm": there is no state variable for it, so it becomes a C_ρ over joint positions.
+  - Machine checks the command also enforces (the selected program can produce the requested result; a resumed job
+    keeps its program and configuration): these are Θ and C_ρ.
+- Noticed, out of scope: the machine automaton declares `resume_job` from paused unconditionally
+  (`environment_models._declare_machine_jobs`), while `MachineJobs.command` requires `resume_after_reload` for every
+  resume. Both machines set the flag, so nothing differs today.
 
 **Goal.** Rebuild RA validation as the paper defines it, applied to each event the LLM proposes:
 Algorithm 1 (backward derivation) followed by Eq. 12 (forward check). Rebuild rules (October 22): every
@@ -765,97 +857,210 @@ value, against the declared transitions of the acting resource:
   - Machine and Conveyor primitives declare no preconditions or effects. "The Conveyor only runs
     downstream" (Machining's "no route from M1 to M2") is not declared anywhere.
 
-**Steps.**
-1. **Complete the model data (A.2).** Declare constraints C_ρ and parameter domains Θ (yes/no
-   predicates, no new symbolic effects; see the rule below the list) in machine-readable form, taken
-   from the existing declarations:
-   UR5e `gripper_reach` and `reachability`, KMR reachable locations and navigation map, machine
-   programs, Conveyor direction. The list for review is "Step 1 list" below; show it to the user
-   before changing the models.
-2. **Backward derivation (Alg. 1).** For each variable the event changes, collect the acting resource's
-   declared transitions whose update sets that value (including `collection_effects`), and gather
-   their `primitive_support`. Unchanged variables need no derivation. A value nothing produces is
-   refused with the fact (for example "no declared transition of ur5e-3 sets part_state to ready"),
-   never the fix.
-3. **Forward check (Eq. 12).** For each collected primitive, check that some θ ∈ Θ satisfies
-   C_ρ(v, v′, θ), with θ drawn from recorded evidence. Examples: a stated pose must lie inside
-   `gripper_reach`; a target place must be among the reachable locations.
+**Steps** (Steps 2 and 3 revised by the user on October 24).
+1. **Complete the model data (A.2).** Declare each primitive's preconditions, effects, constraints C_ρ and parameter
+   domains Θ in machine-readable form, under the rule "primitives must not be symbolically connectable" below. The
+   list is "Step 1 list" below.
+2. **Backward derivation (Alg. 1), from state conditions to primitives.** For each condition the event changes, find
+   the acting resource's primitives whose declared effect produces that value. Nominal events are not used: a
+   recovery event is a new transition, so nominal guards, destinations and `primitive_support` do not carry over.
+   - A location, slot or custody value is produced by the acting resource's release or grasp (its pose effect).
+     Like a value in any other domain, it is checked against that resource's capabilities (Step 1 list, item 6). A
+     spot with no state variable is stated as the part's pose (item 9).
+   - Unchanged conditions need no derivation; `resource_state` is free; part fields follow from custody.
+   - A value no primitive produces is refused with that fact ("no <resource> primitive sets <condition> to
+     <value>"), never the fix.
+3. **Forward check (Eq. 12).** Each changed condition needs at least one producing primitive with some θ ∈ Θ where
+   C_ρ(v, v′, θ) holds, evaluated at the recovery's own start v and end v′. Preconditions are part of C_ρ.
+   - The event's primitive set is the union of one feasible producer per condition: within one condition the
+     producers are alternatives, across conditions all are required. A plain union of every producer would refuse
+     feasible events: in Part slippage draft event 1, `detach_part` needs an open gripper (recorded `closed`), while
+     `release_part` works.
+   - No chaining: a failed precondition is refused with its fact. The RA never looks for another primitive to make
+     it true; that would be planning.
+   - The union has no order. Composition (Section 5.2, Eq. 7) orders it and checks the sequence.
+   - θ comes from recorded evidence, for example the resource's own target computation (`compute_place_targets`)
+     for a place.
 4. **Hook into the draft loop** behind a `check_ra_feasibility` toggle. A refusal returns to the LLM
    as feedback. An accepted event's stated end state becomes the projected state.
 5. **Offline replay** of the four October 23 drafts through the check (no LLM cost) to see what it
    refuses, reviewed with the user before any live run.
 
-**Step 1 list (October 23, for the user's review; nothing changed yet).** Where each declaration
-lives today and what to add. Everything stays outside the scene `resource_programs`, whose revision is a
-SHA-256 of the whole block (`gazebo_programs.resource_program_revision`), so the existing captures stay
-executable.
+**Step 1 list (revised October 24; the user approved adding the declarations and the scan test; preconditions and
+effects are declared, Θ and C_ρ are not yet; see "Step 1 progress" above).** Everything stays outside the scene `resource_programs`, whose revision is a SHA-256 of the whole block
+(`gazebo_programs.resource_program_revision`); its primitive rows hold only `status` and `recovery_selectable`. The
+existing captures stay executable. Declarations live next to each executor, as the UR5e frontmatter already does.
 
-0. **Part fields: no change.** `part_location`/`part_state` follow from the custody fields of the end
-   state (`held_part`, machine `part_name`, `staging_part`, `zone_*_part`, Conveyor `part_location.*`,
-   `inventory.*`, `output.*`, `assembled.*`) through the plant's product projection. The RA derives the
-   custody fields; the part's condition follows from them.
-1. **Resource conditions ν_i: decided by the user (October 23), no data needed.** `resource_state` is the
-   DES state's name x′ and is free for every resource. Every other declared variable is a condition v′
-   (bookkeeping `task_ctx.*` and private fields are skipped, as today). A machine's job is still checked
-   through its part-scoped `job_state`; its `resource_state` only repeats it.
-   - An event that changes only the name has no condition to derive, so the RA accepts it.
-   - A new name that blocks normal production (nominal guards use the declared names) is the handoff
-     check's job (Eq. 6), not the RA's.
-2. **UR5e primitives** (YAML frontmatter in the docstrings of
-   `resources/robot/gazebo_pick_place_controller.py`, read by `resource_primitives.py` 146-162; every
-   `capability_constraints` is `{}` today):
-   - `move_cartesian`: the target (x, y, z) lies inside `gripper_reach` (`robot_ur5e.json` 31-42: a
-     vertical cylinder, `origin_pose` xy, `max_xy_radius_m` 0.7, `z_min_m` 0.85, `z_max_m` 1.6,
-     `tolerance_m` 0.01; the same test as `robot_agent._recovery_pose_gripper_reach_error`). Use the
-     value recorded in the capture's `static_capabilities`, which is what the runtime used
-     (`workflow_execution` 202-206 computes it when the scene gives none).
-   - `move_relative`: the resulting pose lies inside `gripper_reach`.
+0. **Part fields and `resource_state`: no change** (decided October 23). Part fields follow from the custody fields of
+   the end state through the plant's product projection (`product/state.py` 47-70). `resource_state` is the DES state
+   name and is free for every resource; an event that changes only the name has nothing to derive.
+1. **One constraint form for every primitive.** C_ρ is a predicate expression stored as data and evaluated by one
+   interpreter, so a kind of constraint never introduced before is a new expression, not new validator code.
+   - References: `$param` (θ), `$before` (v), `$after` (v′), `$capability` (declared data), `$evidence` (recorded
+     measurements).
+   - Operators: comparisons (`le`, `ge`, `eq`, `in`, `between`), `all`, `any`, `not`, arithmetic.
+   - A small library of pure math functions named for the math, never for a resource (`distance_xy`, `norm`,
+     `index_of`, `inside_box`, …). New math adds one generic function with a unit test.
+   - Fail closed: an unknown operator, function or reference returns NEEDS_CONTEXT with that fact. The expression is
+     a parsed YAML/JSON tree, never Python `eval`. It is yes/no only and never sets state.
+   - A primitive with no constraints passes; its preconditions still apply.
+2. **UR5e** (`resources/robot/gazebo_pick_place_controller.py` frontmatter, read by `resource_primitives.py` 146-162).
+   Effects already exist for `held_part`, `gripper_state` and `current_pose`; every `capability_constraints` is `{}`.
+   - Poses at the part (pick and place target, approach, retreat) lie inside `gripper_reach`, the test the runtime
+     applies (`robot_agent.py` 2639). The region was computed for top-down grasps of loose parts.
+   - Free moves (retract, hover) need the arm's own reach, which the UR5e does not declare: new data. Real case: Part
+     slippage draft event 2 moves ur5e-4 to a pose at z 1.289, its current height, which is above `gripper_reach`
+     (z_max 1.121 + 0.01), so a `gripper_reach` test would wrongly refuse it.
    - `move_to_named_pose`: `pose_name` is one of the declared `named_positions`.
-   - `grasp_part`/`release_part`: the `held_part` preconditions already exist; their targets come from
-     recorded evidence and are bounded by the `move_cartesian` constraint.
-   - Needs one new constraint operator, "point inside a declared region". The current vocabulary
-     (`recovery_transition_derivation._CONDITIONS`) compares state fields only; the region's shape and
-     size stay data.
-3. **KMR primitives** (`recovery_framework/kmr_primitives.py` docstring frontmatter). Add constraints
-   only; the prose contracts in `kmr_tasks.PRIMITIVE_CONTRACTS` (serialized into `resource_programs`)
-   stay as they are.
-   - `move_base`, Θ: the KMR footprint at `target_pose` is free on the floor map. The data is the
-     obstacle bounds `outline_draft._navigation_floor` already reads, plus
-     `platform_overall_dimensions_m` [1.19, 0.72] from the scene KMR block. In primitive mode
-     `kmr_gazebo.move_base` already allows a free target.
-   - Arm moves (`move_cartesian`, `move_relative`, `move_to_named_pose`): the TCP target lies within
-     `arm_reach_m` 0.82 of `arm_mount_xyz` (scene KMR block 1400-1411), relative to the base pose.
-   - Noticed: the `move_base` effect is `pose_absolute_from_target_pose` in the frontmatter but
-     `base_pose: observed` in the JSON, and the effect parsers know only `pose_absolute_from_params`.
-     It matters for composition (Eq. 7), not for this check.
-4. **Machines** (M1, M2): nothing new. Their primitives map one to one to the job automaton's
-   transitions, which backward derivation reads directly. The domains already exist:
-   - `program` ∈ `program_options` (the `select_program` parameter domain);
-   - `result` ∈ `process_capabilities.trim.supported_results`;
-   - `resume_after_reload` and `restart_stopped_jobs` in `job_control`.
-5. **Conveyor:** move the region order and "downstream only" from code into the Conveyor's scene entry
-   (outside `resource_programs`). Today they are the `nominal_conveyor.CONVEYOR_LOCATIONS` constant and
-   a `ValueError` (239-242). `nominal_conveyor` reads the same values from data, so nothing changes at
-   runtime. `move_relative` constraints:
-   - no resident part's region index decreases;
-   - Θ: 0 < `speed_mps` ≤ `simulation_transport.speed_mps`, already checked in `gazebo_programs`
-     280-292.
-6. **Buffer:** the zone chain is already data (`downstream_zone`, capacity 1). Add the `move_relative`
-   speed Θ only.
-
-**Rule: primitives must not be symbolically connectable (user, October 23).** If every primitive had
-complete symbolic preconditions and effects over the same variables (location, held part, slot), a
-classical planner could chain them from the failure state to the goal without the LLM, and RC1
-collapses. So the RA is a verifier, never a generator:
-- Backward derivation is a lookup keyed by the LLM's stated values. It reads the DES transitions and
-  their `primitive_support`, which exist; it never searches.
-- Eq. 12 needs only C_ρ and Θ: yes/no predicates on a given proposal over continuous geometry and
-  recorded evidence (reach cylinder, free footprint, belt order, speed bounds). They give no successor
-  rule.
-- Add no symbolic location, slot or part effects to primitives. The existing UR5e frontmatter effects
-  (`held_part`, `gripper_state`, continuous `current_pose`) stay; the composition check (Eq. 7) uses
-  them to check a given sequence.
+   - `release_part` gains a continuous part-pose effect: the released part's pose is the gripper's pose at release
+     (item 9).
+3. **KMR** (`recovery_framework/kmr_primitives.py`; only `move_base` declares an effect today). The prose contracts in
+   `kmr_tasks.PRIMITIVE_CONTRACTS` (serialized into `resource_programs`) stay as they are.
+   - Effects: `grasp_part`, `release_part`, `attach_part`, `detach_part` → `held_part`; `open_gripper`,
+     `close_gripper` → `gripper_state`; arm moves → arm pose relative to the base; `move_base` → `base_pose`;
+     `release_part` also sets the released part's pose (item 9).
+   - Fix the `move_base` effect: the frontmatter says `pose_absolute_from_target_pose`, but the effect parser knows
+     only `pose_absolute_from_params`. A parser fix was tried and reverted (it broke the KMR evaluator's 7-element
+     `base_pose`; see "Step 1 progress").
+   - Preconditions: release needs a held part, grasp an empty gripper, `move_base` a parked arm.
+   - C_ρ: arm targets lie within `arm_reach_m` 0.82 of `arm_mount_xyz`, relative to the base pose (scene KMR block);
+     the footprint at `target_pose` is free on the floor map (`outline_draft._navigation_floor` obstacle bounds and
+     `platform_overall_dimensions_m` [1.19, 0.72]).
+4. **M1, M2** (`resources/machine/machine_jobs.py`, beside `MACHINE_PRIMITIVES`; no preconditions or effects today).
+   - Effects: `select_program` → `selected_program`; `start_job`, `resume_job` → `job_state` running; `pause_job` →
+     paused; `stop_job` → stopped.
+   - Preconditions: `start_job` needs a part in the workholding and no unfinished job; `resume_job` needs a job paused
+     on this machine (the cross-machine resume below); `select_program` needs the machine not running.
+   - Θ: `program` ∈ `program_options`; `result` ∈ `process_capabilities.trim.supported_results`.
+   - Delayed completion (user, October 24): the job completes after the remaining processing time
+     ((1 − recorded `processing_fraction`) × `processing_time_sec`), with the part's `processCompleted`. Without it,
+     "M2's job completed" has no producer. Declared as the machine's observed, uncontrollable `complete_job` outcome
+     while running (see "Step 1 progress").
+5. **Conveyor, Buffer** (`recovery_framework/workflow_gazebo.py` 625-641; no effects today).
+   - `move_relative` effect: every part on it advances by the transport distance from `compute_transport_targets`
+     (a continuous position, not a slot).
+   - C_ρ: no part moves upstream; a Buffer zone holds one part. Θ: 0 < `speed_mps` ≤
+     `simulation_transport.speed_mps`, already checked in `gazebo_programs` 280-292.
+   - Move the region order and "downstream only" from the `nominal_conveyor.CONVEYOR_LOCATIONS` constant into the
+     Conveyor's scene entry (outside `resource_programs`). `nominal_conveyor` reads the same values from data, so
+     runtime behavior is unchanged.
+6. **Capability check, any domain** (user, October 24). It replaces the region links proposed earlier that day (a
+   central table of name-to-region pairs is hard coding), and the user then asked that it cover every domain, not
+   only places. Every value the acting resource r would produce or use is checked against r's own declared capability
+   for that domain. It is Θ written in the predicate form of item 1, so one check covers every domain:
+   - Inside r's capability (Θ): programs in `program_options` and results in
+     `process_capabilities.<process>.supported_results`; poses in `named_positions`; speeds within the transport
+     speed; the parts its gripper can handle; the job-control flags (`resume_after_reload`, `restart_stopped_jobs`).
+   - Places (user, October 24): a place capability is a known place plus physical reach, plus navigation for a
+     mobile base. Nominal place lists (`reachability`, a `resource_location` domain, the KMR's `predefined_routes`)
+     are evidence of places known to work, never the limit, since recovery events are new transitions (for
+     example the KMR going to the assembly station). Known: the place has recorded geometry. Reach: its target
+     pose lies in r's reach volume (UR5e: decision 1; KMR: within `arm_reach_m` of `arm_mount_xyz` from the base
+     pose). Navigation (KMR): some base pose near the place has a free footprint on the floor map
+     (`outline_draft._navigation_floor`, `platform_overall_dimensions_m`) and a free route to it; candidate base
+     poses come from decision 2.
+   - Available in v (preconditions): the slot or belt position is free (capacity; the LLM names the slot it fills in
+     `neighbor_end_state`), the machine is not running, the program's `required_configuration` (tool, workholding)
+     matches `current_configuration`, a job is paused on this machine.
+   - Feasible in continuous terms (C_ρ): r's own target computation (`compute_place_targets`, from observed geometry,
+     the code the runtime executes) gives the pose and it lies within r's reach (items 2 and 3); the KMR footprint is
+     free; no part moves upstream.
+   - A value outside r's capability is refused with that fact; making it usable is one capability entry. A value
+     inside the capability whose evidence is missing (for example no target geometry) returns NEEDS_CONTEXT.
+   - Recorded `reachability` today: ur5e-1 M1, M1 staging tray, Conveyor; ur5e-2 M2, M2 staging tray, Conveyor;
+     ur5e-3 Buffer For Machined parts, assembly_board-v1, Exit; ur5e-4 3D Printing Station, assembly_board-v1.
+   - Capability data, settled October 24 (user):
+     - Named places without an entry in the capture's region list (Storage, Exit, the printer) take their geometry
+       from their recorded scene models' collision boxes (`physical_evidence.physics_evidence.models`): Storage has
+       23 shapes, Exit 4 (a `surface` with top z 1.065), the printer 2 (a `bed` with top z 1.10). Nothing to add.
+     - The UR5e's `compute_place_targets` resolves a place by name only from the assembly board's slot table, so
+       "KET4 in Buffer zone 1" gives no target. The checker asks it with explicit geometry instead (centre, offset
+       and surface height from the recorded zone, tray or table box; it accepts `board_center`, `slot_xy`,
+       `slot_floor_z_m`). The KMR's `compute_place_targets` already accepts an explicit `part_pose`.
+     - The floor as a support surface is not needed: no arm reaches it (KMR mount at z 0.70 with 0.82 m reach,
+       blocked by its 0.70 m platform). The KMR base still drives anywhere on free floor (navigation).
+     - Which parts each gripper can handle stays out for now (decision 4).
+     - ur5e-1's `gripper_reach` band (z 0.75-0.90) excludes the M1 staging tray (z 1.00-1.12); decision 1's reach
+       volume replaces the band.
 7. **Printer, Storage, Exit:** no primitives (paper Table 2), nothing to add.
+8. **Scan test.** A test reads every primitive declaration and fails if any effect writes a location, slot or custody
+   condition (listed in the rule below), so the rule stays true as the model grows.
+9. **Pose places** (user, October 24: "this should be coverable"). A spot that exists in the scene but has no state
+   variable (a table top, the floor next to M1) is stated as the part's end pose instead of a place name.
+   *Revised later on October 24 (see "Step 1 progress"): the LLM states the resource's release `pose`, which the
+   frozen prompt already allows, and the part rests there; the part-pose effect and prompt line below are not
+   needed.*
+   - `release_part` (UR5e and KMR) declares a continuous effect: the released part's pose is the gripper's pose at
+     release. It is continuous, not a place symbol, so the rule below still holds.
+   - The RA checks the pose P: reachable (within r's reach); supported (a recorded collision surface lies right under
+     P, with the part's footprint inside its xy bounds and its bottom on the top face); free (no recorded object or
+     part overlaps the footprint). A later event picks the part up from P.
+   - The data exists: every capture records each scene model's collision boxes
+     (`physical_evidence.physics_evidence.models.<model>.links.<link>.collisions`), for example
+     `table_ur5e::link::surface`, a 1.5 × 0.8 × 0.03 m box with its top at z 1.015.
+   - Needed: the plant model must represent a part resting at a pose (today such a part is `part_location: null`,
+     `part_state: unknown`, like the slipped gear_small); the paper needs the definition first, then one prompt line
+     (the prompt is frozen except to match the paper). The floor (`ground_plane`, recorded with no geometry) is not
+     needed as a support surface, since no arm reaches it (October 24).
+10. **Any value type** (user, October 24). Type never limits matching; role does. The test: after the primitive ends,
+    does the resource still have the value, observably, and do later events depend on it?
+    - Yes: it is state, an end condition the LLM may state, matched to the primitive whose effect sets it (M2
+      `selected_program`, a job's progress, a part's pose).
+    - No: it is a parameter θ, which the RA finds inside Θ (the UR5e speed scale of one move, the Conveyor
+      `speed_mps` of one bounded advance, a dwell `duration_sec`). Today every speed and duration in the plant is a
+      parameter.
+    - A speed or duration becomes state only when the resource keeps it (a conveyor running at a set speed, a
+      reduced-speed mode for all later moves); then it is declared as a condition with a producing effect.
+    - A speed or duration that follows from the state goes into C_ρ as data, for example a lower speed limit in
+      ur5e-1's degraded-gripper fault declaration.
+
+**Rule: primitives must not be symbolically connectable (user, October 23; refined October 24).** If every primitive
+had complete symbolic preconditions and effects over location, held part and slot, a classical planner could chain
+them from the failure state to the goal without the LLM, and RC1 collapses. So the RA is a verifier, never a
+generator:
+- Effects only on a resource's own conditions and on continuous quantities: `held_part`, `gripper_state`,
+  `job_state`, `selected_program`, poses, belt positions.
+- Never an effect on a location, slot or custody condition: `resource_location`, `part_location`, `zone_N_part`,
+  `staging_part`, a machine's `part_name`, the Conveyor's `part_location.<part>`, `inventory.*`, `output.*`,
+  `assembled.*`. Only the capability check decides those (item 6), or the recorded surfaces for a pose place (item 9).
+- Preconditions may read those conditions from v. Reading is harmless; chaining needs a primitive that produces them.
+- Why this is enough: every recovery in the four scenarios ends with a part somewhere else, and no primitive declares
+  "part at L"; getting it there needs a continuous θ checked against geometry. The remaining symbolic effects can
+  chain among themselves (pause, then resume) but never move a part. This blocks symbolic planners only; a geometric
+  task and motion planner could still search poses, as for any physical system.
+- Backward derivation is a lookup keyed by the LLM's stated values. It never searches and never chains through
+  preconditions.
+- Existing exception: UR5e `move_to_named_pose` declares `occupancy.location ← pose_name`. In Gazebo the only named
+  pose is `home`, but the real-robot config in `robot_ur5e.json` also names `prusa-mk4-2` and `assembly_board-v1`,
+  which would make "move to the board, then release" symbolic. Keep named poses to non-work positions, or have the
+  location check ignore that effect.
+
+**Why the October 23 list was replaced (October 24).**
+- It derived through nominal transitions and their `primitive_support`. A recovery event is a new transition: the
+  Part slippage draft's `place_KET4_on_buffer_zone_1` has no nominal counterpart (in the Buffer's model only the
+  Conveyor's `advance_conveyor` puts a part in zone 1), and the transition lookup also pulled in `place_insert`'s
+  board-insertion moves.
+- It said machines need nothing new because derivation read the job automaton's guards. Without nominal guards,
+  "resume only on the machine that paused the job" has to be a primitive precondition.
+- It applied `gripper_reach` to every `move_cartesian` target; the region only bounds poses at the part.
+- Region links, proposed earlier on October 24, were rejected by the user: a name-to-region table is hard coding.
+  Values in every domain, places included, are checked with each resource's capabilities instead (item 6).
+
+**Open decisions (October 24), before changing the models.**
+- Decided October 24 (decision 2): a free continuous θ, such as a KMR base pose near a place, comes from a fixed
+  grid of candidate poses around the place plus declared docking poses where they exist; deterministic and
+  reproducible. No search is needed when the event's own evidence fixes θ, or when existence is trivial (a speed in
+  (0, max]).
+- Decided October 24 (decision 1): the UR5e reach comes from extending the kinematic computation behind
+  `gripper_reach` to all heights, one reach volume per robot for top-down poses. It covers poses at the part and
+  free moves, and fixes ur5e-1's band, which excludes the M1 staging tray.
+- Conditions no primitive produces, such as the KMR's `approached_part`: free or bookkeeping.
+- Decided October 24 (decision 5): a part resting at a pose is an empty location plus `observed_pose`, as the v5
+  captures already record it.
+- Paper wording, not changed yet: Alg. 1 would read "primitives whose declared effects produce v′_i" instead of
+  "primitives of transitions Tr_i(x,e)=x′ with ν_i(x′)=v′_i", and Eq. 12's ∀ρ would range over the union of one
+  feasible producer per condition. The paper also needs a definition for delayed completion (item 4). Pose places
+  are defined in `PAPER_FRAMEWORK.md` (user approved, October 24). Ask the user before other changes there.
 
 Noticed, out of scope: `workflow_gazebo.py` 56-60 indexes `machines[0]`/`[1]` unsorted, while
 `nominal_des` sorts them by `conveyor_loading_pose` (the same order today).
@@ -892,7 +1097,7 @@ backward derivation applies to the other declared variables only (Step 1 list, i
 product projection (Step 1 list, item 0).
 
 **Does changing the model data need a recapture?** Not for the outline-stage RA check:
-- **Primitive contracts, constraints and domains (C_ρ, Θ):** they are static declarations (A.2) and
+- **Primitive preconditions, effects, constraints and domains (C_ρ, Θ):** they are static declarations (A.2) and
   do not change what happened in Gazebo. The captures record the catalogs as they were (robot
   catalogs inside the recorded `recovery_des_model`, other catalogs inside the recorded evidence), so
   the RA check must read the current declarations at validation time, not the recorded catalogs, and

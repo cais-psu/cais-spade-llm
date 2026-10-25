@@ -107,28 +107,88 @@ class KMRPrimitives:
                                                  'delta_deg': delta_deg})
 
     async def open_gripper(self) -> dict:
-        """Open the KMR gripper and confirm the observed width."""
+        """
+        ---
+        description: Open the KMR gripper and confirm the observed width.
+        preconditions: {}
+        effects:
+          gripper_state:
+            set: open
+        ---
+        """
         return await self._call('open_gripper', {})
 
     async def close_gripper(self) -> dict:
-        """Close the KMR gripper and confirm the observed width."""
+        """
+        ---
+        description: Close the KMR gripper and confirm the observed width.
+        preconditions: {}
+        effects:
+          gripper_state:
+            set: closed
+        ---
+        """
         return await self._call('close_gripper', {})
 
     async def grasp_part(self, part_name: str | None = None,
                          initial: list[float] | None = None) -> dict:
-        """Close, attach, and observe the targeted part."""
+        """
+        ---
+        description: Close, attach, and observe the targeted part.
+        preconditions:
+          held_part:
+            equals: null
+        effects:
+          held_part:
+            set_from_param_any_of: [part_name]
+          gripper_state:
+            set: closed
+        ---
+        """
         return await self._call('grasp_part', {'part_name': part_name, 'initial': initial})
 
     async def release_part(self, transform: list[float] | None = None) -> dict:
-        """Open, detach, update the part collision geometry and observe where the part rests."""
+        """
+        ---
+        description: Open, detach, update the part collision geometry and observe where the part rests.
+        preconditions:
+          held_part:
+            not_equals: null
+        effects:
+          held_part:
+            set: null
+          gripper_state:
+            set: open
+        ---
+        """
         return await self._call('release_part', {'transform': transform})
 
     async def attach_part(self, part_name: str | None = None) -> dict:
-        """Attach the observed part to the closed KMR gripper."""
+        """
+        ---
+        description: Attach the observed part to the closed KMR gripper.
+        preconditions:
+          held_part:
+            equals: null
+        effects:
+          held_part:
+            set_from_param_any_of: [part_name]
+        ---
+        """
         return await self._call('attach_part', {'part_name': part_name})
 
     async def detach_part(self) -> dict:
-        """Detach the observed part from the open KMR gripper."""
+        """
+        ---
+        description: Detach the observed part from the open KMR gripper.
+        preconditions:
+          held_part:
+            not_equals: null
+        effects:
+          held_part:
+            set: null
+        ---
+        """
         return await self._call('detach_part', {})
 
     async def move_base(self, target_pose: list[float],

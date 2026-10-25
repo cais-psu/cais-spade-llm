@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from math import isfinite
+from math import cos, isfinite, sin
 from typing import Any
 
 _MISSING = object()
 _CONDITIONS = {"equals", "not_equals", "in", "not_in", "exists", "equals_from_param", "not_equals_from_param"}
 _EFFECTS = {"set", "set_unknown", "set_from_param", "set_from_param_any_of", "pose_absolute_from_params", "pose_relative_from_params"}
+_ARRAY_POSE_PREFIX = "pose_absolute_from_"
 _RESOURCE_NAMES = {"resource_state": ("current_state",), "resource_location": ("current_location",)}
 _PART_NAMES = {
     "part_state": ("current_state", "state"),
@@ -32,6 +33,42 @@ def _get(mapping: dict, field: str) -> Any:
             return _MISSING
         value = value[key]
     return value
+
+
+def _array_pose_parameter(operator: Any) -> str | None:
+    """Name the array parameter a ``pose_absolute_from_<parameter>`` effect reads, such as ``target_pose``."""
+    if not isinstance(operator, str) or operator in _EFFECTS or not operator.startswith(_ARRAY_POSE_PREFIX):
+        return None
+    return operator[len(_ARRAY_POSE_PREFIX):] or None
+
+
+def _finite(value: Any) -> bool:
+    return type(value) in (int, float) and isfinite(value)
+
+
+def _array_pose(field: str, fields: Any, values: Any, current: Any) -> tuple[Any, str | None]:
+    """Move a recorded pose to an array parameter's values, keeping the shape the pose already has.
+
+    A 7-element pose is position and quaternion; a planar ``yaw`` turns it about the vertical axis
+    only, as a mobile base turns, and keeps its height. A dict pose takes the named fields.
+    """
+    if (not isinstance(fields, list) or not fields or not all(isinstance(name, str) for name in fields)
+            or not isinstance(values, (list, tuple)) or len(values) < len(fields)
+            or not all(_finite(value) for value in values[:len(fields)])):
+        return None, f"Missing pose effect parameters for {field!r}"
+    target = dict(zip(fields, values[:len(fields)], strict=True))
+    if isinstance(current, list) and len(current) == 7 and all(_finite(value) for value in current) \
+            and set(target) <= {"x", "y", "z", "yaw"}:
+        pose = list(current)
+        for index, axis in enumerate(("x", "y", "z")):
+            if axis in target:
+                pose[index] = target[axis]
+        if "yaw" in target:
+            pose[3:7] = [0.0, 0.0, sin(target["yaw"] / 2), cos(target["yaw"] / 2)]
+        return pose, None
+    if isinstance(current, dict) and set(target) <= set(current):
+        return {**current, **target}, None
+    return None, f"Missing starting pose for {field!r}"
 
 
 def _write(mapping: dict, field: str, value: Any = _MISSING) -> None:
@@ -124,10 +161,19 @@ def _apply(effects: dict, state: dict, params: dict, declarations: dict) -> tupl
 
     result = deepcopy(state)
     for field, effect in effects.items():
-        if not isinstance(effect, dict) or len(effect) != 1 or set(effect) - _EFFECTS:
+        if not isinstance(effect, dict) or len(effect) != 1:
             return None, f"Unsupported primitive effect for {field!r}"
         scope, key = _field(field, declarations)
         operator, binding = next(iter(effect.items()))
+        array_parameter = _array_pose_parameter(operator)
+        if operator not in _EFFECTS and array_parameter is None:
+            return None, f"Unsupported primitive effect for {field!r}"
+        if array_parameter is not None:
+            pose, error = _array_pose(field, binding, params.get(array_parameter), result[scope].get(key))
+            if error:
+                return None, error
+            result[scope][key] = pose
+            continue
         if operator == "set_unknown":
             if binding is not True:
                 return None, f"Malformed set_unknown effect for {field!r}"

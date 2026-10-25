@@ -80,6 +80,49 @@ def test_rejections_do_not_substitute_requested_postconditions(contract, change,
     assert result["derived_end_state"] != contract["task"]["expected_end_state"]
 
 
+def test_a_base_move_keeps_the_shape_of_the_recorded_pose(contract):
+    # The KMR's move_base declares [x, y, yaw]; its recorded base_pose is position and quaternion.
+    contract["primitive_catalog"].append({
+        "name": "travel", "params": {"target_pose": {"type": "array", "items": {"type": "number"}}},
+        "required_params": ["target_pose"], "preconditions": {},
+        "effects": {"base_pose": {"pose_absolute_from_target_pose": ["x", "y", "yaw"]}}})
+    contract["primitive_steps"].append({"primitive": "travel", "params": {"target_pose": [1.0, 2.0, 0.0]}})
+    contract["recovery_snapshot"]["base_pose"] = [-5.54, 2.13, 0.1, 0.0, 0.0, 0.7071, 0.7071]
+    result = validate_recovery_primitive_composition(**contract)
+    assert result["feasibility_status"] == "FEASIBLE"
+    assert result["trace"][2]["projected_snapshot"]["base_pose"] == [1.0, 2.0, 0.1, 0.0, 0.0, 0.0, 1.0]
+    # Without a recorded pose there is no shape to keep, and a pose never lands on a non-pose field.
+    contract["recovery_snapshot"].pop("base_pose")
+    assert validate_recovery_primitive_composition(**contract)["feasibility_status"] == "NEEDS_CONTEXT"
+    contract["primitive_catalog"][2]["effects"] = {"mode": {"pose_absolute_from_target_pose": ["x", "y", "yaw"]}}
+    assert validate_recovery_primitive_composition(**contract)["feasibility_status"] == "NEEDS_CONTEXT"
+
+
+def test_an_owner_composition_starts_a_missing_declared_fact_from_recorded_evidence(contract):
+    from cais_spade_llm.resources.recovery_composition_owner import validate_owner_composition
+
+    # A capture records the KMR's base_pose in its evidence, not in the composition prefix.
+    travel = {"name": "travel", "params": {"target_pose": {"type": "array", "items": {"type": "number"}}},
+              "required_params": ["target_pose"], "preconditions": {},
+              "effects": {"base_pose": {"pose_absolute_from_target_pose": ["x", "y", "yaw"]}}}
+    entry = {"recovery_des_model": contract["recovery_des_model"],
+             "execution_primitive_catalog": [*contract["primitive_catalog"], travel],
+             "resource_evidence": {"snapshot": {"base_pose": [-5.54, 2.13, 0.1, 0.0, 0.0, 0.7071, 0.7071],
+                                                "mode": "recorded"}}}
+    owner = SimpleNamespace(jid="owner", check_recovery_primitive_feasibility=lambda **_: {
+        "allowed": True, "feasibility_status": "FEASIBLE"})
+    steps = [*contract["primitive_steps"], {"primitive": "travel", "params": {"target_pose": [1.0, 2.0, 0.0]}}]
+    result = validate_owner_composition(owner, task=contract["task"], primitive_steps=steps,
+                                        prepared={"recovery_resources": {"owner": entry}},
+                                        recovery_snapshot=contract["recovery_snapshot"],
+                                        part_context=contract["part_context"],
+                                        grounding_context=contract["grounding_context"])
+    assert result["feasibility_status"] == "FEASIBLE"
+    assert result["trace"][2]["projected_snapshot"]["base_pose"] == [1.0, 2.0, 0.1, 0.0, 0.0, 0.0, 1.0]
+    # The prefix's own fact wins over the recorded one.
+    assert result["trace"][0]["start_snapshot"]["mode"] == "fault"
+
+
 def test_null_is_a_fact_and_missing_is_unknown(contract):
     contract["task"]["expected_start_state"]["mode"] = None
     contract["primitive_catalog"][0]["preconditions"]["mode"] = {"equals": None}

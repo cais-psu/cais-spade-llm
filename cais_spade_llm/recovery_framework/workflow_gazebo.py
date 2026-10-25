@@ -91,6 +91,17 @@ def _shared_displacement(
 
 
 
+# Transport primitives are dispatched by name, so their contracts are data beside the runner. Observing
+# and computing change no state; the move sets each observed part's position along the transport axis
+# to its computed target, a continuous position, never a region or zone symbol.
+TRANSPORT_PRIMITIVE_CONTRACTS: dict[str, dict[str, Any]] = {
+    "detect_parts": {"preconditions": {}, "effects": {}},
+    "compute_transport_targets": {"preconditions": {}, "effects": {}},
+    "move_relative": {"preconditions": {}, "effects": {
+        "part_pose.x": {"set_from_step": {"primitive": "compute_transport_targets", "output": "target_x"}}}},
+}
+
+
 class WorkflowPrimitiveRunner:
     """Execute one declared machine or transport function using Gazebo callbacks.
 

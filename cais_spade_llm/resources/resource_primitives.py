@@ -92,6 +92,26 @@ def _schema_properties_for_function(fn: Any) -> tuple[dict[str, Any], list[str],
     return properties, required, description
 
 
+def _effect_parameters(effects: dict[str, Any], properties: dict[str, Any]) -> list[str]:
+    """Name the parameters a declared effect cannot do without, so the catalog asks for them.
+
+    An effect that reads one parameter needs it, even when the call signature leaves it optional;
+    an effect with several alternatives needs only one of them, so none becomes required.
+    """
+    needed: list[str] = []
+    for rule in effects.values():
+        if not isinstance(rule, dict):
+            continue
+        for operator, binding in rule.items():
+            if operator == "set_from_param" and isinstance(binding, str):
+                needed.append(binding)
+            elif operator == "set_from_param_any_of" and isinstance(binding, list) and len(binding) == 1:
+                needed.append(str(binding[0]))
+            elif operator in {"pose_absolute_from_params", "pose_relative_from_params"} and isinstance(binding, list):
+                needed.extend(str(name) for name in binding)
+    return [name for name in needed if name in properties]
+
+
 def _effective_catalog_required_params(
     required: list[str],
     *,
@@ -138,14 +158,14 @@ def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any
         if not callable(fn):
             continue
         properties, required, description = _schema_properties_for_function(fn)
-        required = _effective_catalog_required_params(
-            required,
-            profile=profile,
-            primitive_name=primitive_name,
-        )
         frontmatter = FunctionAnalyzer._extract_yaml_frontmatter(fn) or {}
         preconditions = deepcopy(frontmatter.get("preconditions") or {})
         effects = deepcopy(frontmatter.get("effects") or {})
+        required = _effective_catalog_required_params(
+            required + _effect_parameters(effects, properties),
+            profile=profile,
+            primitive_name=primitive_name,
+        )
         observation_schema = deepcopy(
             dict(profile.observation_output_schema_map or {}).get(primitive_name) or {}
         )
@@ -173,6 +193,56 @@ def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any
         )
         entries.append(entry)
     return entries
+
+
+def current_primitive_declarations(scene: dict[str, Any]) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """Read each scene resource's primitive declarations from the code beside its executors.
+
+    The recovery checker reads these at validation time rather than the catalogs a capture recorded
+    (paper assumption A.2). Robots and the KMR declare their primitives in docstring frontmatter;
+    machines and transport, whose primitives are dispatched by name, declare them as data beside
+    their commands.
+
+    Args:
+        scene: The Gazebo scene. Its ``resource_programs`` names each resource's primitives, and a
+            machine's entry supplies its job control.
+
+    Returns:
+        Per resource id and primitive name, the alternative contracts its executor declares. A
+        frontmatter declaration is one contract; a primitive its executor leaves undeclared has none.
+        An uncontrollable outcome the executor declares, such as a machine's ``complete_job``, is kept
+        beside the primitives with ``controllable`` false.
+    """
+    from cais_spade_llm.recovery_framework.kmr_primitives import KMRPrimitives
+    from cais_spade_llm.recovery_framework.workflow_gazebo import TRANSPORT_PRIMITIVE_CONTRACTS
+    from cais_spade_llm.resources.machine.machine_jobs import machine_primitive_contracts
+    from cais_spade_llm.resources.robot.robot_profile import robot_primitive_owner_class
+
+    machines = {row["resource_id"]: machine_primitive_contracts(row) for row in scene.get("machines", [])}
+    robots = {row["resource_id"] for row in scene.get("robots", [])}
+    declarations: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for rid, bundle in scene["resource_programs"]["resources"].items():
+        if rid in machines:
+            contracts = machines[rid]
+        elif isinstance(scene.get(rid), dict) and "simulation_transport" in scene[rid]:
+            contracts = {name: [deepcopy(contract)] for name, contract in TRANSPORT_PRIMITIVE_CONTRACTS.items()}
+        else:
+            owner = KMRPrimitives if rid == "KMR" else robot_primitive_owner_class(rid) if rid in robots else None
+            contracts = {name: [_frontmatter_contract(getattr(owner, name))]
+                         for name in bundle["primitives"] if callable(getattr(owner, name, None))}
+        declarations[rid] = {name: contracts.get(name, []) for name in bundle["primitives"]}
+        declarations[rid].update({name: variants for name, variants in contracts.items()
+                                  if any(variant.get("controllable") is False for variant in variants)})
+    return declarations
+
+
+def _frontmatter_contract(fn: Any) -> dict[str, Any]:
+    frontmatter = FunctionAnalyzer._extract_yaml_frontmatter(fn) or {}
+    contract = {"preconditions": deepcopy(frontmatter.get("preconditions") or {}),
+                "effects": deepcopy(frontmatter.get("effects") or {})}
+    if frontmatter.get("capability_constraints"):
+        contract["capability_constraints"] = deepcopy(frontmatter["capability_constraints"])
+    return contract
 
 
 def filter_synthesis_primitive_catalog(
@@ -425,6 +495,14 @@ def _snapshot_builder_payload(resource_agent: Any, profile: Any) -> dict[str, An
     return {}
 
 
+def _declared_snapshot_fields(profile: Any, catalog: list[dict[str, Any]]) -> list[str]:
+    fields = [str(field) for field in profile.snapshot_fields or ()]
+    for entry in catalog:
+        for key in ("preconditions", "effects"):
+            fields.extend(str(field) for field in (entry.get(key) or {}))
+    return list(dict.fromkeys(fields))
+
+
 def _execution_catalog_for_snapshot(resource_agent: Any) -> list[dict[str, Any]]:
     method = getattr(resource_agent, "recovery_execution_primitive_catalog", None)
     if callable(method):
@@ -456,6 +534,11 @@ def get_resource_recovery_snapshot(resource_agent: Any) -> dict[str, Any]:
         modeled_state={},
     )
     execution_catalog = _execution_catalog_for_snapshot(resource_agent)
+    # Every resource keeps the conditions it reports or its primitives declare, not only those a profile's
+    # facet lists, so a macro checks each primitive against the resource's actual facts.
+    for field in _declared_snapshot_fields(profile, execution_catalog):
+        if field not in adapted_resource and field in raw_snapshot:
+            adapted_resource[field] = deepcopy(raw_snapshot[field])
     adapted_resource["recovery_adapter"] = (
         recovery_resource_adapter.recovery_resource_capabilities(
             resource_type,

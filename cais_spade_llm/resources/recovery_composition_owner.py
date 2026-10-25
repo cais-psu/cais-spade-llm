@@ -70,7 +70,15 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
             return project_composition_completion(**values, primitive_catalog=entry.get("execution_primitive_catalog", []),
                 resource_evidence=evidence, physical_evidence=physical)
 
+    # A fact the owner's primitives declare but the composition prefix lacks starts from the owner's recorded
+    # evidence, which its own capability check already reads; a recorded fact never replaces a projected one.
+    catalog = entry.get("execution_primitive_catalog") or []
+    recorded = evidence.get("snapshot") if isinstance(evidence.get("snapshot"), dict) else {}
+    start = deepcopy(recovery_snapshot)
+    start.update({field: deepcopy(recorded[field]) for row in catalog if isinstance(row, dict)
+                  for key in ("preconditions", "capability_constraints", "effects")
+                  for field in (row.get(key) or {}) if field not in start and field in recorded})
     return validate_recovery_primitive_composition(task=task, primitive_steps=primitive_steps,
-        recovery_des_model=model, recovery_snapshot=recovery_snapshot, part_context=part_context,
-        grounding_context=grounding_context, primitive_catalog=entry.get("execution_primitive_catalog") or [],
+        recovery_des_model=model, recovery_snapshot=start, part_context=part_context,
+        grounding_context=grounding_context, primitive_catalog=catalog,
         validate_primitive=capability, preview_primitive=preview, project_completion=completion)

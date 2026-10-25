@@ -110,6 +110,10 @@ name the section or equation it implements. If it maps to none, ask the user fir
   intended end state $v'_i$ and the part conditions: declared variables only (the model's state
   variables plus `pose` from primitive effects and `processCompleted` from product effects). The RA
   later finds the primitive parameters $\theta$ (Eq. 12); the LLM never writes them.
+- **Pose places** (user, October 24). A part released where no declared place names the spot rests at
+  the resource's stated release `pose`: its location is empty and its observed pose is that pose, as
+  part conditions otherwise follow from custody. Eq. 12 checks that the pose is reachable and that a
+  recorded surface supports the part there with nothing overlapping it.
 - **`neighbor_end_state`** (October 20; named `place_end_state` until October 21): an event may state
   how moving its part changes another resource, its neighbor at the shared state, for example a buffer
   slot. It is that resource's part $\nu_j(x^R_k)$ of the intended end state in the

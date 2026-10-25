@@ -1525,6 +1525,7 @@ def test_kmr_execution_uses_declared_composition_and_preserves_partial_results(f
 def test_kmr_owned_primitive_catalog_and_recovery_preserve_partial_custody():
     from cais_spade_llm.recovery_framework.gazebo_worker import GazeboExecutionError
     from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
+    from cais_spade_llm.resources.resource_primitives import get_resource_recovery_snapshot
 
     async def scenario():
         target = [1., 2., 3., 1., 0., 0., 0.]
@@ -1548,6 +1549,9 @@ def test_kmr_owned_primitive_catalog_and_recovery_preserve_partial_custody():
         assert {'rotate_arm_base', 'move_to_configuration', 'dock', 'custody'}.isdisjoint(catalog)
         assert catalog['move_cartesian']['params']['target']['type'] == 'array'
         assert catalog['move_cartesian']['output_schema']['fraction'] == 'number'
+        # The snapshot a macro checks against carries what the KMR holds, as a UR5e's does.
+        snapshot = get_resource_recovery_snapshot(agent)
+        assert (snapshot['held_part'], snapshot['gripper_state']) == ('RGOCG4-50_Round_4mm', 'closed')
         failed = await agent.kmr_primitives.move_cartesian(target)
         assert not failed['success']
         assert agent._snapshot_state()['held_part'] == 'RGOCG4-50_Round_4mm'
@@ -1561,6 +1565,17 @@ def test_kmr_owned_primitive_catalog_and_recovery_preserve_partial_custody():
         assert worker.run.await_count == 2
         assert all(call.args[0]['mode'] == 'primitive' for call in worker.run.await_args_list)
     asyncio.run(scenario())
+
+
+def test_a_catalog_asks_for_every_parameter_a_declared_effect_reads():
+    from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
+
+    # The KMR's worker may grasp whichever part it observed, but the declared effect names the part it holds.
+    agent = KMRResourceAgent('kmr-catalog-test@localhost', 'none', worker=SimpleNamespace(run=AsyncMock()))
+    catalog = {entry['name']: entry for entry in agent.recovery_execution_primitive_catalog()}
+    assert 'part_name' in catalog['grasp_part']['required_params']
+    assert 'part_name' in catalog['attach_part']['required_params']
+    assert catalog['release_part']['required_params'] == []
 
 
 @pytest.mark.parametrize('module_name', ['kmr_gazebo', 'workflow_gazebo'])

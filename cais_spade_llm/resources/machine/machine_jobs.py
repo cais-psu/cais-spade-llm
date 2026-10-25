@@ -14,6 +14,67 @@ MACHINE_PRIMITIVES = ("select_program", "start_job", "pause_job", "resume_job", 
 JOB_CONTROL_VERSION = 1
 
 
+def machine_primitive_contracts(machine: dict) -> dict[str, list[dict]]:
+    """Declare what each job command needs and changes, as ``MachineJobs.command`` enforces it.
+
+    Machine primitives are dispatched by name, so their contracts are data beside the commands. They
+    name the machine's ``resource_state`` and the part's ``current_process``, which carries the job and
+    the machine that holds it; none names where a part is. Completion is not a command: it is the
+    observed ``complete_job`` outcome, uncontrollable as in the machine automaton, once the running job's
+    active processing time has passed. ``$evidence: job.*`` reads the machine's job for the part.
+
+    Args:
+        machine: The machine's scene entry, with ``resource_id`` and ``simulation_process.job_control``.
+
+    Returns:
+        Each primitive's alternative contracts, plus ``complete_job``: ``preconditions`` and ``effects``
+        on the machine, ``product_guards`` and ``product_effects`` on the part, and for completion
+        ``controllable`` false with the ``after_sec`` it waits.
+    """
+    rid = machine["resource_id"]
+    part = {"part_name": {"equals_from_param": "part_name"}}
+
+    def control(before: dict, status: str) -> dict:
+        return {"preconditions": {"resource_state": before, **part},
+                "effects": {"resource_state": {"set": status}},
+                "product_effects": {"current_process": {"set_status": status}}}
+
+    resume = []
+    # The command refuses every resume unless the machine declares resume_after_reload.
+    if machine.get("simulation_process", {}).get("job_control", {}).get("resume_after_reload") is True:
+        # A reloaded part resumes only the job this machine paused; the job record is the machine's own.
+        resume = [control({"equals": "paused"}, "running"),
+                  {**control({"equals": "loaded"}, "running"),
+                   "product_guards": {"current_process": {"matches": {"status": "paused", "machine": rid}}}}]
+    return deepcopy({
+        "select_program": [{"preconditions": {"resource_state": {"not_equals": "running"}},
+                            "effects": {"selected_program": {"set_from_param": "program"}}}],
+        "start_job": [{
+            "preconditions": {"resource_state": {"equals": "loaded"}, **part},
+            # A paused job resumes and a stopped one cannot restart, so the part has no unfinished job here.
+            "product_guards": {"current_process": {"not_matches": {"machine": rid}}},
+            "effects": {"resource_state": {"set": "running"}},
+            "product_effects": {"current_process": {"set": {
+                "process": {"set_from_param": "process"}, "result": {"set_from_param": "result"},
+                "status": "running", "machine": rid}}},
+        }],
+        "pause_job": [control({"equals": "running"}, "paused")],
+        "resume_job": resume,
+        "stop_job": [control({"in": ["running", "paused"]}, "stopped")],
+        # Pausing or stopping halts the active time, so a job completes once, and a job already running
+        # at the failure completes too.
+        "complete_job": [{
+            "controllable": False,
+            "after_sec": {"subtract": [{"$evidence": "job.processing_time_sec"},
+                                       {"$evidence": "job.processing_active_sec"}]},
+            "preconditions": {"resource_state": {"equals": "running"}, **part},
+            "effects": {"resource_state": {"set": "completed"}},
+            "product_effects": {"current_process": {"set": None},
+                                "processCompleted": [{"process": "trim", "result": {"set_from_param": "result"}}]},
+        }],
+    })
+
+
 def job_public_state(record: dict) -> dict:
     """Read public fields from the owner record without manufacturing completion."""
     active = record["active_job"]

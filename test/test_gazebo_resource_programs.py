@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import re
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,12 +21,72 @@ from cais_spade_llm.resources.gazebo_programs import (
     primitive_available, resource_program_revision, saved_robot_definition,
     saved_workflow_program, validate_resource_programs,
 )
+from cais_spade_llm.resources.resource_primitives import current_primitive_declarations
 from cais_spade_llm.ui.components.nominal_resource_des import save_resource_program_edit
 
 
 @pytest.fixture
 def scene():
     return json.loads(SCENE_PATH.read_text())
+
+
+def test_primitive_declarations_never_set_a_location_slot_or_custody(scene):
+    # The RA decides where parts and resources are from capabilities and recorded geometry. An effect
+    # naming a place would let a symbolic planner chain primitives into a recovery without the LLM.
+    places = {"resource_location", "current_location", "location", "part_location", "staging_part",
+              "part_name", "occupancy.location", "current_pose_ref"}
+    found = set()
+    for rid, primitives in current_primitive_declarations(scene).items():
+        for name, contracts in primitives.items():
+            for contract in contracts:
+                delayed = contract.get("delayed_effects", {})
+                for effects in (contract.get("effects", {}), contract.get("product_effects", {}),
+                                delayed.get("effects", {}), delayed.get("product_effects", {})):
+                    found.update((rid, name, field) for field, rule in effects.items()
+                                 if rule != {"set_unknown": True}
+                                 and (field in places or re.fullmatch(r"zone_\d+_part", field)
+                                      or field.startswith(("part_location.", "inventory.", "output.", "assembled."))))
+    # A named pose is a posture, not a place parts go: a Gazebo robot's only named pose is home.
+    assert found == {(row["resource_id"], "move_to_named_pose", field) for row in scene["robots"]
+                     for field in ("current_pose_ref", "occupancy.location")}
+
+
+def test_machine_contracts_follow_the_machine_automaton(scene):
+    # The job commands and the machine's own automaton declare the same job control and must not drift.
+    models = build_environment_models(scene)
+    declarations = current_primitive_declarations(scene)
+
+    def guards_of(preconditions):
+        state = preconditions["resource_state"]
+        return [{**preconditions, "resource_state": {"equals": value}} for value in state["in"]] if "in" in state \
+            else [preconditions]
+
+    checked = 0
+    for machine in scene["machines"]:
+        rid, matched = machine["resource_id"], set()
+        contracts = declarations[rid]
+        for event in models[rid]["events"]:
+            name = event["event_name"]
+            if name not in contracts:
+                continue
+            process = deepcopy(event["product_effects"].get("current_process"))
+            if isinstance(process, dict) and isinstance(process.get("set"), dict):
+                process["set"]["machine"] = rid
+            # Every process effect also meets the product's own plan order, which the product declares.
+            product_guards = {key: value for key, value in event.get("product_guards", {}).items()
+                              if key != "ordered_requirements"} or None
+            index = next(index for index, contract in enumerate(contracts[name])
+                         if event["guards"] in guards_of(contract["preconditions"])
+                         and product_guards == contract.get("product_guards")
+                         and event["updates"] == contract["effects"]
+                         and process == contract.get("product_effects", {}).get("current_process")
+                         and contract.get("controllable", True) == event.get("controllable", True)
+                         and event["product_effects"]["processCompleted"]
+                         == contract.get("product_effects", {}).get("processCompleted", []))
+            matched.add((name, index))
+            checked += 1
+        assert matched == {(name, index) for name, variants in contracts.items() for index in range(len(variants))}
+    assert checked
 
 
 def test_saved_catalog_covers_exact_resources_and_unused_executors(scene):

@@ -383,6 +383,16 @@ def _robot_target_location_for_event(outline_event: dict[str, Any]) -> str:
     )
 
 
+def robot_primitive_owner_class(robot_name: str) -> Any | None:
+    """Return the controller class that declares a robot's primitives, chosen by the robot's name."""
+    scope_name = str(robot_name).split("@", 1)[0].strip().lower()
+    if scope_name.startswith("ur5e"):
+        return UR5eGazeboController
+    if scope_name.startswith("xarm6"):
+        return XArm6GazeboController
+    return None
+
+
 def _robot_primitive_owner(agent: Any) -> Any | None:
     controller = getattr(agent, "_controller", None)
     if controller is not None:
@@ -392,11 +402,7 @@ def _robot_primitive_owner(agent: Any) -> Any | None:
         scope_name = str(agent._robot_scope_name()).strip().lower()
     except Exception:
         scope_name = str(getattr(agent, "agent_name", "")).split("@", 1)[0].lower()
-    if scope_name.startswith("ur5e"):
-        return UR5eGazeboController
-    if scope_name.startswith("xarm6"):
-        return XArm6GazeboController
-    return None
+    return robot_primitive_owner_class(scope_name)
 
 
 def _robot_snapshot_builder(agent: Any, *, recorded_pose: dict[str, Any] | None = None) -> dict[str, Any]:
