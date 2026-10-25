@@ -4597,7 +4597,7 @@ _NEIGHBOR_END_STATE_RULE = (
     "resource does not act; variables you leave out stay as they are.")
 _FAILURE_OUTLINE_CLOSING_RULES = (
     "- Use variable names exactly as declared. Look up any fact or variable you rely on that is not shown.",
-    "- When you judge that normal production's remaining planned tasks can continue from the state your events "
+    "- When you judge that normal production can carry out the tasks under Recovery Goal from the state your events "
     "leave, return only `thought` and `decision: \"recovery_complete\"`; normal production then takes over.",
 )
 
@@ -4656,9 +4656,8 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
         "Give your plan in `thought` (two short sentences) and keep each `rationale` to one.",
         "", "Failure", measured,
         *template["failure"],
-        "", "Recovery Goal", "What the interrupted work was meant to achieve. Your events, and then normal "
-        "production's remaining planned tasks, must achieve it.",
-        *(template["goal"] or ["(none recorded)"]),
+        "", "Recovery Goal", *(template["goal"] or ["(none recorded)"]),
+        *(["Then normal production carries out:", *template["next_tasks"]] if template.get("next_tasks") else []),
     ]
     if accepted:
         # Listed under the reply format's keys; with_resource_names below turns the JIDs into names.

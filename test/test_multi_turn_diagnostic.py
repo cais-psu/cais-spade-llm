@@ -348,7 +348,7 @@ def test_prompt_states_recorded_facts_for_every_robot_without_tuned_targets(shar
     assert "- arm_b: measured pose (0.000, 0.000, 1.200), inside cell" in prompt
     # Which resources can act at the measured pose is left to be looked up and reasoned out.
     assert "Declared coverage" not in prompt and "covers:" not in prompt
-    assert "\nRecovery Goal\nWhat the interrupted work was meant to achieve." in prompt
+    assert "\nRecovery Goal\n- " in prompt
     assert "- gear: state assembled, location cell (normally arm_b's place_approach)\n" in prompt
     assert "\narm_b (robot)  failed; resource_location station; held_part none; pose (0.000, 0.000, 1.200), inside cell; " in prompt
     assert "\narm_a (robot)  picked; resource_location buffer; held_part peg; " in prompt
@@ -1765,3 +1765,19 @@ def test_a_transport_states_the_order_its_own_events_advance_parts_through():
     assert facts._advance_order(belt, "Belt") == ["load", "after load", "nest"]
     assert facts._advance_order(zones, "Buffer") == ["zone_1_part", "zone_2_part", "zone_3_part"]
     assert facts._advance_order(loaded, "Mill") == [] and facts._advance_order(grasp, "Mover") == []
+
+
+def test_the_goal_lists_the_planned_tasks_normal_production_carries_out_next(monkeypatch):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
+
+    rows = [{"task": {"resource_jid": "res-mill", "function_name": "complete_job", "part_name": "peg",
+                      "params": {"resource_id": "mill", "part_name": "peg", "process": "trim", "result": "circle"}}},
+            {"task": {"resource_jid": "res-cart", "function_name": "move_to_resource", "part_name": None,
+                      "params": {"resource_id": "cart", "target_resource": "Store", "source_resource": "mill",
+                                 "arrival_acknowledged": True}}}]
+    monkeypatch.setattr(multi_turn_diagnostic, "nominal_rows", lambda session, prepared: rows)
+    prepared = {"observation_jids": {"mill": "res-mill", "cart": "res-cart"}, "recovery_resources": {}}
+    # The tasks the handoff requires, by resource, function, part and public parameters; no start conditions.
+    assert facts.next_task_lines(prepared, {}) == [
+        "- mill: complete_job of peg (process trim, result circle)",
+        "- cart: move_to_resource (target_resource Store, source_resource mill)"]

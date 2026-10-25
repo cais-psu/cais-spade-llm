@@ -852,12 +852,32 @@ def _ref_lines(prepared: dict) -> list[str]:
             ("/resources/<name>/static_capabilities", "named poses, staging areas and process options"),
             *([("/resources/<name>/pose_relations", relation)] if "/resources/<jid>/pose_relations" in recorded else []),
             ("/parts/<name>/snapshot", "every recorded value of a part"),
-            ("/parts/<name>/state_variables", "its condition variables, which resources set them, and current values"),
+            ("/parts/<name>/state_variables", "its condition variables and current values"),
             ("/parts/<name>/target", "where the part is assembled"),
             *([("/parts/<name>/pose_relations", relation)] if "/parts/<name>/pose_relations" in recorded else []),
             *([("/regions", "area bounds in world coordinates")] if "/regions/<name>" in recorded else []),
             *([("/geometry", "station poses and sizes, robot bases and floor extent")] if "/geometry/<key>" in recorded else [])]
     return [f"- {ref}: {text}" for ref, text in rows]
+
+
+def next_task_lines(prepared: dict, session: dict) -> list[str]:
+    """State the planned tasks normal production carries out next: the ones the handoff requires.
+
+    They are the recorded tasks nominal work resumes at (``multi_turn_diagnostic.nominal_rows``), stated
+    by resource, function, part and public parameters, the same way for every scenario. Their start
+    conditions are not stated, since normal production may run its own steps before them.
+    """
+    from .multi_turn_diagnostic import nominal_rows
+
+    names = resource_names(prepared)
+    lines = []
+    for row in nominal_rows(session, prepared):
+        task = row["task"]
+        text = f"- {names.get(task['resource_jid'], task['resource_jid'])}: {task['function_name']}"
+        text += f" of {task['part_name']}" if task.get("part_name") else ""
+        params = _params_text([task])
+        lines.append(text + (f" ({params})" if params else ""))
+    return lines
 
 
 def outline_template(prepared: dict, session: dict) -> dict[str, Any]:
@@ -868,13 +888,15 @@ def outline_template(prepared: dict, session: dict) -> dict[str, Any]:
         session: Tentative planning state after the accepted events.
 
     Returns:
-        Lines for the Failure, Recovery Goal, Resources and Parts sections, the fact references,
+        Lines for the Failure, Recovery Goal (with normal production's next tasks), Resources and Parts
+        sections, the fact references,
         the resource names, and the displayed values that context replies must not repeat.
     """
     names = resource_names(prepared)
     resource_jids = sorted(prepared.get("recovery_resources", {}), key=lambda jid: names.get(jid, jid))
     part_names = sorted(session.get("symbolic_parts", {}))
     return {"failure": failure_lines(prepared, session), "goal": goal_lines(prepared, session),
+            "next_tasks": next_task_lines(prepared, session),
             "resources": [_resource_row(jid, prepared, session, names) for jid in resource_jids],
             "parts": part_rows(prepared, session, names), "refs": _ref_lines(prepared),
             "resource_jids": resource_jids, "part_names": part_names, "resource_names": names,
