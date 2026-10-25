@@ -475,16 +475,16 @@ def _public_resource_state_variables(entry: dict) -> dict:
 def _public_part_state_variables(prepared: dict, snapshot: dict) -> dict:
     """Return a part's condition variables: every part-scoped variable a resource declares.
 
-    Each variable lists the resources whose events set it and the part's current value.
+    Each variable carries the part's current value. It does not list the declaring resources: every
+    resource declares a part's location, which would read as if a machine could move a part.
     """
     variables: dict[str, dict] = {}
-    for jid, entry in sorted(prepared.get("recovery_resources", {}).items()):
+    for _, entry in sorted(prepared.get("recovery_resources", {}).items()):
         for name, row in _public_resource_state_variables(entry).items():
             if row.get("scope") != "part":
                 continue
             merged = variables.setdefault(name, {**{key: deepcopy(value) for key, value in row.items() if key != "domain"},
-                                                 "domain": [], "set_by": []})
-            merged["set_by"].append(jid)
+                                                 "domain": []})
             merged["domain"].extend(value for value in row.get("domain") or [] if value not in merged["domain"])
     for name, row in variables.items():
         row["current_value"] = deepcopy(snapshot.get(name))

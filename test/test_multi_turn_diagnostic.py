@@ -350,8 +350,8 @@ def test_prompt_states_recorded_facts_for_every_robot_without_tuned_targets(shar
     assert "Declared coverage" not in prompt and "covers:" not in prompt
     assert "\nRecovery Goal\nWhat the interrupted work was meant to achieve." in prompt
     assert "- gear: state assembled, location cell (normally arm_b's place_approach)\n" in prompt
-    assert "\narm_b (robot)  failed; at station; holds none; pose (0.000, 0.000, 1.200), inside cell; " in prompt
-    assert "\narm_a (robot)  picked; at buffer; holds peg; " in prompt
+    assert "\narm_b (robot)  failed; resource_location station; held_part none; pose (0.000, 0.000, 1.200), inside cell; " in prompt
+    assert "\narm_a (robot)  picked; resource_location buffer; held_part peg; " in prompt
     assert "\ngear  not held, not at any station, measured at (0.900, 0.100, 1.000)\n" in prompt
     assert "misplaced" not in prompt and "robot states:" not in prompt and "Part states:" not in prompt
     assert "[[-0.25, 0.25]" not in prompt and "max_xy_radius_m" not in prompt
@@ -494,7 +494,7 @@ def test_roster_shows_the_declared_locations_of_a_resource_without_reachability(
     prompt = multi_turn._build_phase_prompt(prepared, session)[1]
     # Without recorded runtime state the resource stays under Other Resources, with its declared locations.
     # Without recorded runtime state the resource is still listed, with its declared locations.
-    assert "\nmobile (robot)  state not recorded; holds none; capabilities: reachable locations Storage, cell\n" in prompt
+    assert "\nmobile (robot)  state not recorded; held_part none; capabilities: reachable locations Storage, cell\n" in prompt
     assert "field_sources" not in prompt and "evaluation_support" not in prompt
     relations = multi_turn_context.resolve_outline_context(prepared, session, "/resources/arm_b/pose_relations")["value"]
     assert relations["by_declared_location"]["mobile"] == ["cell"]
@@ -624,9 +624,9 @@ def test_template_states_a_machine_fault_from_recorded_facts(captured):
         "- KET4_Square_4mm: at M1; processes: trim → square running on M1"]
     assert template["goal"] == ["- KET4_Square_4mm: process trim, result square (normally M1's machine_part)"]
     assert template["resources"] == [
-        "M2 (resource)  loaded; at M2; holds none; part_name RGOCG4-50_Round_4mm; capabilities: reachable "
+        "M2 (resource)  loaded; resource_location M2; held_part none; part_name RGOCG4-50_Round_4mm; capabilities: reachable "
         "locations M1, M2; trim (circle, square)",
-        "arm (resource)  idle; at M2; holds none; capabilities: reachable locations M1, M2"]
+        "arm (resource)  idle; resource_location M2; held_part none; capabilities: reachable locations M1, M2"]
     resources = "\n".join(template["resources"])
     # Owner bookkeeping and nominal event names are not offered.
     assert "active_job" not in resources and "private_job" not in resources and "machine_part" not in resources
@@ -1372,7 +1372,8 @@ def test_only_an_event_that_adds_to_a_process_record_makes_it_a_resource_conditi
     assert multi_turn_diagnostic.declare_derived_conditions(prepared, {}) == {"machine": ["processCompleted"]}
     session = multi_turn.build_multi_turn_session_seed(prepared)
     part = multi_turn_context.resolve_outline_context(prepared, session, "/parts/KET4_Square_4mm/state_variables")
-    assert part["value"]["processCompleted"]["set_by"] == ["machine"]
+    # Part facts do not list declaring resources: every resource declares a part's location.
+    assert "set_by" not in part["value"]["processCompleted"]
     # Only the resource whose events add to the record lists it among the variables the LLM looks up.
     offered = {jid for jid in prepared["recovery_resources"]
                if "processCompleted" in multi_turn_context.resolve_outline_context(
@@ -1390,7 +1391,7 @@ def test_a_process_record_is_a_part_condition(captured):
     session = multi_turn.build_multi_turn_session_seed(prepared)
     part = multi_turn_context.resolve_outline_context(prepared, {**session, "outline_diagnostic_bypass": True},
                                                       "/parts/KET4_Square_4mm/state_variables")
-    assert "machine" in part["value"]["processCompleted"]["set_by"] and part["values_rule"]
+    assert part["value"]["processCompleted"]["scope"] == "part" and part["values_rule"]
     _apply([event("trimmed", "machine", "KET4_Square_4mm", resource_state="completed",
                   processCompleted=[{"process": "trim", "result": "square"}])], session, prepared)
     names = facts.resource_names(prepared)

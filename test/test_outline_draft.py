@@ -128,7 +128,7 @@ def test_draft_equal_reachability_context_and_schema_expressiveness(observations
     session["current_phase"] = "outline"
     payload, prompt = multi_turn._build_phase_prompt(draft.prepared, session)
     # Both resources are stated by name with the same declared location; neither is preferred.
-    assert "\nM2 (resource)  idle; at M2; capabilities: reachable locations M2\n" in prompt
+    assert "\nM2 (resource)  idle; resource_location M2; capabilities: reachable locations M2\n" in prompt
     assert "\nsecond (resource)  state not recorded; capabilities: reachable locations M2\n" in prompt
     assert session.get("outline_requested_refs", []) == []
     schema = multi_turn._get_response_schema("outline", session)
@@ -153,7 +153,7 @@ def test_draft_states_the_position_a_place_declares_for_a_resource_placing_there
     session["current_phase"] = "outline"
     _, prompt = multi_turn._build_phase_prompt(draft.prepared, session)
     # The draft keeps the place's declared events, so the robot line states where its placement puts a part.
-    assert ("\nM2 (resource)  idle; at M2; capabilities: reachable locations M2, Belt; "
+    assert ("\nM2 (resource)  idle; resource_location M2; capabilities: reachable locations M2, Belt; "
             "places parts on Belt at loading_position_1\n") in prompt
     assert "place_release" not in prompt
 
@@ -167,7 +167,7 @@ def test_draft_states_a_resource_s_declared_job_control(observations, tmp_path):
     session["current_phase"] = "outline"
     _, prompt = multi_turn._build_phase_prompt(draft.prepared, session)
     # The draft keeps the declared job control, so the LLM can tell a resumable pause from a final stop.
-    assert ("\nM2 (resource)  idle; at M2; capabilities: reachable locations M2; "
+    assert ("\nM2 (resource)  idle; resource_location M2; capabilities: reachable locations M2; "
             "job control: resume_after_reload true, restart_stopped_jobs false\n") in prompt
 
 

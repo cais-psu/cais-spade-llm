@@ -731,10 +731,11 @@ def _resource_row(jid: str, prepared: dict, session: dict, names: dict[str, str]
     places, parts = declared_record_places(jid, prepared), set(session.get("symbolic_parts", {}))
     items, families = [], {}
     for field, value in _displayed_fields(jid, session).items():
+        # Every field is shown under its variable name, the name an event states it by.
         if field == "held_part":
-            items.append(f"holds {names.get(value, value) if value else 'none'}")
+            items.append(f"held_part {names.get(value, value) if value else 'none'}")
         elif field == "resource_location":
-            items.append(f"at {names.get(value, value)}")
+            items.append(f"resource_location {names.get(value, value)}")
         elif "." in field:
             prefix, key = field.split(".", 1)
             # A per-part family shows only its set entries, or none.
