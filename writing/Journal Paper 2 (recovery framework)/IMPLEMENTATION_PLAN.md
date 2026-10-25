@@ -742,6 +742,24 @@ checker skips the KMR's `approached_part` as bookkeeping, like `task_ctx.*` (no 
 KMR's two-step pick together), and the checker is built overnight, offline only. Marking `approached_part` private
 waits for the prompt decisions.
 
+**October 25, evening: three more fact fixes and Machining regenerated (read this first).**
+
+From the LLM's own turn-by-turn reasoning in `draft_23c036c5…` (user approved, `ef088e5`): M2's line kept showing a
+paused job as running (job records filed under the machine's name, read by its JID); the Conveyor and Buffer had no
+capabilities entry, so nothing said that "after loading_position_2" lies past M2 (each now states the order its own
+declared events advance parts through: "moves parts in one direction: ..."; the belt's hand-over to the Buffer is
+left out, as the prompt leaves out transfer targets); the draft turn limit was 20, which that outline used up (now
+40).
+
+Machining regenerated (`draft_3e3eb08d…`, 17 calls, 14 events, ended on its own): every fact error is gone (it states
+M2 idle after unloading and loaded after reloading, uses declared names, robots move parts). The strategy error
+remains: it puts RGOCG4 (paused, unfinished) on the belt to free M2's tray, then advances the belt, which carries
+RGOCG4 to the output nest; it then "completes" KET4's job on M2 without starting or resuming it and declares the
+recovery complete (normal work cannot take over). The RA check refuses the completion (`complete_job needs
+resource_state = running; projected resource_state is loaded`); nothing refuses the stranded RGOCG4 or the premature
+completion, which is the handoff check's job (Eq. 6). No further prompt change is proposed: the remaining errors are
+planning, and any further text would be a hint.
+
 **October 25, later: two prompt fact fixes, then the four outlines regenerated (read this first).**
 
 The first v5 Machining outline showed two misleading prompt facts (user approved fixing them as wrong code facts
