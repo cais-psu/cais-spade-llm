@@ -590,6 +590,40 @@ def declared_record_places(jid: str, prepared: dict) -> dict[str, str]:
     return places
 
 
+def _advance_order(model: dict, resource: str) -> list[str]:
+    """Return the positions a resource's own declared events advance parts through, in order.
+
+    A belt's advance event moves every part along a per-part position family, in the family's declared
+    order; a zoned transport's events each move a part from one zone variable to the next. Only the
+    resource's own events count: an event another resource performs there, such as a robot loading a
+    machine, is that resource's motion.
+    """
+    variables, steps = model.get("state_variables", {}), {}
+    for event in model.get("events", []):
+        if (event.get("parameter_bindings", {}).get("resource_id") or {}).get("equals") != resource:
+            continue
+        for family in event.get("collection_effects") or {}:
+            if family.endswith(".{part_name}"):
+                prefix = family[:-len("{part_name}")]
+                domain = next((row.get("domain") or [] for name, row in variables.items() if name.startswith(prefix)), [])
+                if positions := [value for value in domain if value is not None]:
+                    return positions
+        updates, guards = event.get("updates") or {}, event.get("guards") or {}
+        sources = [name for name, rule in updates.items() if rule == {"set": None}
+                   and (guards.get(name) or {}).get("equals_from_param") == "part_name"]
+        targets = [name for name, rule in updates.items() if rule == {"set_from_param": "part_name"}]
+        # Taking a part into held_part is a grasp, not transport.
+        if len(sources) == 1 and len(targets) == 1 and "held_part" not in (sources[0], targets[0]):
+            steps[sources[0]] = targets[0]
+    starts = [name for name in steps if name not in steps.values()]
+    if len(starts) != 1:
+        return []
+    order = starts
+    while order[-1] in steps and len(order) <= len(steps):
+        order = [*order, steps[order[-1]]]
+    return order
+
+
 def _capabilities(jid: str, prepared: dict, session: dict) -> str:
     """State a resource's declared capabilities, the same way for every resource.
 
@@ -603,6 +637,7 @@ def _capabilities(jid: str, prepared: dict, session: dict) -> str:
     - workspace bounds: a declared reach area (``gripper_reach``), detailed by lookup; it constrains
       event parameters like the paper's capability constraint;
     - moves to any position: a declared event that sets its location from free numeric parameters;
+    - moves parts in one direction: the positions its own declared events advance parts through, in order;
     - processes: the declared ``process`` values of its events, with their ``result`` values;
     - job control: its declared job-control flags by name and value, such as whether a paused job
       resumes after its part is reloaded.
@@ -622,6 +657,8 @@ def _capabilities(jid: str, prepared: dict, session: dict) -> str:
         items.append("workspace bounds")
     if coordinates := _coordinate_parameters(model):
         items.append(f"moves to any position ({', '.join(coordinates)})")
+    if positions := _advance_order(model, resource_names(prepared).get(jid, jid)):
+        items.append("moves parts in one direction: " + " → ".join(positions))
     processes: dict[str, set[str]] = {}
     for event in model.get("events", []):
         bindings = event.get("parameter_bindings", {})

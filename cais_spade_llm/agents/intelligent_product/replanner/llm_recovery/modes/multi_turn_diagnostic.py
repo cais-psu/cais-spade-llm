@@ -445,11 +445,14 @@ def _project_machine_jobs(task: dict, session: dict, prepared: dict) -> None:
     changes that machine's job of the part and leaves its other jobs as they are. A stated completion
     (``current_process`` none) leaves the records as they are.
     """
+    from .multi_turn_outline_facts import _jid
+
     part = task.get("part_name")
     process = session.get("symbolic_parts", {}).get(part, {}).get("current_process")
     if not part or "current_process" not in task["expected_end_state"] or not isinstance(process, dict):
         return
-    jid = process.get("machine") or task["resource_jid"]
+    # The job record names its machine; the machine's job list is kept under its JID, which the display reads.
+    jid = _jid(process.get("machine"), prepared) or task["resource_jid"]
     jobs = session.setdefault("diagnostic_machine_jobs", {}).setdefault(jid, deepcopy(machine_jobs(jid, session, prepared)))
     job = next((row for row in jobs if row["part_name"] == part), None)
     if job is None:

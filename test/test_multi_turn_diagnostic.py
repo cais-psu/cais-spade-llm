@@ -821,30 +821,31 @@ def test_a_machine_keeps_each_job_by_its_part_so_a_paused_one_stays_in_view():
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
 
     jobs = {"job_1": {"part_name": "blank", "job_state": "running", "processing_fraction": 0.05}}
-    prepared = {"observation_jids": {"mill": "mill"}, "recovery_resources": {"mill": {
+    # The job record names its machine; the machine's records are kept under its JID.
+    prepared = {"observation_jids": {"mill": "res-mill"}, "recovery_resources": {"res-mill": {
         "resource_type": "resource", "static_capabilities": {"processing_observations": {"jobs": jobs}}}}}
     running = {"process": "trim", "result": "square", "status": "running", "machine": "mill"}
-    session = {"symbolic_resources": {"mill": {"resource_state": "loaded", "part_name": "blank"}},
+    session = {"symbolic_resources": {"res-mill": {"resource_state": "loaded", "part_name": "blank"}},
                "symbolic_parts": {"blank": {"current_process": dict(running)}, "peg": {"current_process": None}},
-               "recovery_des_models": {"mill": {"state_variables": {}}}}
+               "recovery_des_models": {"res-mill": {"state_variables": {}}}}
     names = facts.resource_names(prepared)
-    assert facts._resource_row("mill", prepared, session, names).endswith("jobs: blank running (processing_fraction 0.05)")
+    assert facts._resource_row("res-mill", prepared, session, names).endswith("jobs: blank running (processing_fraction 0.05)")
     # The part's stated status changes the job the machine holds for that part.
     session["symbolic_parts"]["blank"]["current_process"]["status"] = "paused"
     multi_turn_diagnostic._project_machine_jobs(
-        {"resource_jid": "mill", "part_name": "blank", "expected_end_state": {"current_process": "paused"}}, session, prepared)
+        {"resource_jid": "res-mill", "part_name": "blank", "expected_end_state": {"current_process": "paused"}}, session, prepared)
     # Another part's job is listed by its part; the paused job stays in view.
     session["symbolic_parts"]["peg"]["current_process"] = dict(running)
     multi_turn_diagnostic._project_machine_jobs(
-        {"resource_jid": "mill", "part_name": "peg", "expected_end_state": {"current_process": dict(running)}},
+        {"resource_jid": "res-mill", "part_name": "peg", "expected_end_state": {"current_process": dict(running)}},
         session, prepared)
-    assert facts._resource_row("mill", prepared, session, names).endswith(
+    assert facts._resource_row("res-mill", prepared, session, names).endswith(
         "jobs: blank trim → square paused, peg trim → square running")
     # A part with no unfinished process changes no job record.
     session["symbolic_parts"]["peg"]["current_process"] = None
     multi_turn_diagnostic._project_machine_jobs(
-        {"resource_jid": "mill", "part_name": "peg", "expected_end_state": {"current_process": None}}, session, prepared)
-    assert [job["status"] for job in multi_turn_diagnostic.machine_jobs("mill", session, prepared)] == ["paused", "running"]
+        {"resource_jid": "res-mill", "part_name": "peg", "expected_end_state": {"current_process": None}}, session, prepared)
+    assert [job["status"] for job in multi_turn_diagnostic.machine_jobs("res-mill", session, prepared)] == ["paused", "running"]
 
 
 def test_a_resource_states_its_declared_job_control_flags():
@@ -1744,3 +1745,23 @@ def test_the_draft_table_lists_each_end_state_value_and_marks_what_code_added():
                                                 "expected_end_state": {"part_location": "buffer"}}]})
     assert earlier[0]["end_state"] == "ur5e-3  part_location = buffer"
 
+
+
+def test_a_transport_states_the_order_its_own_events_advance_parts_through():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
+
+    def zone_move(source, target, actor="Buffer"):
+        return {"parameter_bindings": {"resource_id": {"equals": actor}},
+                "guards": {source: {"equals_from_param": "part_name"}, target: {"equals": None}},
+                "updates": {source: {"set": None}, target: {"set_from_param": "part_name"}}}
+
+    belt = {"state_variables": {"part_location.peg": {"domain": [None, "load", "after load", "nest"]}},
+            "events": [{"parameter_bindings": {"resource_id": {"equals": "Belt"}},
+                        "collection_effects": {"part_location.{part_name}": "shared belt occupancy"}}]}
+    zones = {"state_variables": {}, "events": [zone_move("zone_2_part", "zone_3_part"), zone_move("zone_1_part", "zone_2_part")]}
+    # Another resource's event there, or taking a part into held_part, is not this resource moving parts.
+    loaded = {"state_variables": {}, "events": [zone_move("staging_part", "part_name", actor="arm")]}
+    grasp = {"state_variables": {}, "events": [zone_move("approached_part", "held_part", actor="Mover")]}
+    assert facts._advance_order(belt, "Belt") == ["load", "after load", "nest"]
+    assert facts._advance_order(zones, "Buffer") == ["zone_1_part", "zone_2_part", "zone_3_part"]
+    assert facts._advance_order(loaded, "Mill") == [] and facts._advance_order(grasp, "Mover") == []

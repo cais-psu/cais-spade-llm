@@ -35,8 +35,9 @@ _HIDDEN = context._PRIVATE_CONTEXT_FIELDS | {
     "primitive_steps", "capability_decompositions", "allowed_execution_surface", "active_job",
 }
 DRAFTS = RECORDS / "outline_drafts"
-# A cost limit, not a progress judgment: a good draft takes about six LLM calls.
-DRAFT_MAX_TURNS = 20
+# A cost limit, not a progress judgment: a good draft takes six to ten LLM calls, and a long one such as
+# Machining (sixteen events) used all of twenty; each refusal under a check costs another call.
+DRAFT_MAX_TURNS = 40
 # Where equipment is and how large it is. Routes, docking poses, handling
 # assignments and transfer targets are left out so geometry gives no answer.
 _GEOMETRY_KEYS = ("world_pose", "size", "length", "width", "surface_height", "enclosure_dimensions_m", "stand_height_m")

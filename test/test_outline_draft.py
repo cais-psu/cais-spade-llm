@@ -181,7 +181,7 @@ def test_draft_states_a_resource_s_declared_job_control(observations, tmp_path):
 def test_draft_budget_and_formatting_failures(observations, tmp_path, monkeypatch, responses, expected_calls, status):
     provider = scripted_provider(monkeypatch, responses)
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path)
-    assert draft.prepared["recovery_session"]["max_turns"] == outline_draft.DRAFT_MAX_TURNS == 20
+    assert draft.prepared["recovery_session"]["max_turns"] == outline_draft.DRAFT_MAX_TURNS == 40
     draft.prepared["recovery_session"]["max_turns"] = 6
     asyncio.run(draft.generate())
     assert provider.await_count == expected_calls
