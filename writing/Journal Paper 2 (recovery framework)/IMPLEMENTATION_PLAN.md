@@ -742,6 +742,32 @@ checker skips the KMR's `approached_part` as bookkeeping, like `task_ctx.*` (no 
 KMR's two-step pick together), and the checker is built overnight, offline only. Marking `approached_part` private
 waits for the prompt decisions.
 
+**October 25, later: two prompt fact fixes, then the four outlines regenerated (read this first).**
+
+The first v5 Machining outline showed two misleading prompt facts (user approved fixing them as wrong code facts
+under the prompt freeze; `8a3211e`): resource lines showed `held_part` as "holds" and `resource_location` as "at",
+and the LLM stated "holds"/"at" as variables; a part variable's `set_by` listed every resource that declares it, so
+a part's location read as set by M1, M2, Storage and the Conveyor, and the LLM had M2 unload itself. Both gone.
+
+Regenerated outlines (unchecked, gpt-5.4 medium, same safety files). The morning's four drafts are kept beside them;
+the UI shows the latest per capture.
+
+| Scenario | Draft | Calls | Events | Outline | Remaining problems |
+| --- | --- | --- | --- | --- | --- |
+| Part slippage | `draft_8f0e1b83…` | 6 | 4 | KET4 to Buffer zone 1, pick gear_small at its measured pose, ur5e-4 to the printer, insert gear_small | none |
+| Conveyor | `draft_668727eb…` | 9 | 6 | KET4 to the M1 tray, the KMR carries it to Buffer zone 1 | events 2–3 put KET4 back on the tray twice (redundant); the KMR's stated parking pose overlaps the Assembly Station |
+| ur5e-1 | `draft_b1ecbb8d…` | 9 | 5 | the KMR picks KET4 at M1, M2 paused, the KMR leaves KET4 on the M2 tray, ur5e-2 puts it on loading position 2 | the KMR's pick ends at Storage; M2's job is never resumed (not yet confirmed whether normal work stalls) |
+| Machining | `draft_23c036c5…` | 20 | 16 | pause both jobs, unload both to their trays, both onto the belt, advance KET4 to loading position 2, reload and run KET4 on M2 | RGOCG4's unfinished job is sent down the belt past M2 (unreachable for a reload); M2 is never stated idle after unloading, so `start_job` sees it paused; declared complete although normal work cannot take over |
+
+Fixed by the prompt facts: no invented variable names, no machine moving its own part, and the belt is advanced before
+ur5e-2 picks.
+
+RA check on these outlines (shadow, after `97521c2`): 73 candidates, 68 FEASIBLE, 4 INFEASIBLE, 1 NEEDS_CONTEXT after
+fixing one checker bug (a part's variables are the part-scoped ones any resource declares; `product_location` is the
+Exit's). Refused chosen events: Conveyor event 6 (KMR parking pose on the Assembly Station), ur5e-1 event 4 (KMR at
+the M2 tray, unresolved), Machining event 13 (`start_job` needs M2 loaded; projected paused). Not caught by RA: the
+Machining strategy (RGOCG4 sent past M2) and the premature completion, which are the handoff check's job (Eq. 6).
+
 **October 25: unchecked outlines on the v5 captures, and the RA check on them (read this first).**
 
 The user had every non-v5 capture and all 70 old outline drafts deleted outright (receipt
