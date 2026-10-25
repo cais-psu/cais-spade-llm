@@ -171,7 +171,9 @@ class _Check:
                 status = _best(producer["status"] for producer in producers)
                 result = {**row, "derivation": "producers", "status": status, "producers": producers}
                 if status != FEASIBLE:
-                    result["reason"] = "; ".join(producer["reason"] for producer in producers if producer.get("reason"))
+                    # Primitives that make the stated value but fail on v say why; the others only that they don't.
+                    making = [producer for producer in producers if producer.get("makes_value")] or producers
+                    result["reason"] = "; ".join(producer["reason"] for producer in making if producer.get("reason"))
                 return result
         if self.is_place(jid, name, after, declaration):
             return {**row, "derivation": "place", "status": FEASIBLE}
@@ -227,6 +229,7 @@ class _Check:
         status, reason, continuous = _produces(rule, before, after, theta, contract.get("parameters") or {})
         if status != FEASIBLE:
             return {**row, "status": status, "reason": f"{primitive}: {reason}"}
+        row["makes_value"] = True
         failures = self.preconditions(contract, theta)
         if failures:
             return {**row, "status": _worst(status for status, _ in failures),

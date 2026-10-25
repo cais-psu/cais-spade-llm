@@ -239,3 +239,12 @@ def test_a_part_variable_another_resource_declares_is_a_variable_of_the_part(cel
                          session, {}, cell)
     product = next(row for row in result["conditions"] if row["condition"] == "product_location")
     assert (product["derivation"], product["status"]) == ("place", "FEASIBLE")
+
+
+def test_a_refusal_names_only_the_primitives_that_make_the_stated_value(cell, session):
+    # M1 is loaded, not running: complete_job makes this record but needs a running job; the job commands do not.
+    session["recovery_des_models"][M1]["state_variables"]["current_process"] = {"scope": "part", "domain": []}
+    session["symbolic_parts"]["P2"]["current_process"] = {"process": "trim", "result": "square", "status": "paused",
+                                                         "machine": "M1"}
+    result = check_event(_event(M1, {"current_process": None}, part="P2"), session, {}, cell)
+    assert result["reasons"] == ["complete_job needs resource_state = running; projected resource_state is loaded"]
