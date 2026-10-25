@@ -51,6 +51,10 @@ async def handle_validated_candidates(*, session: dict, prepared: dict, response
         if cell is None:
             raise ValueError("The RA feasibility check needs the recorded cell of the capture")
         choice, checks = ra_feasibility.check_candidates(events, llm_choice, session, prepared, cell)
+        # Kept for review: what the RA judged on each turn and which candidate it applied.
+        session.setdefault("ra_feasibility_checks", []).append({
+            "turn_index": session.get("turn_index"), "llm_selected_candidate_index": llm_choice,
+            "applied_candidate_index": choice, "results": deepcopy(checks)})
         if choice is None:
             findings = ra_feasibility.refusal_findings(events, checks)
             session["outline_validation_findings"] = deepcopy(findings)

@@ -298,11 +298,12 @@ class OutlineDraft:
         )
 
         handoff = self.record["nominal_handoff"]
+        kind = "RA-checked" if self.record["ra_feasibility_check"] else "Unvalidated"
         if handoff.get("complete"):
             assumed = "; ".join(row["reason"] for row in handoff.get("assumptions") or [] if row.get("reason"))
             if not assumed:
-                return "Unvalidated multi_turn outline with proposed nominal handoff."
-            return with_resource_names(f"Unvalidated multi_turn outline with proposed nominal handoff; assumed, not "
+                return f"{kind} multi_turn outline with proposed nominal handoff."
+            return with_resource_names(f"{kind} multi_turn outline with proposed nominal handoff; assumed, not "
                                        f"checked: {assumed}.", resource_names(self.prepared))
         reasons = "; ".join(handoff.get("not_connected_reasons") or ["its recorded handoff conditions do not hold"])
         return with_resource_names(f"The LLM declared the recovery complete; nominal work cannot take over: {reasons}.",
@@ -320,7 +321,7 @@ class OutlineDraft:
             raise ValueError("Start fresh before generating another outline")
         self.directory.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
-        checked = "the RA feasibility check is on" if self.record.get("ra_feasibility_check") else "validation is bypassed"
+        checked = "the RA feasibility check is on" if self.record["ra_feasibility_check"] else "validation is bypassed"
         self.record.update(status="generating_draft", message=f"Generating multi_turn outline; {checked}.")
         self._save()
         try:
@@ -330,6 +331,8 @@ class OutlineDraft:
                 self.session = self.prepared.get("multi_turn_session_state", {})
                 self.record["transition_trace"] = deepcopy(self.session.get("accepted_outline_prefix", []))
                 self.record["nominal_handoff"] = deepcopy(self.session.get("diagnostic_nominal_handoff", {}))
+                if self.record["ra_feasibility_check"]:
+                    self.record["ra_feasibility_checks"] = deepcopy(self.session.get("ra_feasibility_checks", []))
                 status = self.session.get("status")
                 if status == "ready_for_primitive_generation":
                     self.record.update(status="draft", message=self._finished_message())

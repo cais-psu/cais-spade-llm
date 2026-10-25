@@ -184,6 +184,7 @@ def test_the_hook_applies_the_first_feasible_candidate_and_returns_facts_when_no
     assert (decision, applied) == ("need_next_task", ["release_into_zone_1"])
     assert (audit["selected_candidate_index"], audit["llm_selected_candidate_index"]) == (1, 0)
     assert [row["feasibility_status"] for row in audit["ra_feasibility"]] == ["INFEASIBLE", "FEASIBLE"]
+    assert session["ra_feasibility_checks"][-1]["applied_candidate_index"] == 1
 
     response = {"thought": "t", "candidate_events": [refused], "selected_candidate_index": 0}
     decision, audit = asyncio.run(handle_validated_candidates(
@@ -191,5 +192,25 @@ def test_the_hook_applies_the_first_feasible_candidate_and_returns_facts_when_no
     findings = session["outline_validation_findings"]
     assert decision == "need_revision" and len(applied) == 1
     assert [row["constraint_code"] for row in findings] == ["ra_feasibility"]
+    assert session["ra_feasibility_checks"][-1]["applied_candidate_index"] is None
     # The next prompt shows the refusal's facts as the check wrote them.
     assert _outline_feedback_for_prompt(findings[0], set())["reason"] == findings[0]["reason"]
+
+
+@pytest.mark.parametrize("machine, status, primitive", [
+    # Resuming a job another machine paused is refused by resume_job's own guard on the part's job record.
+    ("M2", "INFEASIBLE", None),
+    # Starting the job afresh on this machine is a new job, which start_job declares.
+    ("M1", "FEASIBLE", "start_job"),
+])
+def test_a_machine_resumes_only_the_job_it_paused(cell, session, machine, status, primitive):
+    paused = {"process": "trim", "result": "square", "status": "paused", "machine": "M2"}
+    session["recovery_des_models"][M1]["state_variables"]["current_process"] = {"scope": "part", "domain": []}
+    session["symbolic_parts"]["P2"]["current_process"] = paused
+    result = check_event(_event(M1, {"current_process": {**paused, "status": "running", "machine": machine}},
+                                part="P2"), session, {}, cell)
+    assert result["feasibility_status"] == status
+    if primitive:
+        assert result["primitive_set"] == [primitive]
+    else:
+        assert "current_process matches {status: paused, machine: M1}" in " ".join(result["reasons"])
