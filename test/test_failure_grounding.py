@@ -215,15 +215,7 @@ def test_rules_never_see_recorded_labels_or_the_scenario_name():
 
 
 OFFICIAL = {
-    "capture_f923020bf9ce496eb443826291f8f2c2": (["A1", "B2", "C1"], ["ur5e-4"], "environment_9", "place_approach"),
-    "capture_8beafdb8a01e444894cfaf41d29921fd": (["A2", "B2"], ["M1"], "environment_21", "machine_part"),
-    "capture_1b3f3d1d729a4701b94cff514c783130": (["B2"], ["Conveyor"], "d49d4e9e71354325b11328a1cee4a5ce_pending_2", "place_approach"),
-    "capture_0a7fde8074b6426586b204204f2b3417": (["B2"], ["ur5e-1"], "01eeb91143e741c69242142690a5a4be_pending_0", "pick_grasp"),
-    "capture_82804cb13221467a8b6be4e0eb3e3ac4": (["A1", "B2", "C1"], ["ur5e-4"], "environment_9", "place_approach"),
-    "capture_142d8c7d69d74e39aade558dcbc4b15e": (["A2", "B2"], ["M1"], "environment_24", "complete_job"),
-    "capture_6d907d9ba40a4bb099cba8804166caf0": (["B2"], ["Conveyor"], "2c7098683d184c6aad1da6d6b2a24dbd_pending_0", "place_approach"),
-    "capture_41e711f0ce414a1fa0b1b633ec387656": (["B2"], ["ur5e-1"], "13daa63911274a5a92631b8793a9bbed_pending_1", "pick_grasp"),
-    # Restored ur5e-3 route and URs without collision checks (2026-10-24): the same faults.
+    # Restored ur5e-3 route and URs without collision checks (2026-10-24).
     "capture_ad64bf1628564c3fa7f928b7bdebd5d9": (["A1", "B2", "C1"], ["ur5e-4"], "environment_8", "place_approach"),
     "capture_37e090a54d0242f4948ae80c95d3cd76": (["A2", "B2"], ["M1"], "environment_25", "complete_job"),
     "capture_3ad495d2bd7845269fa70f1a09963bc9": (["B2"], ["Conveyor"], "cf4b66ddc51348a2987d5207878e5eea_pending_0", "place_approach"),
@@ -339,7 +331,7 @@ def test_scenario_name_is_not_forwarded_to_the_prompt():
 def test_plant_model_accepts_only_declared_fault_states():
     from cais_spade_llm.resources import environment_models
 
-    path = RECORDS / "capture_f923020bf9ce496eb443826291f8f2c2" / "observations.json"
+    path = RECORDS / "capture_ad64bf1628564c3fa7f928b7bdebd5d9" / "observations.json"
     if not path.is_file():
         pytest.skip("retained capture is not present")
     physical = read_observations(path)["physical_evidence"]
@@ -357,7 +349,7 @@ def test_the_first_turn_is_the_outline_prompt_with_the_grounded_fault(tmp_path, 
     from cais_spade_llm.recovery_framework import outline_draft
     from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
 
-    path = RECORDS / "capture_f923020bf9ce496eb443826291f8f2c2" / "observations.json"
+    path = RECORDS / "capture_ad64bf1628564c3fa7f928b7bdebd5d9" / "observations.json"
     if not path.is_file():
         pytest.skip("retained capture is not present")
     observations = read_observations(path)
@@ -367,9 +359,9 @@ def test_the_first_turn_is_the_outline_prompt_with_the_grounded_fault(tmp_path, 
     asyncio.run(draft.generate())
     prompt = provider.call_args_list[0].kwargs.get("prompt") or provider.call_args_list[0].args[0]
     assert "\nFailure\n" in prompt and provider.await_count == 1
-    assert "- ur5e-4 did not complete place_approach of gear_small (" in prompt and "task environment_9" in prompt
+    assert "- ur5e-4 did not complete place_approach of gear_small (" in prompt and "task environment_8" in prompt
     assert "Part slippage" not in prompt and "during_place_lowering" not in prompt
-    assert draft.record["fault_grounding"]["failed_task_id"] == "environment_9"
+    assert draft.record["fault_grounding"]["failed_task_id"] == "environment_8"
     session = draft.prepared["multi_turn_session_state"]
     assert (session["turn_index"], session["current_phase"], session["turns"]) == (1, "outline", [])
     assert not list(draft.directory.glob("recovery_outline/turns/*grounding*"))
