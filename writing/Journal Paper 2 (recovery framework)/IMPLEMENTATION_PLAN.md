@@ -725,6 +725,40 @@ send check time could drop with coarser sweeps; the prepared nominal path in `_c
   plan rebuild projecting a started activity from its start, and the protected `cca_safety_logic.json`
   being rewritten by nominal starts (the harness restores it).
 
+## CCA nonblocking check (Eq. 6) — design approved by the user October 25, 2026; not built
+
+**Decisions (user, October 25).** The CCA checks Eq. 6: the paper's $R_{\text{safe}}$ is Eqs. 6 and 8, nonblocking
+is a property of the composed plant only the CCA holds, the RA is local, and the PA must not judge its own output.
+It runs once, when the LLM declares `recovery_complete`; per event the CCA checks only Eq. 13, and there is no
+per-event progress check. Completion comes from the models' marked states, not from a new specification. The PA
+supplies the remaining plan and the handoff condition $H$ and ends synthesis only when the CCA accepts. The paper
+reasoning and wording are in `PAPER_FRAMEWORK.md` ("Nonblocking validation").
+
+**What exists.** `multi_turn_diagnostic.declare_recovery_complete` searches up to 6 connecting nominal events
+(`nominal_connection`) and records `handoff` (whether the recorded handoff conditions $H$ of each part's next nominal
+step hold); it never refuses. `handoff` says so itself: "complete nominal continuation not checked". The refusal
+text today is "no sequence of up to 6 declared nominal events reaches its next task" (`connection_blockers`
+deliberately does not list the states the next task needs).
+
+**Build in two stages.**
+1. Refuse `recovery_complete` when $H$ cannot be reached. Behind a session flag `check_nonblocking`
+   (`OutlineDraft` argument, default off, like `check_ra_feasibility`), in a CCA-owned module called from
+   `handle_validated_candidates` on a completion reply. A refusal returns `need_revision` with one finding
+   (`constraint_code: cca_nonblocking`, code-authored) stating the blocked planned task as a fact; an
+   inconclusive bounded search is reported as NEEDS_CONTEXT, not as a rejection. Test: replay the v5 Machining
+   outline `draft_3e3eb08d…`; its last reply must be refused, naming the blocked task.
+2. Full Eq. 6: run the remaining planned events $s_N$ from $x^R_m$ through to the marked states of every resource
+   model and part (all remaining tasks, not only each part's next step). This would catch an outline that leaves a
+   machine's job paused when $H$ holds (the v5 ur5e-1 outlines; whether normal work stalls there is unconfirmed).
+
+**Open decision for the user: how much the refusal states.** (a) The blocked planned task only ("normal production
+cannot start environment_24: M2 trims RGOCG4 → circle"), as proposed on October 23; or (b) the task and its unmet
+condition ("… needs RGOCG4 in M2; RGOCG4 is at the Conveyor's output_nest"), which is how the RA states a failed
+precondition. Both are facts; (b) says more about what to repair. `connection_blockers` was written to say neither.
+
+**Then.** Live checked drafts on the four v5 captures with both checks on (`check_ra_feasibility` and
+`check_nonblocking`), compared with the unchecked baselines.
+
 ## RA feasibility validation — October 23, 2026 — plan approved by the user; checker built offline October 24–25 (`77af184`, `dcab31b`), awaiting the user's replay review
 
 **Resume here (updated 2026-10-24).** The physical nominal check is done (`87f9356`, `288c8de`). On 2026-10-24 the

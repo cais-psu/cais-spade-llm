@@ -54,7 +54,8 @@ name the section or equation it implements. If it maps to none, ask the user fir
 - **Agents.**
   - PA: neural generation of the recovery outline.
   - RA: feasibility validation, then primitive composition.
-  - CCA: safety validation, then the safety monitor.
+  - CCA: safety and nonblocking validation (Eqs. 6, 8, 13), then the safety monitor (decided by the user,
+    October 25; see "Nonblocking validation").
 - **Candidate sets.** $R_{\text{neural}}$, $R_{\text{feasible}}$ (Eq. 7), $R_{\text{safe}}$ (Eqs. 6
   and 8), and $R^*=R_{\text{feasible}}\cap R_{\text{safe}}$ (Eq. 9). An accepted path is
   $x_F\to x^R_1\to\cdots\to x^R_m$ (Eq. 10).
@@ -74,6 +75,33 @@ name the section or equation it implements. If it maps to none, ask the user fir
     $\forall\rho\,\exists\theta_\rho\in\Theta_{i,\rho}: C_\rho(v_i,v'_i,\theta_\rho)=1$ (Eq. 12).
 - **Safety validation.** The CCA extends $\pi(s_F s^R_{k-1}e^R_k)=\pi(s_F s^R_{k-1})\ell(x^R_k)$
   (Eq. 13) and checks that an accepting state stays reachable in each monitor.
+- **Nonblocking validation (Eq. 6; decided by the user, October 25; to be written into the paper).**
+  - Who: the CCA. In supervisory control, admissible behavior must be both safe and nonblocking: it
+    must never produce an illegal string and must always be able to complete its task (reach a marked
+    state). Both are properties of the composed plant $G^R=\Vert_i G_i^R$, which only the CCA holds.
+    RA validation is local by construction (Algorithm 1 and Eq. 12 judge whether resource $i(k)$ can
+    realize $e^R_k$ with its own primitives, not whether other resources' remaining tasks stay
+    executable), and the PA generates the recovery, so it does not validate its own proposals. The
+    paper already defines $R_{\text{safe}}$ by Eqs. 6 and 8.
+  - When: once, when the LLM declares the recovery complete. Intermediate states $x^R_k$ are generally
+    not connected to the nominal plan (a recovery pauses jobs, unloads parts or moves resources aside
+    first), so a nominal continuation after every event would reject valid recoveries. Requiring a
+    continuation through further recovery events would mean searching for the recovery itself, the
+    LLM's role (RC1), which is also why primitives are not symbolically connectable. Per event the CCA
+    enforces only Eq. 13. There is no per-event progress check (user, October 25): it would be a
+    distance-to-goal heuristic, the kind of hidden rule removed on October 22.
+  - What: whether the remaining planned events $s_N$ lead from $x^R_m$ to a marked state of $G^R$. If
+    not, the declaration is rejected and the CCA returns the blocked task and its unmet condition as
+    feedback (facts only); synthesis continues from $x^R_m$. The PA supplies the remaining plan and
+    the handoff condition $H$, and ends synthesis only when the CCA accepts.
+  - Not a specification: completion is expressed by the marked states of the resource and product
+    models. The specifications in $\Phi$ are safety properties checked on prefixes by monitors;
+    completion is a liveness requirement already encoded by $L_m(G^R)$, and stating it as a
+    specification would need a failure-specific goal formula.
+  - Paper edits this implies: the CCA's role reads "safety and nonblocking validation (Eqs. 6, 8,
+    13)"; Fig. 5 and Section 5.1 end synthesis when the CCA accepts Eq. 6, not when "the projected
+    state connects to the remaining product plan"; the paper defines the remaining planned events
+    $s_N$ (see below).
 - **Primitive composition (Section 5.2).** The RA's LLM orders primitives and grounds parameters
   from $\mathcal{K}$, then checks structure, bindings and Eq. 7.
 - **Safety monitoring (Section 5.3).** The RA supplies physical evidence (trajectories, geometry),
@@ -122,7 +150,10 @@ name the section or equation it implements. If it maps to none, ask the user fir
   the CCA labels (Eq. 13) once the check reads them. The nominal models already change other resources
   in one event (a delivery sets the buffer's slot).
 - **Eq. 6** maps to the bounded search for connecting nominal events (at most 6) and the handoff
-  check. Full completion to a marked state, and Eq. 8 over $s_N$, are not checked yet (CCA).
+  check. Today code only records the result; the CCA check at `recovery_complete` is designed (see
+  "Nonblocking validation") but not built. A continuation longer than the bounded search comes back
+  unresolved, not rejected. Full completion to a marked state, and Eq. 8 over $s_N$, are not checked
+  yet (CCA).
 - **"Connected to the remaining product plan" is not defined in the paper.** The implementation
   uses:
   - replaced work $W=\bigcup_i B_i$, where $B_i$ is the longest prefix of resource $i$'s remaining
@@ -134,14 +165,16 @@ name the section or equation it implements. If it maps to none, ask the user fir
   The paper may want this definition.
 - **Termination differs.** With validation off, the LLM ends the outline with `recovery_complete`
   and code only records whether nominal work can connect. The paper describes termination as
-  "until connected", which is a code criterion. Decide which rule the validated mode uses.
+  "until connected", which is a code criterion. Decided October 25 (user): in the validated mode the
+  LLM declares completion and the CCA accepts or rejects it by Eq. 6; the paper's Fig. 5 wording
+  changes to match.
 
 ## Scope guard for implementation
 
 - **Outline stage.** It proposes task-level recovery events and their end states, stated as
   outcomes. Primitives appear only at composition (Section 5.2).
-- **Feasibility belongs to RA validation** (Algorithm 1, Eq. 7), and **safety belongs to CCA
-  validation** (Eqs. 8, 13). Do not add other judgment checks or heuristics to the prompt or the
+- **Feasibility belongs to RA validation** (Algorithm 1, Eq. 7), and **safety and nonblocking belong
+  to CCA validation** (Eqs. 6, 8, 13). Do not add other judgment checks or heuristics to the prompt or the
   PA. With validation off, code only projects state and records results.
 - **No failure-type, resource-type or scenario logic.** Faults are unexpected but observable (A.1).
   Facts come from measurements and declarations, stated the same way for every resource.
