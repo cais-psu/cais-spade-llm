@@ -725,7 +725,7 @@ send check time could drop with coarser sweeps; the prepared nominal path in `_c
   plan rebuild projecting a started activity from its start, and the protected `cca_safety_logic.json`
   being rewritten by nominal starts (the harness restores it).
 
-## RA feasibility validation — October 23, 2026 — plan approved by the user; Step 1 revised October 24, machine, transport and KMR grasp/release contracts declared (uncommitted)
+## RA feasibility validation — October 23, 2026 — plan approved by the user; checker built offline October 24–25 (`77af184`, `dcab31b`), awaiting the user's replay review
 
 **Resume here (updated 2026-10-24).** The physical nominal check is done (`87f9356`, `288c8de`). On 2026-10-24 the
 user revised how backward derivation works: it goes from each changed state condition to the primitives whose
@@ -733,8 +733,123 @@ declared effects produce it, never through nominal events (Steps 2 and 3). Later
 capability check covers every domain (Step 1 list, item 6), that pose places are covered (item 9), that any value
 type can be an end condition (item 10), and that job completion is a delayed effect (item 4). The machine and
 transport contracts, the declarations accessor and the scan test are in place; the KMR's grasp and release
-contracts are in, after two generic runtime fixes (see "Step 1 progress" below). Next: the KMR `move_base` pose
-shape, the decisions in "Open decisions (October 24)", then Θ and C_ρ, then the checker. Step 5 replays the four Oct 23 drafts on their v3 captures (no LLM cost): Part slippage
+contracts are in, after two generic runtime fixes (see "Step 1 progress" below).
+Late on October 24: committed `03c7c9b` (declarations, accessor, scan test), `768496a` (reach from each resource's
+own chain: arms, Conveyor and Buffer, KMR base) and `79a4584` (one joint search; composition judges robot moves by
+recorded kinematics). Overnight October 24–25: the RA checker (Alg. 1 + Eq. 12) behind `check_ra_feasibility`,
+committed `77af184` and `dcab31b`, with the replay of the four October 23 drafts; **see "Morning review" below**. Decided by the user (October 24, "yes for both"): the
+checker skips the KMR's `approached_part` as bookkeeping, like `task_ctx.*` (no primitive produces it; it ties the
+KMR's two-step pick together), and the checker is built overnight, offline only. Marking `approached_part` private
+waits for the prompt decisions.
+
+**Morning review (built overnight October 24–25, offline only; read this first).**
+
+What was built (committed `77af184`, `dcab31b`; nothing pushed, no Gazebo, no LLM calls):
+- `recovery_framework/ra_feasibility.py`: `check_event` runs Alg. 1 and Eq. 12 on one candidate event.
+  `check_candidates` checks the LLM's choice first, then its other candidates in its order.
+- Hook: `multi_turn_validated_event.handle_validated_candidates`, only when the session flag
+  `check_ra_feasibility` is on (`OutlineDraft(check_ra_feasibility=True)`; default off, so today's drafts and the UI
+  are unchanged). It applies the first feasible candidate. When none is feasible, nothing is applied and each refusal's
+  facts return as "Validation Feedback" (`constraint_code: ra_feasibility`, shown as written). A checked draft keeps
+  every turn's results in `draft.json` (`ra_feasibility_checks`) and its message says "RA-checked".
+- Model data added: the machines' parameter domains Θ in their contracts (programs from `program_options`; processes
+  and results from `process_capabilities`).
+- Tests: `test/test_ra_feasibility.py` (15) and a footprint test in `test_kinematic_reach.py`. Both focused batches
+  have exactly the baseline failures (13 in `test_recovery_delivery.py`, 7 in `test_recovery_feasibility.py`).
+
+How one event is checked:
+
+| Changed condition | How it is decided |
+| --- | --- |
+| `resource_state` | free (the DES state name) |
+| unchanged value, `task_ctx.*`, private fields, `approached_part` | nothing to derive |
+| a condition some primitive of the acting resource declares as an effect (`held_part`, `gripper_state`, `pose`, `selected_program`, a part's `current_process`, ...) | Alg. 1: those primitives are the producers. Eq. 12: one producer must make the stated value, its preconditions must hold in the projected state, its parameters must lie in their declared domain, and a stated pose must be reachable by the resource's own chain (arm) or have a free, connected footprint (mobile base) |
+| where a part or resource is: a location, a slot (`zone_1_part`, `staging_part`, a machine's `part_name`, the Conveyor's `part_location.<part>`) | capability, no producer (primitives are not connectable): pick reach where the part is (its recorded pose while it has not moved, else its place's recorded area), place reach at the slot's or place's recorded area, slot capacity in the projected state, navigation for the KMR, downstream travel for a transport |
+| a declared condition nothing above covers | refused: "no `<resource>` primitive sets `<condition>` to `<value>`" |
+| a name the resource's current model does not declare | refused: "`<name>` is not a declared variable of `<resource>`'s current model" |
+
+Replay of the four October 23 drafts (their recorded replies, every candidate checked, the recorded conversation
+continuing). The drafts use v3 names the current model dropped (`part_state`, `job_state`, `belt_stopped`); every
+event naming them is refused for that alone, so the table judges each candidate without them. 58 candidates: 50
+FEASIBLE, 6 INFEASIBLE, 2 NEEDS_CONTEXT.
+
+| Draft, event | Candidate | Verdict | Facts returned |
+| --- | --- | --- | --- |
+| Part slippage 1–3 | all 10 | FEASIBLE | ur5e-3 reaches all four Buffer zones and gear_small's measured pose; ur5e-4's retract at its current height is reachable |
+| Conveyor 1 | chosen and alt 1 | FEASIBLE | ur5e-1 reaches the M1 staging tray and M1's workholding |
+| Conveyor 1 | alt 2 `retreat_to_home_holding_part` | INFEASIBLE | `move_to_named_pose` needs `held_part` = null; ur5e-1 holds KET4 |
+| Conveyor 2–3 | all 4 | FEASIBLE | the KMR gets near M1 and reaches the M1 staging tray from a free base pose |
+| Conveyor 4 | chosen and both alts (KMR places KET4 in Buffer zone 1 from a stated base pose) | INFEASIBLE | each stated KMR footprint overlaps "ur5e-2 work area" on the floor map; no candidate base pose reached zone 1 either. A checked run would have returned this to the LLM |
+| ur5e-1 1, 4, 5 | chosen in each, and alt 0 in 5 | FEASIBLE | ur5e-1 goes home; ur5e-2 picks KET4 at the M2 staging tray and places it on Conveyor loading position 2 |
+| ur5e-1 2 | all 3 | FEASIBLE | the KMR reaches KET4 at its recorded pose in M1's workholding |
+| ur5e-1 3 | chosen: KMR places on the M2 staging tray | NEEDS_CONTEXT | no candidate base pose reached it (the grid can miss the 0.85 m gap; see "Mobile base") |
+| ur5e-1 3 | alt 1: KMR drives to M2 | FEASIBLE | a checked run would have applied this candidate instead of the LLM's choice |
+| ur5e-1 3 | alt 2: KMR places on Conveyor loading position 2 | NEEDS_CONTEXT | no candidate base pose reached it |
+| ur5e-1 5 | alt 2 `..._and_return_home_with_ur5e_2` | INFEASIBLE | one event releases KET4 and goes home; `move_to_named_pose` needs `held_part` = null, and ur5e-2 holds KET4 in the event's start state (no order inside one event; see decision 6) |
+| Machining 7 | alt 1: ur5e-2 picks KET4 at Conveyor loading position 1 | INFEASIBLE | loading position 1 lies beyond ur5e-2's kinematic chain (chain-length proof) |
+| Machining, all other candidates | 26 | FEASIBLE | the Conveyor carries KET4 from loading position 1 to 2 (downstream); M2's program change is within its options |
+
+Not shown by this replay, shown by a test: in the current part model a machine's job lives in the part's
+`current_process`. M2 resuming the job M1 paused is refused by `resume_job`'s own guard
+(`current_process` matches `{status: paused, machine: M2}`), while starting the job afresh on a machine is
+`start_job`. The v3 Machining draft states `job_state` instead, so its pause and resume events derive nothing.
+
+Decisions for the user (the checker works without them; each is one small change):
+1. Undeclared names are refused (Alg. 1 needs a declared variable to derive). The live prompt takes names from the
+   knowledge base, so this should only fire on LLM mistakes. Keep it, or report it without refusing?
+2. When the LLM's choice is refused and another candidate is feasible, the hook applies the other one (as mapped
+   on October 24: "the selected candidate first, then the others in the LLM's order"). The alternative is to always
+   return the refusal and let the LLM choose again.
+3. NEEDS_CONTEXT refuses like INFEASIBLE (the reason starts with "NEEDS_CONTEXT:"). The KMR's bounded base search is
+   the only source in the replay.
+4. `approached_part` is skipped by name in the checker (decision 3) until the model marks it private (waits for the
+   prompt decisions).
+5. Next: a live checked draft on a v5 capture (LLM cost; decision 8), the UI toggle (a `SystemBridge` change; ask
+   first), and the paper wording for Alg. 1 and Eq. 12.
+6. Every producer's preconditions are checked in the event's start state, as designed (no order and no chaining
+   inside one event). So an event that both releases a part and moves home is refused, while the same two steps as
+   two events pass. The alternative, letting one producer's effect meet another's precondition, orders primitives
+   inside the event, which is composition's job (Eq. 7).
+
+Known limits (each returns NEEDS_CONTEXT or is lenient, never a false INFEASIBLE):
+- Placing into a machine: the checker cannot tell the workholding area from the access areas, so reaching any of the
+  machine's recorded areas counts. Picking from it uses the part's recorded pose, which is exact.
+- Grasp orientations tried: top-down at four headings plus the recorded one. A tilted approach (the KMR's machine
+  access) may give NEEDS_CONTEXT.
+- A part released at a bare pose (a pose place): the support and clearance check is not built yet (NEEDS_CONTEXT).
+- Collisions and paths are composition's and the physical check's job, not this check's.
+- A KMR candidate the base search cannot settle takes about 20 s; arm checks take 0.01–4 s.
+- End-to-end check: a checked draft on the v5 Part slippage capture, fed the recorded Part slippage replies with
+  `part_state` removed, accepted all three events and finished "RA-checked" (scratch harness, outside the repo).
+
+**Checker hook points (read-only mapping, late October 24).**
+- Hook: `multi_turn_validated_event.handle_validated_candidates` passes the LLM's selected candidate to
+  `multi_turn_diagnostic.handle_event` (which builds the record, applies its end state with `apply_tentative_effects`
+  and appends it to `accepted_outline_prefix`) with no check. The checker runs there, before `handle_event`: the
+  selected candidate first, then the others in the LLM's order.
+- Refusal path: set `outline_validation_findings` (one per candidate), status `paused_after_outline_turn`, return
+  `need_revision`; that returns to the outline phase and the next prompt renders a "Validation Feedback" section. A
+  finding's `constraint_code` must be listed in `_CODE_AUTHORED_FEEDBACK`, or the prompt replaces its reason with
+  generic text. Nothing clears old findings when an event is accepted; `neighbor_end_state` is applied unchecked.
+- Toggle: `check_ra_feasibility` no longer exists (commit `05d27ea` removed it). Add it as a new session field
+  through an `OutlineDraft` argument (default False) copied into the session seed, alongside
+  `outline_diagnostic_bypass`, which stays True (turning the bypass off swaps the frozen prompt and raises in the
+  validated-event path). Do not record it under `validation_checks` (`load_draft` rejects drafts with a true value).
+  Checked outlines still cannot reach composition (`composition_readiness`, the unfilled `_outline_request`, the
+  UI's buttons); exposing the toggle in the UI changes a `SystemBridge` signature, so ask the user first.
+- Replay: no replay tool is in the repo. A reader's scratch harness (outside the repo, scratchpad `replay/`) replays
+  all four drafts from their recorded replies by replacing `draft.provider.ask_llm_structured`, with the same
+  calls (6, 7, 9, 14), events (3, 4, 5, 11) and handoffs. It must re-derive the failure grounding in memory: today's
+  code refuses the v3 captures' stored grounding (built with the old part model); never run `failure_grounding
+  --store` on them. Side by side, the checker records each candidate's verdict while the recorded conversation
+  continues; verdicts after the first refusal are hypothetical, because a live checked run would not reach that
+  state.
+- Stale names in the drafts: `part_state` (all four) and `job_state` (four Machining events) are v3 names. The
+  checker skips part fields and must say "not a declared variable of the current model" rather than refuse on a
+  physical ground. Waiting on the user: the paper wording (Alg. 1, Eq. 12, delayed
+completion); whether the outline prompt keeps showing `gripper_reach` as "workspace bounds"; switching the live
+runtime's recovery pose check (`robot_agent.py` 2639) to the joint search just before the next Gazebo run; decision 8
+(live drafts after the replay review). Step 5 replays the four Oct 23 drafts on their v3 captures (no LLM cost): Part slippage
 `draft_8149840e…`, Conveyor `draft_1b233a1b…`, ur5e-1 `draft_9aea54b0…`, Machining `draft_b89cc88b…`. New drafts on
 the v5 captures come after the checker works.
 
@@ -1133,7 +1248,7 @@ generator:
   next Gazebo run. It replaces the first choice, a top-down reach volume from `_top_down_reach_m` at every height,
   which may remain a quick first filter. The cylinder refuses ur5e-1 on the M1 staging tray (z 1.06 above its 0.90
   band) and ur5e-4's retract at its current height (z 1.289); both are within reach.
-- Conditions no primitive produces, such as the KMR's `approached_part`: free or bookkeeping.
+- Decided October 24 (decision 3): the KMR's `approached_part` is bookkeeping, skipped by the checker like `task_ctx.*`.
 - Decided October 24 (decision 5): a part resting at a pose is an empty location plus `observed_pose`, as the v5
   captures already record it.
 - Paper wording, not changed yet: Alg. 1 would read "primitives whose declared effects produce v′_i" instead of
