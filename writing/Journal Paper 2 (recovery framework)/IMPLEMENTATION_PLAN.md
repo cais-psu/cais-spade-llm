@@ -874,8 +874,30 @@ the v5 captures come after the checker works.
       might find it. A refusal there goes back to the LLM as feedback. Nominally ur5e-2, not the KMR, uses that
       tray.
     - Tests added to `test/test_kinematic_reach.py`; both test batches unchanged.
-  - Next: use the solver in the composition check, the live runtime's recovery pose check (replacing the
-    `gripper_reach` cylinder) and the checker. A gripper-point target on a UR5e adds the
+  - One solver, and the composition check (October 24, user approved, uncommitted):
+    - The repo already had an equivalent bounded search, `kmr_recovery._calculate_cartesian_joints`, behind
+      `recovery_capability._cartesian_joint_witness`, reading each owner's recorded kinematics with joint bounds
+      from `physical_evidence.resource_models`. It is now `kinematic_reach.bounded_joint_search`, moved unchanged
+      (its old names in `kmr_recovery` and `kmr_motion.bounded_joints` remain as aliases); `kinematic_reach.reach`
+      wraps it with the chain bound and fixed extra starting points, and the duplicate search and the URDF limit
+      reader were removed. Joint bounds come from the recorded configurations (`position_bounds`).
+    - Outcomes (user, option a): FEASIBLE with a joint witness; INFEASIBLE only when the chain bound proves the
+      target beyond the whole chain; NEEDS_CONTEXT when the bounded search finds nothing or data is missing, since
+      a finite search does not prove a pose unreachable.
+    - Composition: `check_robot_primitive_capability` (live robots and saved owners) judges `move_cartesian`,
+      `move_pose` and `move_relative` with the joint witness instead of the `gripper_reach` cylinder; a missing
+      orientation takes the recorded current one, as the controller keeps it. The saved owner reads the capture's
+      physical evidence when the composition passes none, and its fallback path uses the same witness.
+    - On the Part slippage capture, through the saved owners: ur5e-4's retract at its current height is FEASIBLE
+      (the cylinder refused it), ur5e-3's flange over Buffer zone 1 is FEASIBLE, a target 2 m away is INFEASIBLE by
+      the bound.
+    - Tests updated for the new behavior: the saved Cartesian capability test now uses recorded kinematics, and
+      the joint-cache test expects the bound's proof when a moved base puts its full-extension pose out of reach.
+      Both test batches unchanged from the baseline.
+  - Still on the `gripper_reach` cylinder: the live runtime's recovery pose check (`robot_agent.py` 2639, next,
+    verified at the next Gazebo run), the old outline motion check (`check_outline_motion_capabilities`), nominal
+    task steps (`robot_task_runtime.py`) and the product-order planner. The outline prompt still shows
+    `gripper_reach` to the LLM as the robot's "workspace bounds" (frozen prompt; paper wording question). A gripper-point target on a UR5e adds the
     0.218 m TCP offset to its `tool0` reference.
 - Noticed, out of scope: the machine automaton declares `resume_job` from paused unconditionally
   (`environment_models._declare_machine_jobs`), while `MachineJobs.command` requires `resume_after_reload` for every

@@ -116,7 +116,9 @@ def test_candidate_joint_calculation_cache_rechecks_evidence_and_changed_geometr
         assert check()['evidence']['joint_positions'][0] != 999
         physical['resource_models']['KMR']['configuration']['root_xyz'][0] += .02
         changed = check()
-        assert changed['feasibility_status'] == 'NEEDS_CONTEXT' and len(calls) > count
+        # The recorded pose is at the arm's full extension, so the moved base puts it beyond the whole chain:
+        # proven unreachable without a cached answer or a search.
+        assert changed['feasibility_status'] == 'INFEASIBLE' and len(calls) == count
         physical['resource_models']['KMR']['configuration']['root_xyz'][0] -= .02
     finally:
         _cartesian_joint_calculation_cache.reset(token)

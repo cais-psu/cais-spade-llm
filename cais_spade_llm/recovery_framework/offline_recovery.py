@@ -254,6 +254,9 @@ class SavedRecoveryResource:
         if self._entry.get("resource_type") == "robot" and resource_evidence is not None:
             from cais_spade_llm.resources.robot.recovery_capability import check_robot_primitive_capability
 
+            # The owner's recorded kinematics live in the capture's physical evidence.
+            if not (physical_evidence or {}).get("resource_models"):
+                physical_evidence = self._observations.get("physical_evidence") or physical_evidence
             checked = check_robot_primitive_capability(primitive=primitive, params=params, task=task,
                 recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
                 static_capabilities=self.static_capabilities, primitive_catalog=catalog, resource_jid=self.jid,
@@ -324,18 +327,17 @@ class SavedRecoveryResource:
             if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
                    for value in pose.values()):
                 return result("NEEDS_CONTEXT", "Cartesian capability requires explicit finite x, y, z")
-            declarations = [row["gripper_reach"] for row in (recovery_snapshot, self.static_capabilities,
-                            self._entry.get("recovery_adapter") or {}) if "gripper_reach" in row]
-            if (not declarations or any(row != declarations[0] for row in declarations[1:])
-                    or not isinstance(declarations[0], dict) or declarations[0].get("frame") != "world"):
-                return result("NEEDS_CONTEXT", "Recorded gripper_reach declarations are missing or conflict")
-            from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
+            from cais_spade_llm.resources.robot.recovery_capability import _cartesian_joint_witness
 
-            error = RobotAgent._recovery_pose_gripper_reach_error(pose, declarations[0])
-            status = ("INFEASIBLE" if error.startswith("pose is outside gripper_reach:")
-                      else "NEEDS_CONTEXT") if error else "FEASIBLE"
-            return result(status, error or "Bound pose is inside recorded gripper_reach",
-                          checked_pose=pose, pose_frame="world", gripper_reach=declarations[0])
+            # Reach is the owner's recorded kinematics; without a stated orientation the tool keeps its own.
+            quaternion = ("qx", "qy", "qz", "qw")
+            current = recovery_snapshot.get("current_pose") or {}
+            orientation = params if all(axis in params for axis in quaternion) else current
+            pose.update({axis: orientation[axis] for axis in quaternion if axis in orientation})
+            checked = _cartesian_joint_witness(pose=pose, resource_jid=self.jid, recovery_snapshot=recovery_snapshot,
+                resource_evidence=self.get_recovery_resource_evidence(),
+                physical_evidence=self._observations.get("physical_evidence") or {})
+            return {**checked, "evidence": {**evidence, **checked.get("evidence", {})}}
         return result("NEEDS_CONTEXT", "This primitive requires capability evidence not available in the saved capture")
 
     def get_current_pose(self) -> dict:

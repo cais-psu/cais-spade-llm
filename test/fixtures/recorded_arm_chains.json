@@ -1,5 +1,5 @@
 {
- "source": "v5 Part slippage capture capture_ad64bf1628564c3fa7f928b7bdebd5d9: each resource's recorded continuous_motion_configuration, joint positions and reference pose, with limits from its robot_description",
+ "source": "v5 Part slippage capture capture_ad64bf1628564c3fa7f928b7bdebd5d9: each arm's recorded physical_evidence.resource_models configuration and named joint poses, its joint positions and its reference link pose",
  "arms": {
   "ur5e-3": {
    "configuration": {
@@ -24,26 +24,12 @@
      "ur5e_3_wrist_3_joint"
     ],
     "reference_link": "ur5e_3_tool0",
-    "fixed_joint_positions": {
-     "ur5e_3_rg2_finger_joint": 0.5756832064300723,
-     "ur5e_3_rg2_left_inner_finger_joint": 0.5749256544049588,
-     "ur5e_3_rg2_finger_width": 0.01999982860320067,
-     "ur5e_3_rg2_left_inner_knuckle_joint": -0.5753864767965444,
-     "ur5e_3_rg2_right_inner_knuckle_joint": -0.5744877545198461,
-     "ur5e_3_rg2_right_outer_knuckle_joint": -0.5746661459521727,
-     "ur5e_3_rg2_right_inner_finger_joint": 0.5750354713788988
-    },
     "joints": [
      {
       "name": "ur5e_3_base_link-base_link_inertia",
+      "type": "fixed",
       "parent": "ur5e_3_base_link",
       "child": "ur5e_3_base_link_inertia",
-      "type": "fixed",
-      "axis": [
-       1.0,
-       0.0,
-       0.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -53,18 +39,18 @@
        0.0,
        0.0,
        3.141592653589793
+      ],
+      "axis": [
+       1.0,
+       0.0,
+       0.0
       ]
      },
      {
       "name": "ur5e_3_shoulder_pan_joint",
+      "type": "revolute",
       "parent": "ur5e_3_base_link_inertia",
       "child": "ur5e_3_shoulder_link",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -75,6 +61,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        -6.283185307179586,
        6.283185307179586
@@ -82,14 +73,9 @@
      },
      {
       "name": "ur5e_3_shoulder_lift_joint",
+      "type": "revolute",
       "parent": "ur5e_3_shoulder_link",
       "child": "ur5e_3_upper_arm_link",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -100,6 +86,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        -6.283185307179586,
        6.283185307179586
@@ -107,14 +98,9 @@
      },
      {
       "name": "ur5e_3_elbow_joint",
+      "type": "revolute",
       "parent": "ur5e_3_upper_arm_link",
       "child": "ur5e_3_forearm_link",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        -0.425,
        0.0,
@@ -125,6 +111,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        -3.141592653589793,
        3.141592653589793
@@ -132,14 +123,9 @@
      },
      {
       "name": "ur5e_3_wrist_1_joint",
+      "type": "revolute",
       "parent": "ur5e_3_forearm_link",
       "child": "ur5e_3_wrist_1_link",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        -0.3922,
        0.0,
@@ -150,6 +136,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        -6.283185307179586,
        6.283185307179586
@@ -157,14 +148,9 @@
      },
      {
       "name": "ur5e_3_wrist_2_joint",
+      "type": "revolute",
       "parent": "ur5e_3_wrist_1_link",
       "child": "ur5e_3_wrist_2_link",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        0.0,
        -0.0997,
@@ -175,6 +161,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        -6.283185307179586,
        6.283185307179586
@@ -182,14 +173,9 @@
      },
      {
       "name": "ur5e_3_wrist_3_joint",
+      "type": "revolute",
       "parent": "ur5e_3_wrist_2_link",
       "child": "ur5e_3_wrist_3_link",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        0.0,
        0.0996,
@@ -200,6 +186,11 @@
        3.141592653589793,
        3.141592653589793
       ],
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        -6.283185307179586,
        6.283185307179586
@@ -207,14 +198,9 @@
      },
      {
       "name": "ur5e_3_wrist_3_link-ft_frame",
+      "type": "fixed",
       "parent": "ur5e_3_wrist_3_link",
       "child": "ur5e_3_ft_frame",
-      "type": "fixed",
-      "axis": [
-       1.0,
-       0.0,
-       0.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -224,18 +210,18 @@
        3.141592653589793,
        0.0,
        0.0
-      ]
-     },
-     {
-      "name": "ur5e_3_base_link-base_fixed_joint",
-      "parent": "ur5e_3_base_link",
-      "child": "ur5e_3_base",
-      "type": "fixed",
+      ],
       "axis": [
        1.0,
        0.0,
        0.0
-      ],
+      ]
+     },
+     {
+      "name": "ur5e_3_base_link-base_fixed_joint",
+      "type": "fixed",
+      "parent": "ur5e_3_base_link",
+      "child": "ur5e_3_base",
       "xyz": [
        0.0,
        0.0,
@@ -245,18 +231,18 @@
        0.0,
        0.0,
        3.141592653589793
-      ]
-     },
-     {
-      "name": "ur5e_3_wrist_3-flange",
-      "parent": "ur5e_3_wrist_3_link",
-      "child": "ur5e_3_flange",
-      "type": "fixed",
+      ],
       "axis": [
        1.0,
        0.0,
        0.0
-      ],
+      ]
+     },
+     {
+      "name": "ur5e_3_wrist_3-flange",
+      "type": "fixed",
+      "parent": "ur5e_3_wrist_3_link",
+      "child": "ur5e_3_flange",
       "xyz": [
        0.0,
        0.0,
@@ -266,18 +252,18 @@
        0.0,
        -1.5707963267948966,
        -1.5707963267948966
-      ]
-     },
-     {
-      "name": "ur5e_3_flange-tool0",
-      "parent": "ur5e_3_flange",
-      "child": "ur5e_3_tool0",
-      "type": "fixed",
+      ],
       "axis": [
        1.0,
        0.0,
        0.0
-      ],
+      ]
+     },
+     {
+      "name": "ur5e_3_flange-tool0",
+      "type": "fixed",
+      "parent": "ur5e_3_flange",
+      "child": "ur5e_3_tool0",
       "xyz": [
        0.0,
        0.0,
@@ -287,18 +273,18 @@
        1.5707963267948966,
        0.0,
        1.5707963267948966
-      ]
-     },
-     {
-      "name": "ur5e_3_gripper_mount_joint",
-      "parent": "ur5e_3_tool0",
-      "child": "ur5e_3_rg2_onrobot_base_link",
-      "type": "fixed",
+      ],
       "axis": [
        1.0,
        0.0,
        0.0
-      ],
+      ]
+     },
+     {
+      "name": "ur5e_3_gripper_mount_joint",
+      "type": "fixed",
+      "parent": "ur5e_3_tool0",
+      "child": "ur5e_3_rg2_onrobot_base_link",
       "xyz": [
        0.0,
        0.0,
@@ -308,18 +294,18 @@
        0.0,
        0.0,
        -1.57079632679
-      ]
-     },
-     {
-      "name": "ur5e_3_rg2_tcp_joint",
-      "parent": "ur5e_3_rg2_onrobot_base_link",
-      "child": "ur5e_3_rg2_gripper_tcp",
-      "type": "fixed",
+      ],
       "axis": [
        1.0,
        0.0,
        0.0
-      ],
+      ]
+     },
+     {
+      "name": "ur5e_3_rg2_tcp_joint",
+      "type": "fixed",
+      "parent": "ur5e_3_rg2_onrobot_base_link",
+      "child": "ur5e_3_rg2_gripper_tcp",
       "xyz": [
        0.0,
        0.0,
@@ -329,18 +315,18 @@
        0.0,
        0.0,
        0.0
+      ],
+      "axis": [
+       1.0,
+       0.0,
+       0.0
       ]
      },
      {
       "name": "ur5e_3_rg2_finger_width",
+      "type": "prismatic",
       "parent": "ur5e_3_rg2_onrobot_base_link",
       "child": "ur5e_3_rg2_finger_width_mock_link",
-      "type": "prismatic",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -351,22 +337,22 @@
        0.0,
        0.0
       ],
-      "frozen_position": 0.01999982860320067,
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        0.0,
        0.11
-      ]
+      ],
+      "frozen_position": 0.01999982860320067
      },
      {
       "name": "ur5e_3_rg2_finger_joint",
+      "type": "revolute",
       "parent": "ur5e_3_rg2_onrobot_base_link",
       "child": "ur5e_3_rg2_left_outer_knuckle",
-      "type": "revolute",
-      "axis": [
-       -1.0,
-       0.0,
-       0.0
-      ],
       "xyz": [
        0.0,
        -0.017178,
@@ -377,22 +363,22 @@
        0.0,
        0.0
       ],
-      "frozen_position": 0.5756832064300723,
-      "position_bounds": [
-       -0.558505,
-       0.785398
-      ]
-     },
-     {
-      "name": "ur5e_3_rg2_left_inner_knuckle_joint",
-      "parent": "ur5e_3_rg2_onrobot_base_link",
-      "child": "ur5e_3_rg2_left_inner_knuckle",
-      "type": "revolute",
       "axis": [
-       1.0,
+       -1.0,
        0.0,
        0.0
       ],
+      "position_bounds": [
+       -0.558505,
+       0.785398
+      ],
+      "frozen_position": 0.5756832064300723
+     },
+     {
+      "name": "ur5e_3_rg2_left_inner_knuckle_joint",
+      "type": "revolute",
+      "parent": "ur5e_3_rg2_onrobot_base_link",
+      "child": "ur5e_3_rg2_left_inner_knuckle",
       "xyz": [
        0.0,
        -0.007678,
@@ -403,22 +389,22 @@
        0.0,
        0.0
       ],
-      "frozen_position": -0.5753864767965444,
-      "position_bounds": [
-       -0.785398,
-       0.785398
-      ]
-     },
-     {
-      "name": "ur5e_3_rg2_left_inner_finger_joint",
-      "parent": "ur5e_3_rg2_left_outer_knuckle",
-      "child": "ur5e_3_rg2_left_inner_finger",
-      "type": "revolute",
       "axis": [
        1.0,
        0.0,
        0.0
       ],
+      "position_bounds": [
+       -0.785398,
+       0.785398
+      ],
+      "frozen_position": -0.5753864767965444
+     },
+     {
+      "name": "ur5e_3_rg2_left_inner_finger_joint",
+      "type": "revolute",
+      "parent": "ur5e_3_rg2_left_outer_knuckle",
+      "child": "ur5e_3_rg2_left_inner_finger",
       "xyz": [
        0.0,
        -0.039592,
@@ -429,22 +415,22 @@
        0.0,
        0.0
       ],
-      "frozen_position": 0.5749256544049588,
-      "position_bounds": [
-       -0.872665,
-       0.872665
-      ]
-     },
-     {
-      "name": "ur5e_3_rg2_left_finger_tip_joint",
-      "parent": "ur5e_3_rg2_left_inner_finger",
-      "child": "ur5e_3_rg2_left_finger_tip",
-      "type": "fixed",
       "axis": [
        1.0,
        0.0,
        0.0
       ],
+      "position_bounds": [
+       -0.872665,
+       0.872665
+      ],
+      "frozen_position": 0.5749256544049588
+     },
+     {
+      "name": "ur5e_3_rg2_left_finger_tip_joint",
+      "type": "fixed",
+      "parent": "ur5e_3_rg2_left_inner_finger",
+      "child": "ur5e_3_rg2_left_finger_tip",
       "xyz": [
        0.0,
        0.019,
@@ -454,18 +440,18 @@
        0.0,
        0.0,
        0.0
-      ]
-     },
-     {
-      "name": "ur5e_3_rg2_right_outer_knuckle_joint",
-      "parent": "ur5e_3_rg2_onrobot_base_link",
-      "child": "ur5e_3_rg2_right_outer_knuckle",
-      "type": "revolute",
+      ],
       "axis": [
        1.0,
        0.0,
        0.0
-      ],
+      ]
+     },
+     {
+      "name": "ur5e_3_rg2_right_outer_knuckle_joint",
+      "type": "revolute",
+      "parent": "ur5e_3_rg2_onrobot_base_link",
+      "child": "ur5e_3_rg2_right_outer_knuckle",
       "xyz": [
        0.0,
        0.017178,
@@ -476,22 +462,22 @@
        0.0,
        3.141592653589793
       ],
-      "frozen_position": -0.5746661459521727,
-      "position_bounds": [
-       -0.785398,
-       0.785398
-      ]
-     },
-     {
-      "name": "ur5e_3_rg2_right_inner_knuckle_joint",
-      "parent": "ur5e_3_rg2_onrobot_base_link",
-      "child": "ur5e_3_rg2_right_inner_knuckle",
-      "type": "revolute",
       "axis": [
        1.0,
        0.0,
        0.0
       ],
+      "position_bounds": [
+       -0.785398,
+       0.785398
+      ],
+      "frozen_position": -0.5746661459521727
+     },
+     {
+      "name": "ur5e_3_rg2_right_inner_knuckle_joint",
+      "type": "revolute",
+      "parent": "ur5e_3_rg2_onrobot_base_link",
+      "child": "ur5e_3_rg2_right_inner_knuckle",
       "xyz": [
        0.0,
        0.007678,
@@ -502,22 +488,22 @@
        0.0,
        -3.141592653589793
       ],
-      "frozen_position": -0.5744877545198461,
-      "position_bounds": [
-       -0.785398,
-       0.785398
-      ]
-     },
-     {
-      "name": "ur5e_3_rg2_right_inner_finger_joint",
-      "parent": "ur5e_3_rg2_right_outer_knuckle",
-      "child": "ur5e_3_rg2_right_inner_finger",
-      "type": "revolute",
       "axis": [
        1.0,
        0.0,
        0.0
       ],
+      "position_bounds": [
+       -0.785398,
+       0.785398
+      ],
+      "frozen_position": -0.5744877545198461
+     },
+     {
+      "name": "ur5e_3_rg2_right_inner_finger_joint",
+      "type": "revolute",
+      "parent": "ur5e_3_rg2_right_outer_knuckle",
+      "child": "ur5e_3_rg2_right_inner_finger",
       "xyz": [
        0.0,
        -0.039592,
@@ -528,22 +514,22 @@
        0.0,
        0.0
       ],
-      "frozen_position": 0.5750354713788988,
-      "position_bounds": [
-       -0.872665,
-       0.872665
-      ]
-     },
-     {
-      "name": "ur5e_3_rg2_right_finger_tip_joint",
-      "parent": "ur5e_3_rg2_right_inner_finger",
-      "child": "ur5e_3_rg2_right_finger_tip",
-      "type": "fixed",
       "axis": [
        1.0,
        0.0,
        0.0
       ],
+      "position_bounds": [
+       -0.872665,
+       0.872665
+      ],
+      "frozen_position": 0.5750354713788988
+     },
+     {
+      "name": "ur5e_3_rg2_right_finger_tip_joint",
+      "type": "fixed",
+      "parent": "ur5e_3_rg2_right_inner_finger",
+      "child": "ur5e_3_rg2_right_finger_tip",
       "xyz": [
        0.0,
        0.019,
@@ -553,35 +539,34 @@
        0.0,
        0.0,
        0.0
+      ],
+      "axis": [
+       1.0,
+       0.0,
+       0.0
       ]
      }
     ]
    },
-   "limits": {
-    "ur5e_3_shoulder_pan_joint": [
-     -6.283185307179586,
-     6.283185307179586
-    ],
-    "ur5e_3_shoulder_lift_joint": [
-     -6.283185307179586,
-     6.283185307179586
-    ],
-    "ur5e_3_elbow_joint": [
-     -3.141592653589793,
-     3.141592653589793
-    ],
-    "ur5e_3_wrist_1_joint": [
-     -6.283185307179586,
-     6.283185307179586
-    ],
-    "ur5e_3_wrist_2_joint": [
-     -6.283185307179586,
-     6.283185307179586
-    ],
-    "ur5e_3_wrist_3_joint": [
-     -6.283185307179586,
-     6.283185307179586
-    ]
+   "named_joint_poses": {
+    "home": {
+     "joint_names": [
+      "ur5e_3_shoulder_pan_joint",
+      "ur5e_3_shoulder_lift_joint",
+      "ur5e_3_elbow_joint",
+      "ur5e_3_wrist_1_joint",
+      "ur5e_3_wrist_2_joint",
+      "ur5e_3_wrist_3_joint"
+     ],
+     "positions": [
+      2.232023449619252,
+      -1.5960064086763361,
+      1.615863605277993,
+      -1.592172956911188,
+      -1.5690505595531368,
+      2.232159020791153
+     ]
+    }
    },
    "joint_positions": [
     -0.4297671036354087,
@@ -625,26 +610,12 @@
      "joint_a7"
     ],
     "reference_link": "rg2_gripper_tcp",
-    "fixed_joint_positions": {
-     "KMR_rg2_finger_width": 0.1099999999999999,
-     "rg2_finger_joint": -0.3568194499998217,
-     "rg2_left_inner_finger_joint": -0.3568194499998216,
-     "rg2_left_inner_knuckle_joint": 0.35681944999988247,
-     "rg2_right_inner_knuckle_joint": 0.3568194500000006,
-     "rg2_right_outer_knuckle_joint": 0.3568194499990689,
-     "rg2_right_inner_finger_joint": -0.3568194499990691
-    },
     "joints": [
      {
       "name": "iiwa_root_joint",
+      "type": "fixed",
       "parent": "KMR_base_link",
       "child": "iiwa_link_0",
-      "type": "fixed",
-      "axis": [
-       1.0,
-       0.0,
-       0.0
-      ],
       "xyz": [
        -0.25,
        0.0,
@@ -654,18 +625,18 @@
        0.0,
        0.0,
        1.57079632679
+      ],
+      "axis": [
+       1.0,
+       0.0,
+       0.0
       ]
      },
      {
       "name": "joint_a1",
+      "type": "revolute",
       "parent": "iiwa_link_0",
       "child": "iiwa_link_1",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -676,6 +647,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        -2.9668,
        2.9668
@@ -683,14 +659,9 @@
      },
      {
       "name": "joint_a2",
+      "type": "revolute",
       "parent": "iiwa_link_1",
       "child": "iiwa_link_2",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       1.0,
-       0.0
-      ],
       "xyz": [
        -0.00043624,
        0.0,
@@ -701,6 +672,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       1.0,
+       0.0
+      ],
       "position_bounds": [
        -2.0942,
        2.0942
@@ -708,14 +684,9 @@
      },
      {
       "name": "joint_a3",
+      "type": "revolute",
       "parent": "iiwa_link_2",
       "child": "iiwa_link_3",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -726,6 +697,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        -2.9668,
        2.9668
@@ -733,14 +709,9 @@
      },
      {
       "name": "joint_a4",
+      "type": "revolute",
       "parent": "iiwa_link_3",
       "child": "iiwa_link_4",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       -1.0,
-       0.0
-      ],
       "xyz": [
        0.00043624,
        0.0,
@@ -751,6 +722,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       -1.0,
+       0.0
+      ],
       "position_bounds": [
        -2.0942,
        2.0942
@@ -758,14 +734,9 @@
      },
      {
       "name": "joint_a5",
+      "type": "revolute",
       "parent": "iiwa_link_4",
       "child": "iiwa_link_5",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -776,6 +747,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        -2.9668,
        2.9668
@@ -783,14 +759,9 @@
      },
      {
       "name": "joint_a6",
+      "type": "revolute",
       "parent": "iiwa_link_5",
       "child": "iiwa_link_6",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       1.0,
-       0.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -801,6 +772,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       1.0,
+       0.0
+      ],
       "position_bounds": [
        -2.0942,
        2.0942
@@ -808,14 +784,9 @@
      },
      {
       "name": "joint_a7",
+      "type": "revolute",
       "parent": "iiwa_link_6",
       "child": "iiwa_link_7",
-      "type": "revolute",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -826,6 +797,11 @@
        0.0,
        0.0
       ],
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        -3.0541,
        3.0541
@@ -833,14 +809,9 @@
      },
      {
       "name": "joint_a7-tool0",
+      "type": "fixed",
       "parent": "iiwa_link_7",
       "child": "iiwa_tool0",
-      "type": "fixed",
-      "axis": [
-       1.0,
-       0.0,
-       0.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -850,18 +821,18 @@
        0.0,
        0.0,
        0.0
-      ]
-     },
-     {
-      "name": "rg2_adapter_joint",
-      "parent": "iiwa_tool0",
-      "child": "rg2_adapter",
-      "type": "fixed",
+      ],
       "axis": [
        1.0,
        0.0,
        0.0
-      ],
+      ]
+     },
+     {
+      "name": "rg2_adapter_joint",
+      "type": "fixed",
+      "parent": "iiwa_tool0",
+      "child": "rg2_adapter",
       "xyz": [
        0.0,
        0.0,
@@ -869,20 +840,20 @@
       ],
       "rpy": [
        0.0,
+       0.0,
+       0.0
+      ],
+      "axis": [
+       1.0,
        0.0,
        0.0
       ]
      },
      {
       "name": "rg2_mount_joint",
+      "type": "fixed",
       "parent": "rg2_adapter",
       "child": "rg2_base_link",
-      "type": "fixed",
-      "axis": [
-       1.0,
-       0.0,
-       0.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -892,18 +863,18 @@
        0.0,
        0.0,
        0.0
+      ],
+      "axis": [
+       1.0,
+       0.0,
+       0.0
       ]
      },
      {
       "name": "KMR_rg2_finger_width",
+      "type": "prismatic",
       "parent": "rg2_base_link",
       "child": "KMR_rg2_finger_width_mock_link",
-      "type": "prismatic",
-      "axis": [
-       0.0,
-       0.0,
-       1.0
-      ],
       "xyz": [
        0.0,
        0.0,
@@ -914,22 +885,22 @@
        0.0,
        0.0
       ],
-      "frozen_position": 0.1099999999999999,
+      "axis": [
+       0.0,
+       0.0,
+       1.0
+      ],
       "position_bounds": [
        0.015,
        0.11
-      ]
+      ],
+      "frozen_position": 0.1099999999999999
      },
      {
       "name": "rg2_finger_joint",
+      "type": "revolute",
       "parent": "rg2_base_link",
       "child": "rg2_left_outer_knuckle",
-      "type": "revolute",
-      "axis": [
-       -1.0,
-       0.0,
-       0.0
-      ],
       "xyz": [
        0.0,
        -0.017178,
@@ -940,22 +911,22 @@
        0.0,
        0.0
       ],
-      "frozen_position": -0.3568194499998217,
-      "position_bounds": [
-       -0.558505,
-       0.785398
-      ]
-     },
-     {
-      "name": "rg2_right_outer_knuckle_joint",
-      "parent": "rg2_base_link",
-      "child": "rg2_right_outer_knuckle",
-      "type": "revolute",
       "axis": [
-       1.0,
+       -1.0,
        0.0,
        0.0
       ],
+      "position_bounds": [
+       -0.558505,
+       0.785398
+      ],
+      "frozen_position": -0.3568194499998217
+     },
+     {
+      "name": "rg2_right_outer_knuckle_joint",
+      "type": "revolute",
+      "parent": "rg2_base_link",
+      "child": "rg2_right_outer_knuckle",
       "xyz": [
        0.0,
        0.017178,
@@ -966,22 +937,22 @@
        0.0,
        3.14159265359
       ],
-      "frozen_position": 0.3568194499990689,
-      "position_bounds": [
-       -0.785398,
-       0.785398
-      ]
-     },
-     {
-      "name": "rg2_left_inner_knuckle_joint",
-      "parent": "rg2_base_link",
-      "child": "rg2_left_inner_knuckle",
-      "type": "revolute",
       "axis": [
        1.0,
        0.0,
        0.0
       ],
+      "position_bounds": [
+       -0.785398,
+       0.785398
+      ],
+      "frozen_position": 0.3568194499990689
+     },
+     {
+      "name": "rg2_left_inner_knuckle_joint",
+      "type": "revolute",
+      "parent": "rg2_base_link",
+      "child": "rg2_left_inner_knuckle",
       "xyz": [
        0.0,
        -0.007678,
@@ -992,22 +963,22 @@
        0.0,
        0.0
       ],
-      "frozen_position": 0.35681944999988247,
-      "position_bounds": [
-       -0.785398,
-       0.785398
-      ]
-     },
-     {
-      "name": "rg2_right_inner_knuckle_joint",
-      "parent": "rg2_base_link",
-      "child": "rg2_right_inner_knuckle",
-      "type": "revolute",
       "axis": [
        1.0,
        0.0,
        0.0
       ],
+      "position_bounds": [
+       -0.785398,
+       0.785398
+      ],
+      "frozen_position": 0.35681944999988247
+     },
+     {
+      "name": "rg2_right_inner_knuckle_joint",
+      "type": "revolute",
+      "parent": "rg2_base_link",
+      "child": "rg2_right_inner_knuckle",
       "xyz": [
        0.0,
        0.007678,
@@ -1018,22 +989,22 @@
        0.0,
        -3.14159265359
       ],
-      "frozen_position": 0.3568194500000006,
+      "axis": [
+       1.0,
+       0.0,
+       0.0
+      ],
       "position_bounds": [
        -0.785398,
        0.785398
-      ]
+      ],
+      "frozen_position": 0.3568194500000006
      },
      {
       "name": "rg2_left_inner_finger_joint",
+      "type": "revolute",
       "parent": "rg2_left_outer_knuckle",
       "child": "rg2_left_inner_finger",
-      "type": "revolute",
-      "axis": [
-       1.0,
-       0.0,
-       0.0
-      ],
       "xyz": [
        0.0,
        -0.039592,
@@ -1044,22 +1015,22 @@
        0.0,
        0.0
       ],
-      "frozen_position": -0.3568194499998216,
+      "axis": [
+       1.0,
+       0.0,
+       0.0
+      ],
       "position_bounds": [
        -0.872665,
        0.872665
-      ]
+      ],
+      "frozen_position": -0.3568194499998216
      },
      {
       "name": "rg2_right_inner_finger_joint",
+      "type": "revolute",
       "parent": "rg2_right_outer_knuckle",
       "child": "rg2_right_inner_finger",
-      "type": "revolute",
-      "axis": [
-       1.0,
-       0.0,
-       0.0
-      ],
       "xyz": [
        0.0,
        -0.039592,
@@ -1070,22 +1041,22 @@
        0.0,
        0.0
       ],
-      "frozen_position": -0.3568194499990691,
-      "position_bounds": [
-       -0.872665,
-       0.872665
-      ]
-     },
-     {
-      "name": "rg2_tcp_joint",
-      "parent": "rg2_base_link",
-      "child": "rg2_gripper_tcp",
-      "type": "fixed",
       "axis": [
        1.0,
        0.0,
        0.0
       ],
+      "position_bounds": [
+       -0.872665,
+       0.872665
+      ],
+      "frozen_position": -0.3568194499990691
+     },
+     {
+      "name": "rg2_tcp_joint",
+      "type": "fixed",
+      "parent": "rg2_base_link",
+      "child": "rg2_gripper_tcp",
       "xyz": [
        0.0,
        0.0,
@@ -1095,40 +1066,16 @@
        0.0,
        0.0,
        0.0
+      ],
+      "axis": [
+       1.0,
+       0.0,
+       0.0
       ]
      }
     ]
    },
-   "limits": {
-    "joint_a1": [
-     -2.9668,
-     2.9668
-    ],
-    "joint_a2": [
-     -2.0942,
-     2.0942
-    ],
-    "joint_a3": [
-     -2.9668,
-     2.9668
-    ],
-    "joint_a4": [
-     -2.0942,
-     2.0942
-    ],
-    "joint_a5": [
-     -2.9668,
-     2.9668
-    ],
-    "joint_a6": [
-     -2.0942,
-     2.0942
-    ],
-    "joint_a7": [
-     -3.0541,
-     3.0541
-    ]
-   },
+   "named_joint_poses": {},
    "joint_positions": [
     -7.965669368559247e-08,
     0.26379006890547974,

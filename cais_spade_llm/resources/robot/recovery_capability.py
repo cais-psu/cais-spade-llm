@@ -705,6 +705,7 @@ def _cartesian_joint_witness(*, pose: dict, resource_jid: str, recovery_snapshot
     from cais_spade_llm.recovery_framework.kmr_motion import bounded_joints
     from cais_spade_llm.recovery_framework.kmr_recovery import _calculate_cartesian_joints
     from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms, representative_pose
+    from cais_spade_llm.resources.kinematic_reach import beyond_reach, fixed_starts
 
     root = f"/resources/{resource_jid}/resource_evidence"
     missing = {"allowed": False, "feasibility_status": "NEEDS_CONTEXT",
@@ -734,8 +735,11 @@ def _cartesian_joint_witness(*, pose: dict, resource_jid: str, recovery_snapshot
             return {**missing, "reason": "Recorded owner joint limits are incomplete"}
         if not bounded_joints(names, joints, limits):
             return {**missing, "reason": "Recorded owner joint configuration conflicts with its limits"}
+        if beyond_reach(config, target):
+            return {**missing, "feasibility_status": "INFEASIBLE", "context_requests": [],
+                    "reason": "The target lies beyond the owner's whole kinematic chain"}
         seeds = [joints, *(value.get('positions') if isinstance(value, dict) else value
-                           for value in model.get('named_joint_poses', {}).values())]
+                           for value in model.get('named_joint_poses', {}).values()), *fixed_starts(names, limits)]
         calculated = _calculate_cartesian_joints(config, names, target, seeds, limits)
         if calculated is None:
             return {**missing, "reason": "Bounded endpoint search found no verified joint witness; reachability is unresolved"}
@@ -937,22 +941,15 @@ def check_robot_primitive_capability(
         pose = {axis: current[axis] + params["d" + axis] for axis in ("x", "y", "z")}
     if not all(_number(value) for value in pose.values()):
         return result("NEEDS_CONTEXT", "Cartesian capability requires explicit finite x, y, z")
-    reach = static_capabilities.get("gripper_reach")
-    if reach is None:
-        pose.update({axis: params[axis] for axis in ("qx", "qy", "qz", "qw") if axis in params})
-        if primitive == "move_relative":
-            pose.update({axis: current[axis] for axis in ("qx", "qy", "qz", "qw") if axis in current})
-        checked = _cartesian_joint_witness(pose=pose, resource_jid=resource_jid,
-            recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
-            physical_evidence=physical_evidence or {})
-        return {**checked, "evidence": {**evidence, **checked["evidence"]}}
-    if not isinstance(reach, dict) or reach.get("frame") != frame:
-        return result("NEEDS_CONTEXT", "Recorded gripper_reach is unavailable", refs=[f"/resources/{resource_jid}/static_capabilities/gripper_reach"])
-    from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
-
-    error = RobotAgent._recovery_pose_gripper_reach_error(pose, reach)
-    return result(("INFEASIBLE" if error.startswith("pose is outside gripper_reach:") else "NEEDS_CONTEXT") if error else "FEASIBLE",
-                  error or "Bound pose is inside recorded gripper_reach", checked_pose=pose, pose_frame=frame, gripper_reach=reach)
+    # Reach is the owner's own kinematics, not a declared envelope: some joint configuration within the
+    # recorded bounds puts the tool there. Without a stated orientation the controller keeps its current one.
+    quaternion = ("qx", "qy", "qz", "qw")
+    orientation = params if all(axis in params for axis in quaternion) else _pose_mapping(recovery_snapshot.get("current_pose"))
+    pose.update({axis: orientation[axis] for axis in quaternion if axis in orientation})
+    checked = _cartesian_joint_witness(pose=pose, resource_jid=resource_jid,
+        recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
+        physical_evidence=physical_evidence or {})
+    return {**checked, "evidence": {**evidence, **checked["evidence"]}}
 
 
 def check_outline_motion_capabilities(*, motion_requests: list, static_capabilities: dict,

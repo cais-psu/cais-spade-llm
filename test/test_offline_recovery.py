@@ -288,19 +288,27 @@ def test_saved_observations_use_recorded_values_without_controller(captured):
     assert not hasattr(resource, "_controller")
 
 
-@pytest.mark.parametrize("x,expected", [(0.1, "FEASIBLE"), (5., "INFEASIBLE"), (None, "NEEDS_CONTEXT")])
-def test_saved_cartesian_capability_requires_explicit_parameters_and_recorded_bounds(captured, x, expected):
+@pytest.mark.parametrize("offset,expected", [(0.0, "FEASIBLE"), (3.0, "INFEASIBLE"), (None, "NEEDS_CONTEXT")])
+def test_saved_cartesian_capability_requires_explicit_parameters_and_recorded_kinematics(captured, offset, expected):
     jid, entry = next(iter(captured["prepared_recovery_request"]["recovery_resources"].items()))
     entry["recovery_des_model"]["primitive_catalog"].append({"name": "move_cartesian", "frame": "world"})
+    # Reach is the owner's recorded chain within its joint bounds; a declared envelope no longer decides it.
     entry["static_capabilities"]["gripper_reach"] = {
         "frame": "world", "origin_pose": {"x": 0., "y": 0., "z": 1.},
         "max_xy_radius_m": .7, "z_min_m": .8, "z_max_m": 1.6, "tolerance_m": .01}
+    arm = json.loads((Path(__file__).parent / "fixtures/recorded_arm_chains.json").read_text())["arms"]["ur5e-3"]
+    names = arm["configuration"]["joint_names"]
+    captured["physical_evidence"] = {
+        "jids": {"ur5e-3": jid}, "resource_models": {"ur5e-3": {"configuration": arm["configuration"]}},
+        "snapshot": {"resources": {"ur5e-3": {"joint_names": names, "joint_positions": arm["joint_positions"]}}}}
     resource = offline_recovery.SavedRecoveryResource(jid, entry, captured)
-    row = resource.check_recovery_primitive_feasibility(primitive="move_cartesian", params={"x": x, "y": .2, "z": 1.2},
+    pose = dict(zip(("x", "y", "z", "qx", "qy", "qz", "qw"), arm["reference_pose"], strict=True))
+    params = {**pose, "x": None if offset is None else pose["x"] + offset}
+    row = resource.check_recovery_primitive_feasibility(primitive="move_cartesian", params=params,
         task={}, recovery_snapshot=resource.get_recovery_snapshot(), part_context={}, grounded_action={})
     assert row["feasibility_status"] == expected
     assert row["evidence"]["command_sent"] is False
-    assert row["evidence"]["params"]["x"] is x
+    assert row["evidence"]["params"]["x"] == params["x"]
 
 
 def test_saved_primitive_evaluator_does_not_invent_controller_or_projected_observations(captured):

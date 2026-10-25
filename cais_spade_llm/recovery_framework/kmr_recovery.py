@@ -3,13 +3,17 @@ from __future__ import annotations
 """KMR owner calculations over explicitly supplied, recorded observations."""
 
 import math
-from contextvars import ContextVar
 from copy import deepcopy
 
 from cais_spade_llm.recovery_framework.geometry import compose, quaternion, rotate
 
-_cartesian_joint_calculation_cache: ContextVar[dict | None] = ContextVar(
-    "_cartesian_joint_calculation_cache", default=None)
+# The bounded joint search lives with every resource's reach check; these names stay for callers and tests.
+from cais_spade_llm.resources.kinematic_reach import (  # noqa: F401
+    JOINT_SEARCH_CACHE as _cartesian_joint_calculation_cache,
+)
+from cais_spade_llm.resources.kinematic_reach import (
+    bounded_joint_search as _calculate_cartesian_joints,
+)
 
 
 def _vector(value, length: int) -> bool:
@@ -258,91 +262,6 @@ def release_targets(scene: dict, transform: list, current_pose: list, base_pose:
     return {'target': target, 'approach': approach, 'retreat': retreat, 'destination': destination,
             'transfer_waypoints': transfer_waypoints(scene, base_pose, current_pose, approach),
             'transport': transport, 'withdraw_waypoints': transfer_waypoints(scene, base_pose, retreat, transport)}
-
-
-def _calculate_cartesian_joints(config: dict, names: list, target: list,
-                                seeds: list[list], limits: dict) -> dict | None:
-    """Search bounded owner kinematics; the caller independently checks its FK.
-
-    An unsuccessful finite search is missing evidence. It does not establish
-    that the requested pose is unreachable, collision-free, or executable.
-    """
-    import numpy as np
-    from scipy.optimize import least_squares
-    from scipy.spatial.transform import Rotation
-    from .kmr_motion import bounded_joints
-    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
-
-    cache = _cartesian_joint_calculation_cache.get()
-    identity = recovery_validation_fingerprint([config, names, target, seeds, limits]) if cache is not None else None
-    if cache is not None and identity in cache:
-        return deepcopy(cache[identity])
-
-    by_child = {row['child']: row for row in config['joints']}
-    chain, child = [], config['reference_link']
-    while child != config['root']:
-        if child not in by_child or any(row['child'] == child for row in chain):
-            return None
-        row = by_child[child]
-        if ('frozen_interval' in row and row['frozen_interval'][0] != row['frozen_interval'][1]
-                or row['type'] not in {'fixed', 'revolute', 'continuous', 'prismatic'}):
-            return None
-        chain.append(row)
-        child = row['parent']
-    chain.reverse()
-    if set(names) - {row['name'] for row in chain}:
-        return None
-    root = np.eye(4)
-    root[:3, :3] = (Rotation.from_quat(config['root_quaternion']).as_matrix()
-                       if 'root_quaternion' in config else Rotation.from_euler('xyz', config['root_rpy']).as_matrix())
-    root[:3, 3] = config['root_xyz']
-    origins = []
-    for row in chain:
-        matrix = np.eye(4)
-        matrix[:3, :3] = Rotation.from_euler('xyz', row['rpy']).as_matrix()
-        matrix[:3, 3] = row['xyz']
-        origins.append(matrix)
-    goal = Rotation.from_quat(target[3:])
-
-    def residual(joints):
-        values = dict(zip(names, joints, strict=True))
-        matrix = root.copy()
-        for row, origin in zip(chain, origins, strict=True):
-            matrix = matrix @ origin
-            position = values.get(row['name'], row.get('frozen_position', row.get('frozen_interval', [0.])[0]))
-            change = np.eye(4)
-            axis = np.asarray(row['axis'], dtype=float)
-            if row['type'] in {'revolute', 'continuous'}:
-                norm = np.linalg.norm(axis)
-                if not norm:
-                    raise ValueError('Recorded kinematic joint axis is zero')
-                change[:3, :3] = Rotation.from_rotvec(axis / norm * position).as_matrix()
-            elif row['type'] == 'prismatic':
-                change[:3, 3] = axis * position
-            matrix = matrix @ change
-        return np.concatenate((matrix[:3, 3] - target[:3],
-            (goal.inv() * Rotation.from_matrix(matrix[:3, :3])).as_rotvec()))
-
-    tried = set()
-    for seed in seeds:
-        if not _vector(seed, len(names)) or not bounded_joints(names, seed, limits) or tuple(seed) in tried:
-            continue
-        tried.add(tuple(seed))
-        fit = least_squares(residual, seed,
-            bounds=([limits[name]['lower'] for name in names], [limits[name]['upper'] for name in names]),
-            method='dogbox', max_nfev=500, ftol=1e-12, xtol=1e-12, gtol=1e-12)
-        error = residual(fit.x)
-        if np.linalg.norm(error[:3]) <= 1e-5 and np.linalg.norm(error[3:]) <= 1e-5:
-            result = {'joint_positions': fit.x.tolist(), 'source': 'resource-owned bounded inverse kinematics',
-                'solver': 'scipy.optimize.least_squares', 'method': 'dogbox', 'evaluations': int(fit.nfev),
-                'solver_status': int(fit.status), 'seed': deepcopy(seed), 'max_nfev': 500,
-                'collision_or_path_validated': False, 'execution_authorized': False}
-            if cache is not None:
-                cache[identity] = deepcopy(result)
-            return result
-    if cache is not None:
-        cache[identity] = None
-    return None
 
 
 def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,

@@ -102,7 +102,7 @@ TRANSPORT_PRIMITIVE_CONTRACTS: dict[str, dict[str, Any]] = {
 }
 
 
-def transport_chain(scene: dict, resource_id: str, part_position: list[float]) -> tuple[dict, dict]:
+def transport_chain(scene: dict, resource_id: str, part_position: list[float]) -> dict:
     """Return the chain a transport moves an observed part along, with its travel limits.
 
     A transport carries a part along its own axis, downstream only, as far as its last stop: its last
@@ -116,7 +116,8 @@ def transport_chain(scene: dict, resource_id: str, part_position: list[float]) -
         part_position: The part's observed world position ``[x, y, z]``.
 
     Returns:
-        The configured chain, whose reference link is the carried part, and the limits of its one joint.
+        The configured chain, whose reference link is the carried part and whose one joint is bounded by
+        the travel.
     """
     entry = scene[resource_id]
     yaw = entry["world_pose"][5]
@@ -132,9 +133,10 @@ def transport_chain(scene: dict, resource_id: str, part_position: list[float]) -
         "root": "observed part", "root_xyz": list(part_position[:3]), "root_quaternion": [0.0, 0.0, 0.0, 1.0],
         "joint_names": [joint], "reference_link": "carried part", "fixed_joint_positions": {},
         "joints": [{"name": joint, "type": "prismatic", "parent": "observed part", "child": "carried part",
-                    "xyz": [0.0, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0], "axis": axis}],
+                    "xyz": [0.0, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0], "axis": axis,
+                    "position_bounds": [0.0, max(0.0, travel)]}],
     }
-    return configuration, {joint: (0.0, max(0.0, travel))}
+    return configuration
 
 
 class WorkflowPrimitiveRunner:

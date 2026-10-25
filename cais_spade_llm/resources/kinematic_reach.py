@@ -2,33 +2,37 @@ from __future__ import annotations
 
 """Whether a resource can move the thing it moves to a pose, from its own kinematic chain.
 
-Every moving resource declares its motion as a chain of joints in the configured kinematics format
-(``continuous_motion`` configurations, recorded per resource in each capture): joints with parent,
-child, origin and axis, a root pose and the moving joint names. The check is the same for every chain:
-a bounded search for joint positions within the joint limits that put the chain's reference link at
-the target. It says whether the pose is reachable, not how to get there; the motion planner plans the
-path at execution.
+Every moving resource declares its motion as a chain of joints in the configured kinematics format:
+joints with parent, child, origin, axis and ``position_bounds``, a root pose, the moving joint names and
+the reference link it moves. Captures record each arm's chain in ``physical_evidence.resource_models``.
+One bounded search answers for every chain: joint positions within the bounds that put the reference
+link at the target. Only a target beyond the chain's whole length is proven unreachable; a search that
+finds nothing leaves reachability unresolved. Paths are planned at execution.
 """
 
 import math
-import re
 from collections import deque
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
+from copy import deepcopy
 from typing import Any
 
 import numpy as np
-from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
-_POSITION_TOLERANCE_M = 1e-4
-_ORIENTATION_TOLERANCE_RAD = 1e-3
-# Orientation error counts like the position error of a point this far from the axis, in metres.
-_ORIENTATION_WEIGHT_M = 0.2
-_STARTS = 8
+# One calculation per identical request while a caller sets it, as a validation run does.
+JOINT_SEARCH_CACHE: ContextVar[dict | None] = ContextVar("_cartesian_joint_calculation_cache", default=None)
+# Fixed extra starting points, as fractions of every joint's range, keep the answer reproducible.
+_START_FRACTIONS = (0.5, 0.87, 0.24, 0.61, 0.98, 0.35)
 # The fixed base-pose grid: spacing, headings per position, and the floor cell of the connection check.
 _GRID_STEP_M = 0.25
 _GRID_HEADINGS = 8
 _FLOOR_CELL_M = 0.05
+
+
+def _finite_vector(value: Any, length: int) -> bool:
+    return (isinstance(value, list) and len(value) == length
+            and all(type(item) in (int, float) and math.isfinite(item) for item in value))
 
 
 def pose_matrix(pose: Sequence[float]) -> np.ndarray:
@@ -39,51 +43,138 @@ def pose_matrix(pose: Sequence[float]) -> np.ndarray:
     return frame
 
 
-def urdf_joint_limits(robot_description: str) -> dict[str, tuple[float, float]]:
-    """Read every revolute and prismatic joint's position limits from a URDF.
+def bounded_joints(names: Sequence[str], positions: Sequence[float], limits: dict) -> bool:
+    """Check exact bounded joint values without wrapping angles into another branch."""
+    return len(names) == len(positions) and all(
+        name in limits
+        and math.isfinite(value)
+        and limits[name]["lower"] <= value <= limits[name]["upper"]
+        for name, value in zip(names, positions, strict=True)
+    )
 
-    Args:
-        robot_description: The URDF text, such as a capture's recorded ``robot_description``.
 
-    Returns:
-        Lower and upper position limit per joint name.
+def bounded_joint_search(config: dict, names: list, target: list,  # noqa: C901 - moved unchanged
+                         seeds: list[list], limits: dict) -> dict | None:
+    """Search bounded owner kinematics; the caller independently checks its FK.
+
+    An unsuccessful finite search is missing evidence. It does not establish
+    that the requested pose is unreachable, collision-free, or executable.
     """
-    joints = re.finditer(r'<joint\s+name="([^"]+)"\s+type="(?:revolute|prismatic)"\s*>(.*?)</joint>',
-                         robot_description, re.S)
-    limits = {}
-    for joint in joints:
-        limit = re.search(r'<limit\b[^>]*>', joint.group(2))
-        lower = re.search(r'lower="([^"]+)"', limit.group(0)) if limit else None
-        upper = re.search(r'upper="([^"]+)"', limit.group(0)) if limit else None
-        if lower and upper:
-            limits[joint.group(1)] = (float(lower.group(1)), float(upper.group(1)))
-    return limits
+    from scipy.optimize import least_squares
+
+    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+        recovery_validation_fingerprint,
+    )
+
+    cache = JOINT_SEARCH_CACHE.get()
+    identity = recovery_validation_fingerprint([config, names, target, seeds, limits]) if cache is not None else None
+    if cache is not None and identity in cache:
+        return deepcopy(cache[identity])
+
+    by_child = {row['child']: row for row in config['joints']}
+    chain, child = [], config['reference_link']
+    while child != config['root']:
+        if child not in by_child or any(row['child'] == child for row in chain):
+            return None
+        row = by_child[child]
+        if ('frozen_interval' in row and row['frozen_interval'][0] != row['frozen_interval'][1]
+                or row['type'] not in {'fixed', 'revolute', 'continuous', 'prismatic'}):
+            return None
+        chain.append(row)
+        child = row['parent']
+    chain.reverse()
+    if set(names) - {row['name'] for row in chain}:
+        return None
+    root = np.eye(4)
+    root[:3, :3] = (Rotation.from_quat(config['root_quaternion']).as_matrix()
+                       if 'root_quaternion' in config else Rotation.from_euler('xyz', config['root_rpy']).as_matrix())
+    root[:3, 3] = config['root_xyz']
+    origins = []
+    for row in chain:
+        matrix = np.eye(4)
+        matrix[:3, :3] = Rotation.from_euler('xyz', row['rpy']).as_matrix()
+        matrix[:3, 3] = row['xyz']
+        origins.append(matrix)
+    goal = Rotation.from_quat(target[3:])
+
+    def residual(joints):
+        values = dict(zip(names, joints, strict=True))
+        matrix = root.copy()
+        for row, origin in zip(chain, origins, strict=True):
+            matrix = matrix @ origin
+            position = values.get(row['name'], row.get('frozen_position', row.get('frozen_interval', [0.])[0]))
+            change = np.eye(4)
+            axis = np.asarray(row['axis'], dtype=float)
+            if row['type'] in {'revolute', 'continuous'}:
+                norm = np.linalg.norm(axis)
+                if not norm:
+                    raise ValueError('Recorded kinematic joint axis is zero')
+                change[:3, :3] = Rotation.from_rotvec(axis / norm * position).as_matrix()
+            elif row['type'] == 'prismatic':
+                change[:3, 3] = axis * position
+            matrix = matrix @ change
+        return np.concatenate((matrix[:3, 3] - target[:3],
+            (goal.inv() * Rotation.from_matrix(matrix[:3, :3])).as_rotvec()))
+
+    tried = set()
+    for seed in seeds:
+        if not _finite_vector(seed, len(names)) or not bounded_joints(names, seed, limits) or tuple(seed) in tried:
+            continue
+        tried.add(tuple(seed))
+        fit = least_squares(residual, seed,
+            bounds=([limits[name]['lower'] for name in names], [limits[name]['upper'] for name in names]),
+            method='dogbox', max_nfev=500, ftol=1e-12, xtol=1e-12, gtol=1e-12)
+        error = residual(fit.x)
+        if np.linalg.norm(error[:3]) <= 1e-5 and np.linalg.norm(error[3:]) <= 1e-5:
+            result = {'joint_positions': fit.x.tolist(), 'source': 'resource-owned bounded inverse kinematics',
+                'solver': 'scipy.optimize.least_squares', 'method': 'dogbox', 'evaluations': int(fit.nfev),
+                'solver_status': int(fit.status), 'seed': deepcopy(seed), 'max_nfev': 500,
+                'collision_or_path_validated': False, 'execution_authorized': False}
+            if cache is not None:
+                cache[identity] = deepcopy(result)
+            return result
+    if cache is not None:
+        cache[identity] = None
+    return None
 
 
-def chain_frames(configuration: Mapping[str, Any], positions: Mapping[str, float],
-                 root: np.ndarray | None = None) -> dict[str, np.ndarray]:
+def chain_limits(configuration: Mapping[str, Any]) -> dict[str, dict[str, float]]:
+    """Return the moving joints' ``position_bounds`` as ``{name: {"lower": ..., "upper": ...}}``."""
+    names = set(configuration["joint_names"])
+    return {row["name"]: {"lower": row["position_bounds"][0], "upper": row["position_bounds"][1]}
+            for row in configuration["joints"] if row["name"] in names and "position_bounds" in row}
+
+
+def with_root(configuration: Mapping[str, Any], root: np.ndarray | None) -> dict:
+    """Return the chain with its root moved to a pose, such as a mobile base's candidate pose."""
+    if root is None:
+        return dict(configuration)
+    return {**configuration, "root_xyz": root[:3, 3].tolist(),
+            "root_quaternion": Rotation.from_matrix(root[:3, :3]).as_quat().tolist()}
+
+
+def chain_frames(configuration: Mapping[str, Any], positions: Mapping[str, float]) -> dict[str, np.ndarray]:
     """Return every link frame of a configured chain in the world for given joint positions.
 
     Args:
         configuration: The resource's configured kinematics.
         positions: Positions of the moving joints; other joints keep their fixed positions.
-        root: A root pose replacing the configured one, such as a mobile base's candidate pose.
 
     Returns:
         A 4x4 world transform per link name.
     """
-    if root is None:
-        root = np.eye(4)
-        root[:3, :3] = Rotation.from_quat(configuration["root_quaternion"]).as_matrix()
-        root[:3, 3] = configuration["root_xyz"]
-    fixed = configuration.get("fixed_joint_positions", {})
+    root = np.eye(4)
+    root[:3, :3] = (Rotation.from_quat(configuration["root_quaternion"]).as_matrix()
+                    if "root_quaternion" in configuration
+                    else Rotation.from_euler("xyz", configuration["root_rpy"]).as_matrix())
+    root[:3, 3] = configuration["root_xyz"]
     frames = {configuration["root"]: root}
     for row in configuration["joints"]:
         frame = np.eye(4)
         frame[:3, :3] = Rotation.from_euler("xyz", row["rpy"]).as_matrix()
         frame[:3, 3] = row["xyz"]
         frame = frames[row["parent"]] @ frame
-        position = positions.get(row["name"], fixed.get(row["name"], 0.0))
+        position = positions.get(row["name"], row.get("frozen_position", 0.0))
         motion = np.eye(4)
         if row["type"] in {"revolute", "continuous"}:
             motion[:3, :3] = Rotation.from_rotvec(np.asarray(row["axis"], dtype=float) * position).as_matrix()
@@ -93,10 +184,18 @@ def chain_frames(configuration: Mapping[str, Any], positions: Mapping[str, float
     return frames
 
 
-def _chain_bound(configuration: Mapping[str, Any], limits: Mapping[str, tuple[float, float]],
-                 root: np.ndarray | None) -> tuple[np.ndarray, float]:
-    # The reference link never lies farther from the first moving joint than the summed link offsets
-    # plus the travel of every sliding joint.
+def fixed_starts(names: Sequence[str], limits: Mapping[str, Mapping[str, float]]) -> list[list[float]]:
+    """Return the fixed extra starting points of a joint search, spread through every joint's range."""
+    return [[limits[name]["lower"] + (limits[name]["upper"] - limits[name]["lower"]) * fraction for name in names]
+            for fraction in _START_FRACTIONS]
+
+
+def beyond_reach(configuration: Mapping[str, Any], target_xyz: Sequence[float]) -> bool:
+    """Return whether a point lies farther from the chain's first moving joint than the chain can extend.
+
+    The reference link never lies farther than the summed link offsets plus every sliding joint's travel,
+    so a point beyond that is proven unreachable.
+    """
     rows = {row["child"]: row for row in configuration["joints"]}
     path, link = [], configuration["reference_link"]
     while link in rows:
@@ -105,58 +204,40 @@ def _chain_bound(configuration: Mapping[str, Any], limits: Mapping[str, tuple[fl
     path.reverse()
     moving = set(configuration["joint_names"])
     first = next(index for index, row in enumerate(path) if row["name"] in moving)
-    anchor = chain_frames(configuration, {}, root)[path[first]["child"]][:3, 3]
-    travel = sum(max(abs(value) for value in limits[row["name"]]) for row in path[first:]
+    anchor = chain_frames(configuration, {})[path[first]["child"]][:3, 3]
+    travel = sum(max(abs(value) for value in row["position_bounds"]) for row in path[first:]
                  if row["type"] == "prismatic" and row["name"] in moving)
-    return anchor, float(travel + sum(np.linalg.norm(row["xyz"]) for row in path[first + 1:]))
+    length = travel + sum(np.linalg.norm(row["xyz"]) for row in path[first + 1:])
+    return bool(np.linalg.norm(np.asarray(target_xyz[:3], dtype=float) - anchor) > length)
 
 
-def reach(configuration: Mapping[str, Any], limits: Mapping[str, tuple[float, float]],
-          target_pose: Sequence[float], *, root: np.ndarray | None = None,
-          starts: int = _STARTS) -> list[float] | None:
-    """Return moving-joint positions within the limits that put the reference link at a world pose.
+def reach(configuration: Mapping[str, Any], target_pose: Sequence[float], *, root: np.ndarray | None = None,
+          seeds: Sequence[Sequence[float]] = ()) -> dict[str, Any]:
+    """Check whether the chain can put its reference link at a world pose, within its joint bounds.
 
     Args:
-        configuration: The resource's configured kinematics, with its ``reference_link``.
-        limits: Position limits per moving joint, for example from ``urdf_joint_limits``.
+        configuration: The resource's configured kinematics, with ``position_bounds`` on its moving joints.
         target_pose: The reference link's target pose ``[x, y, z, qx, qy, qz, qw]`` in the world.
         root: A root pose replacing the configured one, such as a mobile base's candidate pose.
-        starts: How many of the fixed starting points to try.
+        seeds: Recorded joint positions to start from first, such as the current or a named pose.
 
     Returns:
-        Joint positions in ``joint_names`` order, or None when no position within the limits reaches
-        the pose. Missing limits make the answer None rather than unbounded.
+        ``feasibility_status`` FEASIBLE with ``joint_positions``; INFEASIBLE when the target is beyond the
+        whole chain; NEEDS_CONTEXT when the bounds are incomplete or the bounded search finds nothing.
     """
-    names = configuration["joint_names"]
-    if any(name not in limits for name in names):
-        return None
-    target = pose_matrix(target_pose)
-    anchor, length = _chain_bound(configuration, limits, root)
-    if np.linalg.norm(target[:3, 3] - anchor) > length:
-        return None
-    low = np.array([limits[name][0] for name in names], dtype=float)
-    high = np.array([limits[name][1] for name in names], dtype=float)
-    reference = configuration["reference_link"]
-    goal = Rotation.from_matrix(target[:3, :3])
-
-    def error(positions: np.ndarray) -> tuple[np.ndarray, Rotation]:
-        frame = chain_frames(configuration, dict(zip(names, positions, strict=True)), root)[reference]
-        return frame[:3, 3] - target[:3, 3], goal.inv() * Rotation.from_matrix(frame[:3, :3])
-
-    def residual(positions: np.ndarray) -> np.ndarray:
-        offset, turn = error(positions)
-        return np.concatenate([offset, _ORIENTATION_WEIGHT_M * turn.as_rotvec()])
-
-    # Fixed starting points, evenly spread through every joint's range, keep the answer reproducible.
-    for index in range(starts):
-        fraction = (0.5 + 0.37 * index) % 1.0
-        start = np.clip(low + (high - low) * fraction, low + 1e-9, high - 1e-9)
-        solution = least_squares(residual, start, bounds=(low, high), xtol=1e-12, ftol=1e-12, gtol=1e-12,
-                                 max_nfev=400)
-        offset, turn = error(solution.x)
-        if np.linalg.norm(offset) < _POSITION_TOLERANCE_M and turn.magnitude() < _ORIENTATION_TOLERANCE_RAD:
-            return [float(value) for value in solution.x]
-    return None
+    chain = with_root(configuration, root)
+    names = list(chain["joint_names"])
+    limits = chain_limits(chain)
+    if set(names) - set(limits):
+        return {"feasibility_status": "NEEDS_CONTEXT", "reason": "Recorded joint bounds are incomplete"}
+    if beyond_reach(chain, target_pose):
+        return {"feasibility_status": "INFEASIBLE", "reason": "The target lies beyond the whole chain"}
+    found = bounded_joint_search(chain, names, [float(value) for value in target_pose[:7]],
+                                 [list(seed) for seed in seeds] + fixed_starts(names, limits), limits)
+    if found is None:
+        return {"feasibility_status": "NEEDS_CONTEXT",
+                "reason": "The bounded joint search found no configuration; reachability is unresolved"}
+    return {"feasibility_status": "FEASIBLE", "joint_positions": found["joint_positions"], "calculation": found}
 
 
 def _corners(x: float, y: float, yaw: float, size: Sequence[float]) -> list[tuple[float, float]]:
@@ -246,36 +327,36 @@ def free_base_poses(floor: Mapping[str, Any], footprint: Sequence[float], start_
     return [pose for pose in candidates if fits(*pose)]
 
 
-def reach_from_base(configuration: Mapping[str, Any], limits: Mapping[str, tuple[float, float]],
-                    target_pose: Sequence[float], base_poses: Sequence[Sequence[float]], *,
-                    base_height_m: float = 0.0, tries: int = 12,
-                    starts: int = 2) -> tuple[list[float], list[float]] | None:
-    """Return a candidate base pose from which a mounted chain reaches a pose, with its joints.
+def reach_from_base(configuration: Mapping[str, Any], target_pose: Sequence[float],
+                    base_poses: Sequence[Sequence[float]], *, base_height_m: float = 0.0,
+                    tries: int = 12) -> dict[str, Any]:
+    """Check whether a mounted chain reaches a pose from some candidate base pose.
 
     The search is bounded: candidates are tried in order of how close they bring the chain's first moving
-    joint to the target (ties keep the given order), and only the first ``tries`` within the chain's reach.
+    joint to the target (ties keep the given order), and only the first ``tries`` not beyond the chain.
 
     Args:
         configuration: The mounted chain, whose root is the base link.
-        limits: Position limits per moving joint.
         target_pose: The reference link's target pose in the world.
         base_poses: Candidate planar base poses ``[x, y, yaw]``, for example from ``free_base_poses``.
         base_height_m: The base link's height, which driving does not change.
         tries: How many candidates to try.
-        starts: How many fixed starting points to try at each base pose.
 
     Returns:
-        The base pose and the chain's joint positions, or None when no candidate reaches the pose.
+        ``feasibility_status`` FEASIBLE with ``base_pose`` and ``joint_positions``, else NEEDS_CONTEXT: a
+        finite set of base poses never proves the target unreachable.
     """
-    roots, ranked = {}, []
+    ranked = []
     for index, (x, y, yaw) in enumerate(base_poses):
-        roots[index] = pose_matrix([x, y, base_height_m, *Rotation.from_euler("z", yaw).as_quat()])
-        anchor, length = _chain_bound(configuration, limits, roots[index])
-        distance = float(np.linalg.norm(np.asarray(target_pose[:3]) - anchor))
-        if distance <= length:
-            ranked.append((distance, index))
-    for _, index in sorted(ranked)[:tries]:
-        joints = reach(configuration, limits, target_pose, root=roots[index], starts=starts)
-        if joints is not None:
-            return list(base_poses[index][:3]), joints
-    return None
+        root = pose_matrix([x, y, base_height_m, *Rotation.from_euler("z", yaw).as_quat()])
+        chain = with_root(configuration, root)
+        if not beyond_reach(chain, target_pose):
+            first = next(row["child"] for row in chain["joints"] if row["name"] in set(chain["joint_names"]))
+            anchor = chain_frames(chain, {})[first][:3, 3]
+            ranked.append((float(np.linalg.norm(np.asarray(target_pose[:3]) - anchor)), index, root))
+    for _, index, root in sorted(ranked, key=lambda row: row[:2])[:tries]:
+        checked = reach(configuration, target_pose, root=root)
+        if checked["feasibility_status"] == "FEASIBLE":
+            return {**checked, "base_pose": list(base_poses[index][:3])}
+    return {"feasibility_status": "NEEDS_CONTEXT",
+            "reason": "No candidate base pose gave a configuration; reachability is unresolved"}

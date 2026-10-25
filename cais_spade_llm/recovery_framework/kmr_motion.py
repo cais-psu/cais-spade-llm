@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from cais_spade_llm.resources.kinematic_reach import bounded_joints
+
 
 def joint_limits(path: Path, names: Sequence[str], accelerations: Sequence[float]) -> dict:
     """Read bounded joints from the same URDF used by Gazebo and MoveIt."""
@@ -28,16 +30,6 @@ def joint_limits(path: Path, names: Sequence[str], accelerations: Sequence[float
         ):
             raise ValueError(f"Invalid KMR joint limits: {name}")
     return limits
-
-
-def bounded_joints(names: Sequence[str], positions: Sequence[float], limits: dict) -> bool:
-    """Check exact bounded joint values without wrapping angles into another branch."""
-    return len(names) == len(positions) and all(
-        name in limits
-        and math.isfinite(value)
-        and limits[name]["lower"] <= value <= limits[name]["upper"]
-        for name, value in zip(names, positions, strict=True)
-    )
 
 
 def seconds(duration: Any) -> float:
