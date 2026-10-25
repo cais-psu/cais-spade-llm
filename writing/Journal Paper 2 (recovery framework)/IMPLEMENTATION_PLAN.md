@@ -776,6 +776,19 @@ checker skips the KMR's `approached_part` as bookkeeping, like `task_ctx.*` (no 
 KMR's two-step pick together), and the checker is built overnight, offline only. Marking `approached_part` private
 waits for the prompt decisions.
 
+**October 25, late night: the Recovery Goal lists normal production's next planned tasks (`8ddf36d`), then Machining
+with gpt-5 low and gpt-6.1-sol high.** The goal now shows, after the interrupted outcome, "Then normal production
+carries out:" with the entries the handoff requires (Machining: M2 complete_job of RGOCG4 trim → circle; KMR
+move_to_resource, target Storage, source M2), the same way for every scenario; the completion rule names that list
+(user approved as the paper's goal H; not a hint, see the plan discussion).
+
+| Run | Calls | Events | Result |
+| --- | --- | --- | --- |
+| gpt-6.1-sol high `draft_f931aa72…` | 25 | 21 | Right except one step: the KMR brings KET4 from M1 to M2, ur5e-2 parks RGOCG4 on M2's tray, KET4's trim runs and completes on M2, ur5e-2 puts KET4 on Conveyor loading position 2, reloads RGOCG4 and M2 resumes the circle trim. The KMR is left at a free spot north of M2 (it withdrew for the M2 mutex and never returned), so its planned trip from M2 to Storage cannot start. RA check: 21/21 feasible |
+| gpt-5 low `draft_af2012d3…` | 11 | 9 | Malformed end states (resource and part names nested as variables, "none" as a string), KET4's job "completed" on a paused M2, RGOCG4 left on M2's tray. RA check refuses 9 of 21 candidates (5 chosen events) |
+
+The CCA nonblocking check (with the KMR's planned trip as the unmet task) is what would close the gpt-6.1-sol run.
+
 **October 25, night: Machining with gpt-6.1-sol at high effort (user's request).** `draft_b0ae536a…`: 29 calls, 24
 events, 9.5 min, about 359k tokens; same capture, prompt and safety files. It looked up the remaining planned tasks
 of nine resources. It fixes gpt-5.4's main error: the KMR unloads RGOCG4 from M2 into Storage, carries KET4 from M1
