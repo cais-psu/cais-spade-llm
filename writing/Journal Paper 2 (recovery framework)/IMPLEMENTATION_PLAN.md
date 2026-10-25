@@ -742,6 +742,46 @@ checker skips the KMR's `approached_part` as bookkeeping, like `task_ctx.*` (no 
 KMR's two-step pick together), and the checker is built overnight, offline only. Marking `approached_part` private
 waits for the prompt decisions.
 
+**October 25: unchecked outlines on the v5 captures, and the RA check on them (read this first).**
+
+The user had every non-v5 capture and all 70 old outline drafts deleted outright (receipt
+`recapture_v2_20261015/old_captures_and_drafts_20261025_deletion_list.json`, 1,306 MiB), so the Recovery UI lists only
+the four v5 captures with their beliefs. The October 23 drafts in "Morning review" below no longer exist. Tests now
+read only v5 captures; four tests skip because their captures are gone: the schema-1 conversion test
+(`test_capture_files`) and three tests that read the October 8 run folder `1c3bec8f` (`test_offline_recovery` ×2,
+`test_recovery_context_retrieval` ×1; that folder was on the deletion list as an old run and was not archived).
+
+New unchecked outlines (every check off, gpt-5.4 medium, the same safety files as on October 23):
+
+| Scenario | Draft | LLM calls | Events | Ended |
+| --- | --- | --- | --- | --- |
+| Part slippage | `draft_6544e81b…` | 7 | 4 | nominal handoff |
+| Conveyor | `draft_9548cbfa…` | 8 | 4 | nominal handoff |
+| ur5e-1 | `draft_86164600…` | 9 | 4 | nominal handoff |
+| Machining | `draft_37d3c1fd…` | 13 | 10 | LLM declared complete; nominal work cannot take over (goal not reached, M1 still faulted) |
+
+RA check replayed on them (shadow: every candidate checked, the recorded conversation continuing; `dc3f975`): 59
+candidates, 49 FEASIBLE, 8 INFEASIBLE, 2 NEEDS_CONTEXT. Every refusal below is the LLM's chosen event unless marked.
+
+| Draft, event | Candidate | Verdict | Facts returned | A checked run would |
+| --- | --- | --- | --- | --- |
+| Part slippage, all | all 12 | FEASIBLE | ur5e-3 reaches every Buffer zone, gear_small's measured pose and the board | accept the same outline |
+| Conveyor 3 | alt 0: KMR moves KET4 from the M1 tray to Buffer zone 1 | NEEDS_CONTEXT | no candidate base pose reached zone 1 | (the LLM chose alt 1, feasible) |
+| Conveyor 4 | chosen and alts (KMR places KET4 in Buffer zone 1 or 2 from base pose (-0.5, 1.3, 90°)) | INFEASIBLE | the stated footprint overlaps "Assembly Station" on the floor map; no candidate base pose reached the zones | return the facts to the LLM |
+| ur5e-1 2 | KMR relays KET4 from M1 to the M2 staging tray in one event | NEEDS_CONTEXT | no candidate base pose reached the M2 tray | apply alt 1 (KMR picks KET4 at M1) |
+| Machining 2 | M2 moves its own part to its staging tray | INFEASIBLE | M2 declares no motion that moves parts | return the facts (only candidate) |
+| Machining 4 | chosen and two alts | INFEASIBLE | the LLM named `holds` and `at`, not variables of ur5e-1's model | apply alt 3 (M2 selects square) |
+| Machining 6 | ur5e-2 picks KET4 at Conveyor loading position 1 | INFEASIBLE | loading position 1 lies beyond ur5e-2's kinematic chain (the belt had not advanced) | apply alt 1 (advance the belt to loading position 2) |
+
+New finding for the user: on v5 the LLM pauses, stops and resumes machine jobs by stating only `resource_state`
+(`paused`, `running`), never the part's `current_process`. `resource_state` is free (decided October 23), so these
+events derive nothing and pass, including M2's resume in the ur5e-1 outline. The machine contracts would check them
+(pause needs running; resume needs a job this machine paused) only if the event states the job's status. Options:
+(a) keep it (the handoff check catches blocked jobs later), (b) derive a machine's state change through the
+primitives whose declared effects set that `resource_state` (pause_job sets paused, resume_job and start_job set
+running), so the job preconditions apply. (b) changes decision "resource_state is free" for resources whose
+primitives declare it; it maps to Alg. 1 unchanged.
+
 **Morning review (built overnight October 24–25, offline only; read this first).**
 
 What was built (committed `77af184`, `dcab31b`; nothing pushed, no Gazebo, no LLM calls):
