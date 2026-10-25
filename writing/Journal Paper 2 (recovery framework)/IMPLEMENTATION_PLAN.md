@@ -826,6 +826,57 @@ the v5 captures come after the checker works.
   - "`move_base` needs a parked arm": there is no state variable for it, so it becomes a C_ρ over joint positions.
   - Machine checks the command also enforces (the selected program can produce the requested result; a resumed job
     keeps its program and configuration): these are Θ and C_ρ.
+- Step 3 started (October 24, uncommitted): one reach solver for every moving resource (decision 1, generalized
+  by the user the same day: "this should be generalized", "not only for robots but also other resources").
+  - Rule: a resource that moves things declares a kinematic chain, checked by the reach solver; a resource that
+    changes things declares a process model (machines: programs, results, required configuration, processing time,
+    job record), checked by the capability check of Step 1 item 6. Whether a part fits a fixture stays deferred,
+    like gripper part-handling (decision 4).
+  - `resources/kinematic_reach.py`: `reach(configuration, limits, target_pose, root=...)` searches, within the joint
+    limits and from fixed starting points, for joint positions that put the chain's reference link at the target;
+    `chain_frames` is plain forward kinematics over the configured chain; `urdf_joint_limits` reads limits from a
+    URDF. A chain-length bound rejects targets beyond the summed link offsets at once. `root` replaces the chain's
+    root pose, for a mobile base's candidate poses (decision 2).
+  - Data: each capture records every resource's chain as `physical_evidence.resources.<rid>.continuous_motion_
+    configuration` (joints, root pose, moving joints, reference link: `tool0` for a UR5e, `rg2_gripper_tcp` for the
+    KMR) and the whole cell's URDF (`planning_scene_capture.robot_description`) with the joint limits. No manifest
+    data is added.
+  - Validated on recorded states: forward kinematics reproduces ur5e-3's and the KMR's recorded poses (0.00 mm,
+    0.000°); the recorded poses are reached from a neutral start (38 ms UR5e, 78 ms KMR); 40 random reachable poses
+    per arm are all found (median 34 ms UR5e, 91 ms KMR). A borderline unreachable pose can take seconds (every
+    start is tried); the bound answers far ones in microseconds.
+  - Replaced a first UR-only closed-form solver (written and validated the same day, never committed), since a
+    closed form does not carry over to the KMR's 7-joint arm or to other resources.
+  - Tests: `test/test_kinematic_reach.py` with `test/fixtures/recorded_arm_chains.json` (the two recorded chains,
+    joints, poses and limits, so the tests need no capture file).
+  - Transport chains DONE (October 24, uncommitted): `workflow_gazebo.transport_chain(scene, rid, part_position)`
+    builds one sliding joint along the transport's own axis (from its `world_pose`), from the part's position to
+    its farthest stop (its last `slot_poses` entry, or the first slot of its `normal_output_transfer`, else the belt
+    end). "Downstream only" is the joint's lower limit 0, so the same `reach` answers for a belt as for an arm.
+    Tested: the Conveyor reaches loading position 2 from 1 (Machining event 7) but not 1 from 2, hands a part onto
+    Buffer zone 1 and no farther; the Buffer reaches zone 4 from zone 1 but not zone 2 from zone 4. The chain bound
+    now adds each sliding joint's travel (it first counted only link offsets and refused every transport target).
+  - Mobile base DONE (October 24, uncommitted), validation only: it searches parameters of one proposed event,
+    and a refusal states the fact, never a base pose or another resource.
+    - `kinematic_reach.free_base_poses(floor, footprint, start_xy, around_xy, docks=...)`: candidate base poses in
+      a fixed order (declared docks, then a 0.25 m grid within 1.5 m at 8 headings, nearest first), kept when the
+      footprint (scene `platform_overall_dimensions_m`, centred on the base) lies clear of every floor obstacle
+      (`outline_draft._navigation_floor`) and its position connects to the start through floor wide enough for
+      the footprint's narrow side (a necessary condition; the base's planner plans the route).
+    - `kinematic_reach.reach_from_base(...)`: the arm reach from each candidate as the chain's root, bounded:
+      candidates within the chain bound, closest first, 12 tries of 2 starts each.
+    - KMR at Storage, with its recorded chain: its recorded gripper pose (reachable from the Storage dock, 1.4 s);
+      the M1 staging tray (reachable, base parked west of it, 2.2 s); the assembly station edge (reachable from
+      beside the station, 0.2 s; its routes never go there); the station centre (not reachable, 3.3 s); the M2
+      staging tray (not reachable, 5.5 s).
+    - Limit: the 0.25 m grid can miss a very tight spot. The M2 tray lies inside ur5e-2's work area on the floor
+      map and the only spot that might fit the base is a 0.85 m gap between the two UR5e work areas; a finer grid
+      might find it. A refusal there goes back to the LLM as feedback. Nominally ur5e-2, not the KMR, uses that
+      tray.
+    - Tests added to `test/test_kinematic_reach.py`; both test batches unchanged.
+  - Next: use the solver in the composition check, the live runtime's recovery pose check (replacing the
+    `gripper_reach` cylinder) and the checker. A gripper-point target on a UR5e adds the
+    0.218 m TCP offset to its `tool0` reference.
 - Noticed, out of scope: the machine automaton declares `resume_job` from paused unconditionally
   (`environment_models._declare_machine_jobs`), while `MachineJobs.command` requires `resume_after_reload` for every
   resume. Both machines set the flag, so nothing differs today.
@@ -1051,9 +1102,15 @@ generator:
   grid of candidate poses around the place plus declared docking poses where they exist; deterministic and
   reproducible. No search is needed when the event's own evidence fixes θ, or when existence is trivial (a speed in
   (0, max]).
-- Decided October 24 (decision 1): the UR5e reach comes from extending the kinematic computation behind
-  `gripper_reach` to all heights, one reach volume per robot for top-down poses. It covers poses at the part and
-  free moves, and fixes ur5e-1's band, which excludes the M1 staging tray.
+- Decided October 24 (decision 1, revised twice the same day by the user): reach is exact inverse kinematics with
+  joint limits over each resource's own recorded kinematic chain, one generic solver for every moving resource
+  (see "Step 3 started"); a first UR-only closed form was replaced. It answers whether some
+  joint configuration puts the gripper at that exact pose (any orientation); MoveIt still plans the path at
+  execution. One reach function serves the RA checker, the composition check and the live runtime's recovery pose
+  check (replacing the `gripper_reach` cylinder there too, so all three agree); the runtime change is verified at the
+  next Gazebo run. It replaces the first choice, a top-down reach volume from `_top_down_reach_m` at every height,
+  which may remain a quick first filter. The cylinder refuses ur5e-1 on the M1 staging tray (z 1.06 above its 0.90
+  band) and ur5e-4's retract at its current height (z 1.289); both are within reach.
 - Conditions no primitive produces, such as the KMR's `approached_part`: free or bookkeeping.
 - Decided October 24 (decision 5): a part resting at a pose is an empty location plus `observed_pose`, as the v5
   captures already record it.
