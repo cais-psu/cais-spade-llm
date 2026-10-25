@@ -214,3 +214,20 @@ def test_a_machine_resumes_only_the_job_it_paused(cell, session, machine, status
         assert result["primitive_set"] == [primitive]
     else:
         assert "current_process matches {status: paused, machine: M1}" in " ".join(result["reasons"])
+
+
+def test_a_location_condition_may_be_null_and_a_resource_may_be_named_as_a_part_location(cell, session):
+    # Null says the resource is at no named place (its pose says where); a name is custody like a JID.
+    result = check_event(_event(UR, {"resource_location": None, "part_location": "ur5e-3"}, part="P1"),
+                         session, {}, cell)
+    assert result["feasibility_status"] == "FEASIBLE"
+    assert [row["derivation"] for row in result["conditions"]] == ["place", "place"]
+
+
+def test_a_resource_without_motion_cannot_move_a_part(cell, session):
+    session["recovery_des_models"][M1]["state_variables"]["part_location"] = {"scope": "part", "domain": []}
+    result = check_event(_event(M1, {"part_name": None, "part_location": "Buffer For Machined parts"}, part="P2"),
+                         session, {}, cell)
+    assert result["feasibility_status"] == "INFEASIBLE"
+    place = next(row for row in result["capability"] if row["check"] == "place")
+    assert place["reason"] == "M1 declares no motion that moves parts"

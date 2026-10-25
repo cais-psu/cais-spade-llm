@@ -180,10 +180,17 @@ class _Check:
         domain = [value for value in declaration.get("domain", []) if value is not None]
         holds_parts = bool(domain) and set(domain) <= self.part_names
         per_part = any(name.endswith("." + part) for part in self.part_names)
-        places = after is None or after in self.cell.rids or after in self.part_names or bool(self.areas(after))
+        # A condition whose declared values are all places says where something is, null (no named place) too.
+        place_domain = bool(domain) and all(self.is_place_value(value) for value in domain)
+        places = after is None or after in self.part_names or self.is_place_value(after)
         if declaration.get("scope") == "part":
             return places
-        return holds_parts or per_part or (isinstance(after, str) and places) or after in self.named_poses()
+        return holds_parts or per_part or place_domain or (isinstance(after, str) and places)
+
+    def is_place_value(self, value: Any) -> bool:
+        """Return whether a value names a place: recorded geometry, a resource, or a named posture."""
+        return isinstance(value, str) and (value in self.cell.rids or value in self.cell.rids.values()
+                                           or value in self.named_poses() or bool(self.areas(value)))
 
     # Producers: declared effects that make the stated value, their preconditions and parameters.
 
@@ -752,7 +759,8 @@ def check_event(event: dict, session: dict, prepared: dict, cell: RecordedCell) 
     primitive_set = sorted({next(producer["primitive"] for producer in row["producers"]
                                  if producer["status"] == FEASIBLE)
                             for row in conditions if row["derivation"] == "producers" and row["status"] == FEASIBLE})
-    reasons = [row["reason"] for row in conditions + capability if row["status"] != FEASIBLE and row.get("reason")]
+    reasons = list(dict.fromkeys(row["reason"] for row in conditions + capability
+                                 if row["status"] != FEASIBLE and row.get("reason")))
     result = {"feasibility_status": status, "resource_jid": event.get("resource_jid"),
               "event_name": event.get("event_name"), "conditions": conditions, "capability": capability,
               "primitive_set": primitive_set}
