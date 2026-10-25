@@ -231,3 +231,11 @@ def test_a_resource_without_motion_cannot_move_a_part(cell, session):
     assert result["feasibility_status"] == "INFEASIBLE"
     place = next(row for row in result["capability"] if row["check"] == "place")
     assert place["reason"] == "M1 declares no motion that moves parts"
+
+
+def test_a_part_variable_another_resource_declares_is_a_variable_of_the_part(cell, session):
+    session["recovery_des_models"][BUFFER]["state_variables"]["product_location"] = {"scope": "part", "domain": []}
+    result = check_event(_event(UR, {"held_part": None, "product_location": "Buffer For Machined parts"}, part="P1"),
+                         session, {}, cell)
+    product = next(row for row in result["conditions"] if row["condition"] == "product_location")
+    assert (product["derivation"], product["status"]) == ("place", "FEASIBLE")

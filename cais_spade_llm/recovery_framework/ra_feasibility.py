@@ -148,7 +148,10 @@ class _Check:
         return rows
 
     def condition(self, jid: str, name: str, after: Any) -> dict:
-        declaration = self.variables(jid).get(name)
+        # A part's variables are the part-scoped ones any resource declares, as the knowledge base lists them.
+        declaration = self.variables(jid).get(name) or next(
+            (row for model in self.models.values() for key, row in (model.get("state_variables") or {}).items()
+             if key == name and row.get("scope") == "part"), None)
         row = {"entity": self.name_of(jid), "condition": name, "after": deepcopy(after)}
         if name == "resource_state":
             return {**row, "derivation": "free", "status": FEASIBLE}
