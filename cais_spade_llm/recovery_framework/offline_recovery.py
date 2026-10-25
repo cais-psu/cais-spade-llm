@@ -424,6 +424,8 @@ class SavedRecoveryProduct:
             self.llm_settings["reasoning_effort_source"] = "not_applicable"
         self.resources = {str(resource.jid): resource for resource in resources}
         self._last_structured_request = {}
+        # Set by a draft that runs the RA feasibility check (ra_feasibility.RecordedCell).
+        self.recorded_cell = None
 
 
     async def ask_llm_structured(self, prompt: str, **kwargs) -> dict:

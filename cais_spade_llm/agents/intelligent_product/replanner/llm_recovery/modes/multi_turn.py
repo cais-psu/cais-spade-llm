@@ -297,6 +297,7 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
         "outline_monitor_context": deepcopy(prepared_recovery_request.get("outline_monitor_context") or {}),
         "outline_context_retrieval": bool(recovery_session.get("outline_context_retrieval")),
         "outline_diagnostic_bypass": recovery_session.get("outline_diagnostic_bypass") is True,
+        "check_ra_feasibility": recovery_session.get("check_ra_feasibility") is True,
         "turn_index": 0,
         "max_turns": max_turns,
         "max_observations": max_observations,

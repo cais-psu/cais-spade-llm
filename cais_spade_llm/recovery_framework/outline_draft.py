@@ -177,8 +177,9 @@ class OutlineDraft:
     """Adapt saved-observation UI actions to execute_multi_turn_recovery."""
 
     def __init__(self, observations: dict, safety_files: list[str], *, root: Path = DRAFTS,
-                 model: str | None = None, reasoning_effort: str | None = None) -> None:
-        """Prepare a detached framework session; no validator checks the outline.
+                 model: str | None = None, reasoning_effort: str | None = None,
+                 check_ra_feasibility: bool = False) -> None:
+        """Prepare a detached framework session; only the RA feasibility check, when on, checks the outline.
 
         Args:
             observations: Immutable saved failure input and its recorded provenance.
@@ -186,6 +187,8 @@ class OutlineDraft:
             root: Directory for the fresh attempt's records.
             model: Optional attempt-specific provider model.
             reasoning_effort: Optional attempt-specific provider reasoning setting.
+            check_ra_feasibility: Check each proposed event with Alg. 1 and Eq. 12 against the capture's
+                recorded cell; a refusal returns to the LLM as validation feedback.
         """
         from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 
@@ -205,6 +208,11 @@ class OutlineDraft:
             jid: entry.get("execution_primitive_catalog") or []
             for jid, entry in observations["prepared_recovery_request"]["recovery_resources"].items()})
         self.provider = SavedRecoveryProduct(observations, [], model=model, reasoning_effort=reasoning_effort)
+        if check_ra_feasibility:
+            from .ra_feasibility import recorded_cell
+
+            self.prepared["recovery_session"]["check_ra_feasibility"] = True
+            self.provider.recorded_cell = recorded_cell(observations, _navigation_floor())
         self.planner = ProcessPlanner(self.provider, [])
         self.planner.nodes = deepcopy(observations.get("pending_nodes", []))
         self.provider.part_tracker = deepcopy(observations.get("part_tracker", {}))
@@ -215,7 +223,8 @@ class OutlineDraft:
         self._task: asyncio.Task | None = None
         self._stopped = False
         self.record = {"version": 2, "kind": "outline_draft", "pipeline": "execute_multi_turn_recovery",
-            "outline_diagnostic_bypass": True, "run_id": self.directory.name,
+            "outline_diagnostic_bypass": True, "ra_feasibility_check": check_ra_feasibility,
+            "run_id": self.directory.name,
             "status": "draft_ready", "scenario": observations["scenario"],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "source_path": observations["source_path"], "source_sha256": observations["source_sha256"],
@@ -311,7 +320,8 @@ class OutlineDraft:
             raise ValueError("Start fresh before generating another outline")
         self.directory.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
-        self.record.update(status="generating_draft", message="Generating multi_turn outline; validation is bypassed.")
+        checked = "the RA feasibility check is on" if self.record.get("ra_feasibility_check") else "validation is bypassed"
+        self.record.update(status="generating_draft", message=f"Generating multi_turn outline; {checked}.")
         self._save()
         try:
             while not self._stopped:

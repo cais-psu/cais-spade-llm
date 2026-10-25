@@ -106,3 +106,12 @@ def test_a_base_pose_needs_a_free_footprint_and_a_way_from_the_start():
     right = free_base_poses(floor, [1.0, 0.6], [1.0, 2.0], [3.0, 2.0], radius_m=0.5)
     assert left and not right
     assert all(abs(x - 2.0) >= 0.4 for x, _, _ in left)
+
+
+def test_a_footprint_names_the_floor_obstacles_it_overlaps():
+    from cais_spade_llm.resources.kinematic_reach import footprint_obstacles
+
+    floor = {"floor_extent_xy": [0.0, 4.0, 0.0, 4.0], "floor_obstacles_xy": {"wall": [1.9, 2.1, 0.0, 4.0]}}
+    assert footprint_obstacles(floor, [1.0, 0.6], [1.6, 2.0, 0.0]) == ["wall"]
+    # Turned a quarter, the same base is 0.6 m long in x and clears the wall.
+    assert footprint_obstacles(floor, [1.0, 0.6], [1.55, 2.0, 1.5707963267948966]) == []

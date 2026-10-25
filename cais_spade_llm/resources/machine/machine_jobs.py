@@ -28,11 +28,14 @@ def machine_primitive_contracts(machine: dict) -> dict[str, list[dict]]:
 
     Returns:
         Each primitive's alternative contracts, plus ``complete_job``: ``preconditions`` and ``effects``
-        on the machine, ``product_guards`` and ``product_effects`` on the part, and for completion
+        on the machine, ``product_guards`` and ``product_effects`` on the part, ``parameters`` with the
+        declared values a command accepts (its programs, processes and results), and for completion
         ``controllable`` false with the ``after_sec`` it waits.
     """
     rid = machine["resource_id"]
     part = {"part_name": {"equals_from_param": "part_name"}}
+    processes = machine.get("process_capabilities") or {}
+    results = sorted({result for process in processes.values() for result in process.get("supported_results", [])})
 
     def control(before: dict, status: str) -> dict:
         return {"preconditions": {"resource_state": before, **part},
@@ -48,9 +51,11 @@ def machine_primitive_contracts(machine: dict) -> dict[str, list[dict]]:
                    "product_guards": {"current_process": {"matches": {"status": "paused", "machine": rid}}}}]
     return deepcopy({
         "select_program": [{"preconditions": {"resource_state": {"not_equals": "running"}},
+                            "parameters": {"program": {"enum": sorted(machine.get("program_options") or {})}},
                             "effects": {"selected_program": {"set_from_param": "program"}}}],
         "start_job": [{
             "preconditions": {"resource_state": {"equals": "loaded"}, **part},
+            "parameters": {"process": {"enum": sorted(processes)}, "result": {"enum": results}},
             # A paused job resumes and a stopped one cannot restart, so the part has no unfinished job here.
             "product_guards": {"current_process": {"not_matches": {"machine": rid}}},
             "effects": {"resource_state": {"set": "running"}},

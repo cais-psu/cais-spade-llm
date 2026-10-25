@@ -3848,7 +3848,7 @@ def _outline_recorded_reach_reason(reason: Any) -> bool:
 
 
 _CODE_AUTHORED_FEEDBACK = {"selected_candidate_rejected", "recovery_complete_format", "custody_discontinuity",
-                           "invalid_candidate_response", "candidate_schema_violation"}
+                           "invalid_candidate_response", "candidate_schema_violation", "ra_feasibility"}
 
 
 def _outline_feedback_for_prompt(

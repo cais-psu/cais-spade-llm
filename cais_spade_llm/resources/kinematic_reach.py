@@ -265,6 +265,12 @@ def _box(bounds: Sequence[float]) -> list[tuple[float, float]]:
     return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
 
 
+def footprint_obstacles(floor: Mapping[str, Any], footprint: Sequence[float], pose: Sequence[float]) -> list[str]:
+    """Return the floor obstacles a base footprint centred on a planar pose ``[x, y, yaw]`` overlaps."""
+    corners = _corners(*pose[:3], footprint)
+    return [name for name, bounds in floor["floor_obstacles_xy"].items() if not _separated(corners, _box(bounds))]
+
+
 def free_base_poses(floor: Mapping[str, Any], footprint: Sequence[float], start_xy: Sequence[float],
                     around_xy: Sequence[float], *, docks: Sequence[Sequence[float]] = (),
                     radius_m: float = 1.5) -> list[list[float]]:
