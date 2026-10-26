@@ -776,6 +776,20 @@ checker skips the KMR's `approached_part` as bookkeeping, like `task_ctx.*` (no 
 KMR's two-step pick together), and the checker is built overnight, offline only. Marking `approached_part` private
 waits for the prompt decisions.
 
+**October 25, late night: Machining with gpt-6.1-sol at xhigh effort — a valid recovery, misjudged by a handoff bug.**
+`draft_f7d4be63…`: 25 calls, 20 events, 10.1 min, about 332k tokens. The KMR takes RGOCG4 from M2 to Storage, fetches
+KET4 from M1 into M2, KET4's trim runs and completes on M2, the KMR stores the finished KET4 in Storage, brings
+RGOCG4 back into M2, M2 resumes the circle trim, and the KMR ends idle at M2. RA check: 20/20 feasible. The draft
+records "nominal work cannot take over", but that is a bug: the KMR's planned trip M2 → Storage
+(`environment_22`) is bound by `multi_turn_diagnostic._declared_event` to the first declared `move_to_resource`
+variant with matching bindings, the one that carries a part (`held_part` not null, `carrying`). The KMR was
+travelling empty at the failure, and its empty-trip variant (`held_part` null, `idle`) has the same bindings. No
+recovery that leaves an empty KMR could satisfy the carrying variant. Re-judged with the variant whose guards
+hold, the handoff is complete (both `environment_22` and `environment_24` enabled). Fix (awaiting the user): bind a
+recorded task to every declared variant its parameters match and enable its entry when any variant's guards hold
+(also used by the connection search and `_recorded_task`). Earlier Machining verdicts are unaffected: those runs
+left the KMR at no named location or stranded RGOCG4.
+
 **October 25, late night: the Recovery Goal lists normal production's next planned tasks (`8ddf36d`), then Machining
 with gpt-5 low and gpt-6.1-sol high.** The goal now shows, after the interrupted outcome, "Then normal production
 carries out:" with the entries the handoff requires (Machining: M2 complete_job of RGOCG4 trim → circle; KMR
