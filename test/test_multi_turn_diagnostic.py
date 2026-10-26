@@ -330,6 +330,37 @@ def test_a_resumed_entry_no_declared_event_binds_is_stated_as_not_checked(shared
                                      "advance_conveyor; whether nominal work continues there is not checked"}]
 
 
+def test_a_resumed_entry_runs_whichever_declared_variant_its_state_enables(shared_cell, tmp_path):
+    record, specs = shared_cell
+    request = record["prepared_recovery_request"]
+    trip = {"event_name": "move_to_resource", "updates": {"resource_location": {"set": "store"}},
+            "parameter_bindings": {"resource_id": {"equals": "cart"}, "target_resource": {"equals": "store"},
+                                   "source_resource": {"equals": "station"}}}
+    # The same trip with or without a part: the recorded parameters match both, the state decides which runs.
+    carrying = {**trip, "guards": {"resource_location": {"equals": "station"}, "held_part": {"not_equals": None},
+                                   "resource_state": {"equals": "carrying"}}}
+    empty = {**trip, "guards": {"resource_location": {"equals": "station"}, "held_part": {"equals": None},
+                                "resource_state": {"equals": "idle"}}}
+    request["recovery_resources"]["cart"] = {"resource_jid": "cart", "resource_type": "resource",
+        "recovery_snapshot": {"resource_jid": "cart", "resource_state": "idle", "resource_location": "station",
+                              "held_part": None},
+        "recovery_des_model": {"state_variables": {name: {"scope": "resource", "type": ["string", "null"]} for name in
+                                                   ("resource_state", "resource_location", "held_part")},
+                               "events": [carrying, empty]}}
+    request["marked_reentry_context"]["pending_suffixes"].append(
+        {"role": "resume_suffix", "resource_jid": "cart", "entry_task_id": "resume_cart"})
+    record["pending_nodes"].append({"id": "resume_cart", "function_name": "move_to_resource",
+                                    "params": {"resource_id": "cart", "target_resource": "store", "source_resource": "station"}})
+    record["jids"]["cart"] = "cart"
+    request["llm_input"]["observed_runtime_state"]["resources"].append(
+        {"resource_jid": "cart", "resource_state": "idle", "resource_location": "station", "held_part": None})
+    prepared, session = _draft((record, specs), tmp_path)
+    _apply(_cell_recovery(), session, prepared)
+    state = multi_turn_diagnostic.handoff(session, prepared)
+    assert "nominal_entry:resume_cart" in state["required_nominal_entry_ids"]
+    assert "nominal_entry:resume_cart" in state["proposed_nominal_entry_ids"]
+
+
 def test_prompt_states_recorded_facts_for_every_robot_without_tuned_targets(shared_cell, tmp_path, monkeypatch):
     record, specs = shared_cell
     provider = AsyncMock(side_effect=[{"thought": "Use recorded facts.", "decision": "grounded", "observations": []},

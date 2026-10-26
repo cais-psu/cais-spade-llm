@@ -172,13 +172,21 @@ def pose_relations(pose: dict, regions: dict, locations: dict[str, set[str]], en
                                     if jid not in envelopes and jid not in located and (not names or jid in movers))}
 
 
-def _declared_event(model: dict, node: dict) -> dict | None:
-    """Return the declared event a recorded task runs, matching its fixed parameter bindings."""
+def _declared_events(model: dict, node: dict) -> list[dict]:
+    """Return every declared event a recorded task may run: those matching its fixed parameter bindings.
+
+    A task's parameters can match several variants that differ only in their guards, such as a mobile
+    base's trip with or without a part; which one runs depends on the state it starts from.
+    """
     params = node.get("params", {})
-    return next((event for event in model.get("events", []) if event.get("event_name") == node.get("function_name")
-                 and not any(name in params and "equals" in binding and params[name] != binding["equals"]
-                             for name, binding in event.get("parameter_bindings", {}).items() if isinstance(binding, dict))),
-                None)
+    return [event for event in model.get("events", []) if event.get("event_name") == node.get("function_name")
+            and not any(name in params and "equals" in binding and params[name] != binding["equals"]
+                        for name, binding in event.get("parameter_bindings", {}).items() if isinstance(binding, dict))]
+
+
+def _declared_event(model: dict, node: dict) -> dict | None:
+    """Return the first declared event a recorded task may run (see ``_declared_events``)."""
+    return next(iter(_declared_events(model, node)), None)
 
 
 def _task_part(node: dict, prepared: dict) -> str | None:
@@ -239,12 +247,12 @@ def nominal_rows(session: dict, prepared: dict) -> list[dict]:
         node = nodes[identifier]
         params = node.get("params", {})
         jid = suffix.get("resource_jid") or prepared.get("observation_jids", {}).get(params.get("resource_id"))
-        event = _declared_event(session.get("recovery_des_models", {}).get(jid, {}), node)
-        if event is not None:
+        events = _declared_events(session.get("recovery_des_models", {}).get(jid, {}), node)
+        if events:
             rows.append({"event_id": "nominal_entry:" + identifier,
                 "task": {"task_id": identifier, "resource_jid": jid, "part_name": params.get("part_name"),
                          "function_name": node["function_name"], "params": deepcopy(params)},
-                "ra_event": deepcopy(event), "tool": {}})
+                "ra_event": deepcopy(events[0]), "ra_events": deepcopy(events), "tool": {}})
     return rows
 
 
@@ -668,34 +676,37 @@ def nominal_entry_ids(session: dict, prepared: dict) -> set[str]:
         task = row.get("task", {})
         jid, part_name = task.get("resource_jid"), task.get("part_name")
         resource, part = resources.get(jid, {}), parts.get(part_name, {})
-        event = row.get("ra_event", {})
-        source = event.get("capability_transition", {}).get("source", {})
-        # A part must actually be proposed at the recorded entry location. Unknown
-        # controller fields cannot supply that missing public handoff condition.
-        location = source.get("part_location")
-        if part_name and location is not None and part.get("part_location") != location:
-            continue
         params = task.get("params", {})
-        matches = True
         variables = session.get("recovery_des_models", {}).get(jid, {}).get("state_variables", {})
-        for name, guard in event.get("guards", {}).items():
-            if name == "active_job" or name.startswith(("task_ctx.", "_")):
-                assumptions.append({"task_id": task.get("task_id"), "field": name, "reason": "owner bookkeeping not checked"})
+        # The task may run any declared variant its parameters match; it is enabled when one variant is.
+        for event in row.get("ra_events") or [row.get("ra_event", {})]:
+            source = event.get("capability_transition", {}).get("source", {})
+            # A part must actually be proposed at the recorded entry location. Unknown
+            # controller fields cannot supply that missing public handoff condition.
+            location = source.get("part_location")
+            if part_name and location is not None and part.get("part_location") != location:
                 continue
-            state = part if variables.get(name, {}).get("scope") == "part" else resource
-            if name not in state or name in session.get("diagnostic_unknown_owner_fields", {}).get(jid, []):
-                assumptions.append({"task_id": task.get("task_id"), "field": name, "reason": "owner state unknown after tentative transfer"})
-                continue
-            if not comparison._recovery_event_guard_is_satisfied(event=event, condition=guard,
-                    actual=comparison._exact_state_field_value(state, name), resource_jid=jid,
-                    part_name=part_name or "", resource_row=resource, part_row=part, parameters=params):
-                matches = False
+            matches, notes = True, []
+            for name, guard in event.get("guards", {}).items():
+                if name == "active_job" or name.startswith(("task_ctx.", "_")):
+                    notes.append({"task_id": task.get("task_id"), "field": name, "reason": "owner bookkeeping not checked"})
+                    continue
+                state = part if variables.get(name, {}).get("scope") == "part" else resource
+                if name not in state or name in session.get("diagnostic_unknown_owner_fields", {}).get(jid, []):
+                    notes.append({"task_id": task.get("task_id"), "field": name,
+                                  "reason": "owner state unknown after tentative transfer"})
+                    continue
+                if not comparison._recovery_event_guard_is_satisfied(event=event, condition=guard,
+                        actual=comparison._exact_state_field_value(state, name), resource_jid=jid,
+                        part_name=part_name or "", resource_row=resource, part_row=part, parameters=params):
+                    matches = False
+                    break
+            # Another resource may declare its own half of the resumed task's joint event, such as where its part must be.
+            neighbors = _neighbor_guards(jid, event, part_name or "", session, prepared, resources, part, params) if matches else None
+            if neighbors is not None:
+                assumptions += [*notes, *({"task_id": task.get("task_id"), **note} for note in neighbors)]
+                enabled.add(row["event_id"])
                 break
-        # Another resource may declare its own half of the resumed task's joint event, such as where its part must be.
-        neighbors = _neighbor_guards(jid, event, part_name or "", session, prepared, resources, part, params) if matches else None
-        if neighbors is not None:
-            assumptions += [{"task_id": task.get("task_id"), **note} for note in neighbors]
-            enabled.add(row["event_id"])
     session["diagnostic_handoff_assumptions"] = assumptions
     return enabled
 
@@ -1302,10 +1313,15 @@ def _recorded_task(jid: str, node: dict, state: dict, prepared: dict, resources:
     variables, params = model.get("state_variables", {}), node.get("params", {})
     part = params.get("part_name") or ""
     resource_row, part_row = resources.get(jid, {}), part_rows.get(part, {}) if part else {}
-    event = _declared_event(model, node)
-    if (event is None or not _public_guards_hold(event, variables, jid, part, resource_row, part_row, params)
-            or not _parameters_resolve(event, jid, part, resource_row, part_row, params)
-            or (chosen := _neighbor_rows(jid, event, part, state, prepared, resources, part_row, params)) is None):
+    # The task runs the declared variant whose guards hold in this state, such as a trip with or without a part.
+    event, chosen = None, None
+    for variant in _declared_events(model, node):
+        if (_public_guards_hold(variant, variables, jid, part, resource_row, part_row, params)
+                and _parameters_resolve(variant, jid, part, resource_row, part_row, params)
+                and (chosen := _neighbor_rows(jid, variant, part, state, prepared, resources, part_row, params)) is not None):
+            event = variant
+            break
+    if event is None:
         return None
     task = generation._recovery_event_instance_task(
         outline_id=f"NOMINAL_CONNECTION_{depth + 1}", resource_jid=jid, event=event,
