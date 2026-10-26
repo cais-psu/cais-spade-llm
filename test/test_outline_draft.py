@@ -85,10 +85,15 @@ def observations(tmp_path):
 
 
 def response():
-    return {"thought": "A supplied test draft, not a generated recovery.", "candidate_events": [{
-        "outline_id": "draft_step", "event_name": "Arbitrary task event", "resource": "M2",
-        "part_name": "KET4_Square_4mm", "expected_end_state": {"resource_state": "completed"},
-        "rationale": "Assumption remains unvalidated."}]}
+    # Drafts propose two to five ways to do the next step and choose one.
+    return {"thought": "A supplied test draft, not a generated recovery.", "selected_candidate_index": 0,
+            "candidate_events": [{
+                "outline_id": "draft_step", "event_name": "Arbitrary task event", "resource": "M2",
+                "part_name": "KET4_Square_4mm", "expected_end_state": {"resource_state": "completed"},
+                "rationale": "Assumption remains unvalidated."}, {
+                "outline_id": "draft_alternative", "event_name": "Another task event", "resource": "M2",
+                "part_name": "KET4_Square_4mm", "expected_end_state": {"resource_state": "idle"},
+                "rationale": "An alternative the draft does not choose."}]}
 
 
 def test_draft_retrieval_generation_and_reload_never_validate(observations, tmp_path, monkeypatch):
@@ -437,3 +442,27 @@ def test_scene_geometry_describes_layout_without_routes_docks_or_assignments():
     for hint in ("docking", "handling_robot", "route", "staging_pose", "conveyor_loading_pose", "normal_output_transfer",
                  "output_handling_robot"):
         assert hint not in text
+
+
+def test_ra_feasibility_toggle_reaches_the_next_offline_draft(observations, monkeypatch):
+    from cais_spade_llm.recovery_framework import part_slippage_example
+
+    # The fixture records no physical evidence for the RA's cell, so the draft is recorded, not built.
+    created = Mock(side_effect=ValueError("draft recorded"))
+    monkeypatch.setattr(outline_draft, "OutlineDraft", created)
+    monkeypatch.setattr(part_slippage_example, "read_observations", lambda path: deepcopy(observations))
+    example = PartSlippageExample(SimpleNamespace(system_running=False))
+    example.set_options(source="offline", scenario=observations["scenario"], safety_files=[],
+        observation_path=observations["source_path"], defer_preparation=True)
+    assert example.snapshot()["check_ra_feasibility"] is False
+    with pytest.raises(ValueError, match="on or off"):
+        example.set_ra_feasibility_check("on")
+    assert example.set_ra_feasibility_check(True)["check_ra_feasibility"] is True
+
+    async def run():
+        await example.action("generate_outline_fresh")
+        await example._task
+
+    asyncio.run(run())
+    assert created.call_args.kwargs["check_ra_feasibility"] is True
+    assert example.snapshot()["status"] == "blocked"

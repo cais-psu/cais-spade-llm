@@ -644,7 +644,8 @@ def _outline_candidates_response_schema(
         normalized_selection_mode = "pure_llm"
     if normalized_selection_mode == "neurosymbolic":
         normalized_horizon = "1"
-        candidate_min_items = 1
+        # Alternatives to compare each turn (the paper's candidate set); one candidate leaves no fallback.
+        candidate_min_items = 2
         candidate_max_items = _DEFAULT_CANDIDATE_BOUND
     elif normalized_horizon == "1":
         candidate_min_items = _ONE_STEP_CANDIDATE_COUNT
@@ -4635,10 +4636,10 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
     template = payload["outline_template"]
     accepted = list(session_state.get("accepted_outline_prefix") or [])
     selection = (
-        "Plan how to get from the current state to the Recovery Goal. Propose 1–5 ways to do the next step of that "
+        "Plan how to get from the current state to the Recovery Goal. Propose 2–5 different ways to do the next step of that "
         "plan, then choose one with `selected_candidate_index`."
         if llm_selects_next_event(session_state) else
-        "Plan how to get from the current state to the Recovery Goal. Propose 1–5 ways to do the next step of that "
+        "Plan how to get from the current state to the Recovery Goal. Propose 2–5 different ways to do the next step of that "
         "plan. Do not select or rank candidates; the enabled outline checks validate each one."
     )
     recorded = ("Expected after the events so far, not re-measured." if accepted

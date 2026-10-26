@@ -412,7 +412,7 @@ def test_the_prompt_asks_for_a_plan_and_dates_the_failure_facts_once_events_exis
         assert "- `neighbor_end_state`: when moving the part changes another resource" in prompt
         assert ("Until normal production takes over, only your recovery events change the planned state; a job "
                 "already running keeps running until an event pauses or stops it.") in prompt
-        assert ("Plan how to get from the current state to the Recovery Goal. Propose 1–5 ways to do the next step "
+        assert ("Plan how to get from the current state to the Recovery Goal. Propose 2–5 different ways to do the next step "
                 "of that plan, then choose one with `selected_candidate_index`.") in prompt
         assert "Give your plan in `thought` (two short sentences)" in prompt
     # Drafts offer neighbor_end_state right after the event's own end state.
