@@ -751,6 +751,28 @@ deliberately does not list the states the next task needs).
    model and part (all remaining tasks, not only each part's next step). This would catch an outline that leaves a
    machine's job paused when $H$ holds (the v5 ur5e-1 outlines; whether normal work stalls there is unconfirmed).
 
+**Stranded parts (user, October 26).** A recovery that leaves a part where no normal-production event acts on it
+violates Eq. 6, even when $H$ holds. Machining `draft_373bd875…` leaves the trimmed KET4 on M2's staging tray. In the
+nominal model (`nominal_des.py`, from the manifest's `handling_robot` and `nominal_parts`), each machine's handling
+robot handles only that machine's parts: ur5e-2 picks M2's parts from M2 or M2's tray and places them on the Conveyor
+or the tray, and M2's `part_name` and `staging_part` values are only M2's parts. So no nominal event takes KET4 from
+the tray (or from inside M2) toward its remaining requirement, assembly at `GMC_Laser_Plate_Virtual/KET4_Square_4mm`.
+Stage 1 misses it: only the three tasks pending at the failure are checked, and with the KMR set idle at M2 that
+outline passes `handoff` (checked offline). Stage 2 catches it only if:
+- it searches the CCA's nominal models (the ones Eq. 13 admits nominal events with), not the recovery models. Their
+  generic robot pick and place accept any part at any place without reach: today's connection search lets ur5e-1
+  pick KET4 from M2's tray and place it on assembly_board-v1, neither of them among its reachable locations;
+- its goal is each part's remaining requirements (the product's `requirements` minus `processCompleted`) and the
+  resources' marked states. The capture records only each part's current operation (KET4: trim on M1), so the rest
+  of the route comes from the nominal model built from the manifest, searched per part toward its goal (the route
+  from M2's tray to the plate is far longer than the 6-event connection search).
+
+The refusal is computed from model data, never from a rule about trays or part names: the part, where it is, its
+remaining requirement, and, under option (b) below, why no nominal event acts there, read from the declared domains
+and guards (for example "in normal production M2 staging tray holds only RGOCG4-50_Round_4mm, RGOCG8-50_8mm,
+RGOCG12-50_12mm, RGOCG16-50_16mm"). It comes when the LLM declares `recovery_complete`, before normal production
+takes over, and synthesis continues from the same state.
+
 **Open decision for the user: how much the refusal states.** (a) The blocked planned task only ("normal production
 cannot start environment_24: M2 trims RGOCG4 → circle"), as proposed on October 23; or (b) the task and its unmet
 condition ("… needs RGOCG4 in M2; RGOCG4 is at the Conveyor's output_nest"), which is how the RA states a failed

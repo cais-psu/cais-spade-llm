@@ -94,6 +94,10 @@ name the section or equation it implements. If it maps to none, ask the user fir
     not, the declaration is rejected and the CCA returns the blocked task and its unmet condition as
     feedback (facts only); synthesis continues from $x^R_m$. The PA supplies the remaining plan and
     the handoff condition $H$, and ends synthesis only when the CCA accepts.
+  - A part left where no nominal event acts on it blocks $s_N$ even when $H$ holds (user, October 26).
+    Example: the trimmed KET4 left on M2's staging tray, which in the nominal models holds only M2's
+    parts. The check runs on the nominal models, with each part's remaining requirements as the goal,
+    and states the blocked part from their declared domains and guards, never from a rule about places.
   - Not a specification: completion is expressed by the marked states of the resource and product
     models. The specifications in $\Phi$ are safety properties checked on prefixes by monitors;
     completion is a liveness requirement already encoded by $L_m(G^R)$, and stating it as a
