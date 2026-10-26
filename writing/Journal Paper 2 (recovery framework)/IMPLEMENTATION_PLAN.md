@@ -790,6 +790,26 @@ downstream handling", RGOCG4 resumed on M2, the KMR left at a free spot north of
 cannot start). It looked up eight resources' pending tasks but not KET4's target. Not a success; whether normal
 production would take a finished part from the staging tray is not modelled.
 
+**October 26, later: two to five candidates per turn (`ed3d9fe`), then Machining with gpt-5.4 medium.**
+gpt-6.1-sol xhigh `draft_192bb2b7…` proposed one candidate on every turn; the user stopped it after 9 events (cost).
+gpt-5.4 medium `draft_e3717701…` (2–5 rule): 13 calls, 11 events. It pauses M1 and M2, ur5e-1 puts KET4 on M1's
+staging tray, ur5e-2 parks RGOCG4 on M2's tray, ur5e-1 takes KET4 to the Conveyor, two advances bring it to loading
+position 2, M2 selects square, ur5e-2 loads KET4 into M2, M2 "resumes" KET4's job, then `recovery_complete`. It is
+the first run to use the staging trays and the Conveyor. Not a success:
+- RGOCG4 stays paused on M2's tray and nothing reloads it, so M2's planned completion (`environment_24`) cannot happen.
+- It declares completion while KET4's trim is still running on M2; the goal says completed.
+- RA replay (offline): the first 10 applied events are feasible; the 11th (M2 resumes KET4's job) and both its
+  alternatives are INFEASIBLE. The paused job record is M1's (a reloaded part resumes only a job its own machine
+  paused), and `start_job` needs M2 `loaded`, but M2 stayed `paused`: the stated unload of RGOCG4 and load of KET4
+  never changed M2's `resource_state`. With the check on, that turn would have gone back to the LLM with these facts.
+- Handoff finding, not the LLM's: the KMR's planned trip M2 → Storage (`environment_22`) was dispatched and then
+  cancelled at the failure (`nominal_dispatch_blocked`, `cancelled: true` in `capture_37e090a5…`). The capture leaves
+  the KMR `travelling` at M2, which holds neither trip variant's guard (`carrying` with a part, or `idle` empty), so
+  `environment_22` is not enabled even at the failure state: every outline that leaves the KMR alone fails the
+  handoff. The prompt shows only "travelling; resource_location M2". The runs that met it happened to end with the
+  KMR idle at M2. Awaiting the user: how a cancelled trip is recorded (the KMR's state after cancellation), or
+  whether a cancelled trip restarts from where it stopped.
+
 **October 25, late night: Machining with gpt-6.1-sol at xhigh effort — a valid recovery, misjudged by a handoff bug.**
 `draft_f7d4be63…`: 25 calls, 20 events, 10.1 min, about 332k tokens. The KMR takes RGOCG4 from M2 to Storage, fetches
 KET4 from M1 into M2, KET4's trim runs and completes on M2, the KMR stores the finished KET4 in Storage, brings
