@@ -767,16 +767,19 @@ outline passes `handoff` (checked offline). Stage 2 catches it only if:
   of the route comes from the nominal model built from the manifest, searched per part toward its goal (the route
   from M2's tray to the plate is far longer than the 6-event connection search).
 
-The refusal is computed from model data, never from a rule about trays or part names: the part, where it is, its
-remaining requirement, and, under option (b) below, why no nominal event acts there, read from the declared domains
-and guards (for example "in normal production M2 staging tray holds only RGOCG4-50_Round_4mm, RGOCG8-50_8mm,
-RGOCG12-50_12mm, RGOCG16-50_16mm"). It comes when the LLM declares `recovery_complete`, before normal production
-takes over, and synthesis continues from the same state.
+The refusal is computed from model data, never from a rule about trays or part names: the declared domains and
+guards decide that no nominal event acts on the part where it is. Under the decision below it states the part,
+where it is and its remaining requirement ("KET4_Square_4mm cannot reach its remaining requirement (assembly at
+GMC_Laser_Plate_Virtual/KET4_Square_4mm) from M2 staging tray"), not why. It comes when the LLM declares
+`recovery_complete`, before normal production takes over, and synthesis continues from the same state.
 
-**Open decision for the user: how much the refusal states.** (a) The blocked planned task only ("normal production
-cannot start environment_24: M2 trims RGOCG4 → circle"), as proposed on October 23; or (b) the task and its unmet
-condition ("… needs RGOCG4 in M2; RGOCG4 is at the Conveyor's output_nest"), which is how the RA states a failed
-precondition. Both are facts; (b) says more about what to repair. `connection_blockers` was written to say neither.
+**Decided by the user (October 26): the refusal states only what is blocked, option (a).** It names the planned task
+that cannot start ("normal production cannot start environment_24 (M2 complete_job of RGOCG4-50_Round_4mm, trim →
+circle)") or the part that cannot reach its remaining requirement from where it is, never the conditions they need.
+Rejected (b), the task and its unmet condition ("… needs RGOCG4 in M2; RGOCG4 is at the Conveyor's output_nest"):
+unlike an RA refusal, which says why the LLM's own step cannot happen, those conditions describe the end state other
+resources and parts must reach, the kind of fact removed from the Recovery Goal as close to an answer. The LLM can
+still look the details up. `connection_blockers` today names neither.
 
 **Then.** Live checked drafts on the four v5 captures with both checks on (`check_ra_feasibility` and
 `check_nonblocking`), compared with the unchecked baselines.
@@ -847,9 +850,41 @@ Storage, source_resource M2, status canceled" and "KMR (kmr)  idle; held_part no
 completes the handoff; `draft_373bd875…`, `draft_f931aa72…` (KMR left at a free spot) and `draft_e3717701…` (KMR never
 moved) do not. "Fix B" (a pending trip counts as done when the KMR ends at Storage) was not built: the current
 connection search already accepts that end through one trip back to M2. Tests: `test_failure_grounding` (A3 test,
-official table); the neighbouring recovery suites pass (614 passed, 1 skipped). Still open: the reach gap in
-`_nominal_successors` (generic robot pick/place ignore declared reachable locations), the machine resume rule and the
-job-control wording (awaiting the user).
+official table); the neighbouring recovery suites pass (614 passed, 1 skipped). The reach gap in
+`_nominal_successors`, the machine resume rule and the job-control wording were then approved and done (next entry).
+
+**October 26, later: machine job rule, job-control wording, handoff reach check and CCA refusal (user approved all
+four).**
+1. A machine commands only a job in its own record (`machine_jobs.machine_primitive_contracts` for the RA,
+   `environment_models._declare_machine_jobs` for the plant model): pause, both resumes, stop and complete need the
+   part's `current_process` to name the machine, and the resume after a reload also needs the part's record to say
+   paused (the machine's state no longer does). Before, only that reload variant was guarded, so a machine left
+   `paused` after a recovery swapped parts could resume another machine's paused job: with M1's name kept on KET4's
+   job, the RA accepted M2 resuming it (the last step of `draft_e3717701…`). It is now INFEASIBLE either way, as the
+   machine runtime always refused it. Normal production is unchanged, because a started job names its machine. The RA
+   reads current code, so this holds for the v5 captures now; their recorded plant models keep the old guards until
+   the next capture. A job record an event states without a machine now names the acting resource by resource id
+   (`multi_turn._stated_current_process`), as `start_job` and the guards do.
+2. The machine line states job control by what the commands do (`multi_turn_outline_facts.job_control_text`): "job
+   control: a paused job continues from where it was paused, also after its part is unloaded and loaded back in; a
+   stopped job cannot be restarted". The `static_capabilities` lookup serves the same sentence. Before, the flag names
+   `resume_after_reload true, restart_stopped_jobs false`, which the LLM read as permission for M2 to resume a job M1
+   paused. No alternative is named; the jobs list beside it shows which machine holds each job. The M1/M2 lines of
+   all four scenarios change.
+3. The handoff's connection search uses a generic robot pick, place or grasp only at a place the robot declares it
+   reaches (`multi_turn_diagnostic._places_reached`: the pick's origin is where the part is, the place's destination is
+   the part's goal location, a grasp or insert acts where the robot is). Before, ur5e-1 could pick KET4 from M2's tray
+   and place it on assembly_board-v1.
+4. The CCA refusal states only what is blocked, option (a) (see the CCA section and `PAPER_FRAMEWORK.md`).
+
+Checks: an independent review (three agents) found no high-severity defect; its fixes are in (the resume while paused
+guarded by the machine only, the lookup wording, the grasp's place, a stated job's machine, more test cases). Every
+new or changed test fails on the code before the change. Replays of all 16 drafts give identical handoff results and
+connections before and after. Suites: 1257 passed, 3 skipped; the six failures in `test_nominal_resource_des.py` also
+fail on the committed code. Found by the review, not fixed (awaiting the user): a resume also needs the job's original
+program selected again, which the runtime checks and no model guard states, so the RA would accept a resume the
+machine refuses (no draft hit it); and the faulted M1's interrupted job can be paused in the model, though the runtime
+refuses it.
 
 **October 25, late night: Machining with gpt-6.1-sol at xhigh effort — a valid recovery, misjudged by a handoff bug.**
 `draft_f7d4be63…`: 25 calls, 20 events, 10.1 min, about 332k tokens. The KMR takes RGOCG4 from M2 to Storage, fetches
@@ -1785,7 +1820,7 @@ one paper concept, so the same terms fit any resource and any failure. See also 
 | `capabilities:` | what the resource's declarations allow; omitted when it declares none | resource capabilities in $\mathcal{K}$ (Fig. 5) |
 | `reachable locations` | places its declared events can take it to (`reachability` / `resource_location` domain) | Fig. 5 "reachable locations" |
 | `(normally <resource>'s <function>; <resource> <value>)` on a goal line | the recorded replaced task that normally produces the outcome, and the reported fault of each resource it needs (October 21) | the interrupted work $s_F$'s remaining nominal part |
-| `job control: <flag> <value>` | the resource's declared job-control flags, e.g. `resume_after_reload true, restart_stopped_jobs false` (October 20) | resource capabilities in $\mathcal{K}$ (Fig. 5) |
+| `job control: <what its job commands do>` | the resource's declared job control stated by what it allows, e.g. `a paused job continues from where it was paused, also after its part is unloaded and loaded back in; a stopped job cannot be restarted` (October 26; until then the flag names `resume_after_reload true, restart_stopped_jobs false`, October 20) | resource capabilities in $\mathcal{K}$ (Fig. 5) |
 | `places parts on <place> at <position>` | for a reachable place that keeps each part's position (a per-part variable), where its own declared events put a part this resource places there; a separate item, so the place name stays as declared (October 20) | the place's declared effect of the shared placement event in $G=\Vert_i G_i$ |
 | `workspace bounds` | a declared reach area (`gripper_reach`), detailed by the pose lookup (`/resources/<name>/pose_relations`); the "(look up)" tag was dropped on October 20 (user) | Fig. 5 "workspace bounds", $C_\rho$ |
 | `moves to any position (x, y, yaw)` | a declared event that sets its location from free numeric parameters | free parameters $\theta$ |

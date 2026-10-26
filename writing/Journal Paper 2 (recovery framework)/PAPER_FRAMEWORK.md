@@ -91,13 +91,16 @@ name the section or equation it implements. If it maps to none, ask the user fir
     enforces only Eq. 13. There is no per-event progress check (user, October 25): it would be a
     distance-to-goal heuristic, the kind of hidden rule removed on October 22.
   - What: whether the remaining planned events $s_N$ lead from $x^R_m$ to a marked state of $G^R$. If
-    not, the declaration is rejected and the CCA returns the blocked task and its unmet condition as
-    feedback (facts only); synthesis continues from $x^R_m$. The PA supplies the remaining plan and
+    not, the declaration is rejected and the CCA returns what is blocked as feedback (facts only): the
+    planned task that cannot start, or the part that cannot reach its remaining requirement from where
+    it is, never the conditions they need (user, October 26: those describe the end state other
+    resources must reach, close to an answer); synthesis continues from $x^R_m$. The PA supplies the remaining plan and
     the handoff condition $H$, and ends synthesis only when the CCA accepts.
   - A part left where no nominal event acts on it blocks $s_N$ even when $H$ holds (user, October 26).
     Example: the trimmed KET4 left on M2's staging tray, which in the nominal models holds only M2's
-    parts. The check runs on the nominal models, with each part's remaining requirements as the goal,
-    and states the blocked part from their declared domains and guards, never from a rule about places.
+    parts. The check runs on the nominal models, with each part's remaining requirements as the goal;
+    their declared domains and guards decide that the part is blocked, never a rule about places, and
+    the refusal states the part, where it is and its remaining requirement.
   - Not a specification: completion is expressed by the marked states of the resource and product
     models. The specifications in $\Phi$ are safety properties checked on prefixes by monitors;
     completion is a liveness requirement already encoded by $L_m(G^R)$, and stating it as a
