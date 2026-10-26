@@ -886,6 +886,25 @@ program selected again, which the runtime checks and no model guard states, so t
 machine refuses (no draft hit it); and the faulted M1's interrupted job can be paused in the model, though the runtime
 refuses it.
 
+**October 26, morning: the four scenarios regenerated with gpt-5.4 medium, unchecked, on the current code (A3 KMR
+grounding, job rule, job-control wording).** RA results are from the offline shadow replay.
+
+| Scenario | Draft | Events / calls / min | Handoff | RA replay of the applied events |
+| --- | --- | --- | --- | --- |
+| Part slippage | `draft_7f2e3ec7…` | 6 / 9 / 6.9 | complete (5-step nominal connection) | 6/6 feasible |
+| Conveyor breakdown | `draft_46b2e91c…` | 3 / 6 / 4.6 | complete | step 3 INFEASIBLE: the KMR's footprint at (-1.5, 0.5) overlaps ur5e-2's work area and the Conveyor, and no base pose reaches Buffer zone 1 |
+| ur5e-1 breakdown | `draft_12c2a926…` | 6 / 9 / 7.1 | complete (M2 resumes RGOCG4) | step 4 NEEDS_CONTEXT: no KMR base pose reaches M2's staging tray |
+| Machining | `draft_7e9d4cc0…` | 9 / 12 / 10.2 | fails: no connection | step 1 INFEASIBLE (ur5e-1 restates KET4's job as paused), step 9 INFEASIBLE (M2 completes KET4's trim without a start: M2 is paused and the job is M1's) |
+
+Machining: ur5e-1 takes KET4 out of the faulted M1 onto the Conveyor, M2 pauses RGOCG4 and ur5e-2 parks it on M2's
+tray, the Conveyor brings KET4 to loading position 2, ur5e-2 loads it into M2, M2 switches to square and "completes"
+the trim. RGOCG4 stays paused on the tray, the KMR is never moved (the prompt now says its trip was cancelled at
+(-3.033, 3.052)), and KET4 ends inside M2, where normal production does not handle it (the CCA check's case).
+RA crash found: `ra_feasibility._Check.is_place` (line 188) tests `after in self.part_names` on a record value such as
+a stated `current_process`, which raises "unhashable type: 'dict'"; a checked run would fail on such a step. The fix
+(test only text values there) awaits the user, because the other chat has uncommitted work in that file; the replay
+above applied it in scratch only.
+
 **October 25, late night: Machining with gpt-6.1-sol at xhigh effort — a valid recovery, misjudged by a handoff bug.**
 `draft_f7d4be63…`: 25 calls, 20 events, 10.1 min, about 332k tokens. The KMR takes RGOCG4 from M2 to Storage, fetches
 KET4 from M1 into M2, KET4's trim runs and completes on M2, the KMR stores the finished KET4 in Storage, brings
