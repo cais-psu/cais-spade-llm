@@ -776,6 +776,20 @@ checker skips the KMR's `approached_part` as bookkeeping, like `task_ctx.*` (no 
 KMR's two-step pick together), and the checker is built overnight, offline only. Marking `approached_part` private
 waits for the prompt decisions.
 
+**October 26: Recovery Goal back to the interrupted outcome only (`6887af4`), trip-variant fix (`31774fb`), and
+Machining with gpt-6.1-sol xhigh again.** User decisions: the Recovery Goal holds only what the recovery must achieve;
+the next-task list was removed (schedule detail and other resources' end states, close to an answer); continuation
+is the completion rule ("normal production can carry on its remaining work"); `/parts/<name>/target` reads "where
+the part belongs in the finished product". The xhigh run of `draft_f7d4be63…` was not a success after all: it stored
+the finished KET4 in Storage, from which normal production has no route to the board (the capture's
+`goal_conditions` say KET4 belongs on assembly_board-v1, but neither the prompt nor the handoff used them).
+
+Rerun `draft_373bd875…`: 39 calls, 31 events, 21.9 min, about 572k tokens. Same strategy with many KMR
+positioning moves: RGOCG4 to Storage and back, KET4 from M1 into M2, trimmed, then left on M2's staging tray "for
+downstream handling", RGOCG4 resumed on M2, the KMR left at a free spot north of M2 again (so its planned trip
+cannot start). It looked up eight resources' pending tasks but not KET4's target. Not a success; whether normal
+production would take a finished part from the staging tray is not modelled.
+
 **October 25, late night: Machining with gpt-6.1-sol at xhigh effort — a valid recovery, misjudged by a handoff bug.**
 `draft_f7d4be63…`: 25 calls, 20 events, 10.1 min, about 332k tokens. The KMR takes RGOCG4 from M2 to Storage, fetches
 KET4 from M1 into M2, KET4's trim runs and completes on M2, the KMR stores the finished KET4 in Storage, brings
