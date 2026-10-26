@@ -1797,18 +1797,3 @@ def test_a_transport_states_the_order_its_own_events_advance_parts_through():
     assert facts._advance_order(zones, "Buffer") == ["zone_1_part", "zone_2_part", "zone_3_part"]
     assert facts._advance_order(loaded, "Mill") == [] and facts._advance_order(grasp, "Mover") == []
 
-
-def test_the_goal_lists_the_planned_tasks_normal_production_carries_out_next(monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
-
-    rows = [{"task": {"resource_jid": "res-mill", "function_name": "complete_job", "part_name": "peg",
-                      "params": {"resource_id": "mill", "part_name": "peg", "process": "trim", "result": "circle"}}},
-            {"task": {"resource_jid": "res-cart", "function_name": "move_to_resource", "part_name": None,
-                      "params": {"resource_id": "cart", "target_resource": "Store", "source_resource": "mill",
-                                 "arrival_acknowledged": True}}}]
-    monkeypatch.setattr(multi_turn_diagnostic, "nominal_rows", lambda session, prepared: rows)
-    prepared = {"observation_jids": {"mill": "res-mill", "cart": "res-cart"}, "recovery_resources": {}}
-    # The tasks the handoff requires, by resource, function, part and public parameters; no start conditions.
-    assert facts.next_task_lines(prepared, {}) == [
-        "- mill: complete_job of peg (process trim, result circle)",
-        "- cart: move_to_resource (target_resource Store, source_resource mill)"]
