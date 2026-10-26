@@ -1134,6 +1134,26 @@ def _parameters_resolve(event: dict, jid: str, part: str, resource_row: dict, pa
     return True
 
 
+def _places_reached(event: dict, jid: str, part: str, resource_row: dict, part_row: dict, places: set[str]) -> bool:
+    """Return whether every place an event acts at is one its resource declares it reaches.
+
+    A generic pick or place reads its origin from where the part is, its destination from where the part
+    goes, and a grasp or an insert acts where the robot is; the resource's declared reachable locations
+    decide whether it can act there.
+    """
+    from . import multi_turn_outline_generation as generation
+
+    for name, binding in event.get("parameter_bindings", {}).items():
+        if isinstance(binding, dict) and binding.get("location_type") in {
+                "part_location", "reachable_location", "current_location"}:
+            found, value = generation._recovery_event_parameter_value(
+                event=event, parameter_name=name, resource_jid=jid, part_name=part,
+                resource_row=resource_row, part_row=part_row)
+            if found and value not in places:
+                return False
+    return True
+
+
 def _bookkeeping_assumptions(event: dict, variables: dict, task: dict) -> list[dict]:
     """State the guards on a nominal step's own bookkeeping, which the connection search does not check.
 
@@ -1342,6 +1362,7 @@ def _recorded_task(jid: str, node: dict, state: dict, prepared: dict, resources:
 def _nominal_successors(state: dict, prepared: dict, actors: set[str], parts: set[str], depth: int) -> list[dict]:
     """Instantiate every declared nominal event of the given actors whose public guards hold."""
     from . import multi_turn_outline_generation as generation
+    from .multi_turn_outline_facts import _declared_locations
 
     resources, part_rows = generation._projected_outline_validation_context(
         session_state=state, prepared_recovery_request=prepared)
@@ -1351,6 +1372,7 @@ def _nominal_successors(state: dict, prepared: dict, actors: set[str], parts: se
         model = state.get("recovery_des_models", {}).get(jid, {})
         variables = model.get("state_variables", {})
         resource_row = resources.get(jid, {})
+        places = set(_declared_locations(prepared.get("recovery_resources", {}).get(jid, {})))
         # Observed events, such as a job's completion, continue the plant as commanded ones do.
         for event in model.get("events", []):
             bindings = (sorted(parts) if generation._recovery_event_requires_part_binding(
@@ -1361,6 +1383,7 @@ def _nominal_successors(state: dict, prepared: dict, actors: set[str], parts: se
                 if (part and (event.get("parameter_bindings", {}).get("part_name") or {}).get("equals", part) != part
                         or not _public_guards_hold(event, variables, jid, part, resource_row, part_row)
                         or not _parameters_resolve(event, jid, part, resource_row, part_row)
+                        or not _places_reached(event, jid, part, resource_row, part_row, places)
                         or (chosen := _neighbor_rows(jid, event, part, state, prepared, resources, part_row)) is None):
                     continue
                 task = generation._recovery_event_instance_task(

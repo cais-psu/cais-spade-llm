@@ -173,7 +173,8 @@ def test_draft_states_a_resource_s_declared_job_control(observations, tmp_path):
     _, prompt = multi_turn._build_phase_prompt(draft.prepared, session)
     # The draft keeps the declared job control, so the LLM can tell a resumable pause from a final stop.
     assert ("\nM2 (resource)  idle; resource_location M2; capabilities: reachable locations M2; "
-            "job control: resume_after_reload true, restart_stopped_jobs false\n") in prompt
+            "job control: a paused job continues from where it was paused, also after its part is unloaded "
+            "and loaded back in; a stopped job cannot be restarted\n") in prompt
 
 
 @pytest.mark.parametrize("responses, expected_calls, status", [

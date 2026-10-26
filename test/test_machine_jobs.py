@@ -655,6 +655,18 @@ def test_a_reloaded_part_resumes_only_where_its_job_paused_and_starts_fresh_else
     _check_product_guards(reload_resume['M1'], {'current_process': paused}, params('M1', 'resume_job', job_id='j'))
     with pytest.raises(ValueError, match='current_process'):
         _check_product_guards(reload_resume['M2'], {'current_process': paused}, params('M2', 'resume_job', job_id='j'))
+    # No other job command reaches the job either, even with M2 paused on its own job while holding the part.
+    for name, before in (('resume_job', 'paused'), ('pause_job', 'running'), ('stop_job', 'running'),
+                         ('stop_job', 'paused'), ('complete_job', 'running')):
+        with pytest.raises(ValueError, match='current_process'):
+            _check_product_guards(event('M2', name, before), {'current_process': paused}, params('M2', name, job_id='j'))
+        _check_product_guards(event('M1', name, before), {'current_process': paused}, params('M1', name, job_id='j'))
+    # A paused machine's own state says its job is paused; once the part is reloaded, only its record does.
+    _check_product_guards(event('M1', 'resume_job', 'paused'), {'current_process': started},
+                          params('M1', 'resume_job', job_id='j'))
+    with pytest.raises(ValueError, match='current_process'):
+        _check_product_guards(reload_resume['M1'], {'current_process': {**paused, 'status': 'stopped'}},
+                              params('M1', 'resume_job', job_id='j'))
     # M2 may start the part fresh; M1 may not start over a job it holds.
     _check_product_guards(event('M2', 'start_job', 'loaded'), {'current_process': paused}, params('M2', 'start_job'))
     with pytest.raises(ValueError, match='current_process'):

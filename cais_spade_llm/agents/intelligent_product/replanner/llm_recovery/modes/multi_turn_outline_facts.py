@@ -624,6 +624,25 @@ def _advance_order(model: dict, resource: str) -> list[str]:
     return order
 
 
+def job_control_text(job_control: Any) -> str | None:
+    """State a machine's declared job control by what its job commands do, not by the flags' names.
+
+    A machine keeps each job's progress in its own record, a resume continues from it, and no command
+    restarts a stopped job.
+
+    Args:
+        job_control: The machine's declared ``job_control`` settings.
+
+    Returns:
+        The statement, or None when the resource declares no job control.
+    """
+    if not isinstance(job_control, dict) or not isinstance(job_control.get("resume_after_reload"), bool):
+        return None
+    paused = ("a paused job continues from where it was paused, also after its part is unloaded and loaded back in"
+              if job_control["resume_after_reload"] else "a paused job cannot continue")
+    return f"{paused}; a stopped job cannot be restarted"
+
+
 def _capabilities(jid: str, prepared: dict, session: dict) -> str:
     """State a resource's declared capabilities, the same way for every resource.
 
@@ -639,8 +658,8 @@ def _capabilities(jid: str, prepared: dict, session: dict) -> str:
     - moves to any position: a declared event that sets its location from free numeric parameters;
     - moves parts in one direction: the positions its own declared events advance parts through, in order;
     - processes: the declared ``process`` values of its events, with their ``result`` values;
-    - job control: its declared job-control flags by name and value, such as whether a paused job
-      resumes after its part is reloaded.
+    - job control: what its declared job control lets a paused or a stopped job do; the jobs it keeps
+      in its record are stated beside it.
     A resource that declares none of these has no capabilities entry.
     """
     entry = prepared.get("recovery_resources", {}).get(jid, {})
@@ -667,9 +686,8 @@ def _capabilities(jid: str, prepared: dict, session: dict) -> str:
             processes.setdefault(process, set()).update([result] if isinstance(result, str) else [])
     items += [f"{process} ({', '.join(sorted(results))})" if results else process
               for process, results in sorted(processes.items())]
-    job_control = (entry.get("static_capabilities") or {}).get("job_control") or {}
-    if flags := [f"{name} {_value_text(value)}" for name, value in job_control.items() if isinstance(value, bool)]:
-        items.append("job control: " + ", ".join(flags))
+    if text := job_control_text((entry.get("static_capabilities") or {}).get("job_control")):
+        items.append(f"job control: {text}")
     return "capabilities: " + "; ".join(items) if items else ""
 
 

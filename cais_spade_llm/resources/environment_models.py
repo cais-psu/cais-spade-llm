@@ -257,14 +257,17 @@ def _declare_machine_jobs(models: dict, scene: dict) -> None:
                      capability=({}, {}))
         # (event, machine state before, machine state after, the part's current process it requires)
         # A part may start here unless this machine holds its unfinished job: a paused job resumes, a stopped
-        # one cannot restart, and a job paused on another machine stays in that machine's record.
+        # one cannot restart, and a job paused on another machine stays in that machine's record. Every other
+        # job event acts only on a job in this machine's own record.
+        own, paused = {"matches": {"machine": rid}}, {"matches": {"status": "paused", "machine": rid}}
         transitions = [("start_job", "loaded", "running", {"not_matches": {"machine": rid}}),
-                       ("pause_job", "running", "paused", None), ("resume_job", "paused", "running", None),
-                       ("stop_job", "running", "stopped", None), ("stop_job", "paused", "stopped", None),
-                       ("complete_job", "running", "completed", None)]
+                       ("pause_job", "running", "paused", own), ("resume_job", "paused", "running", own),
+                       ("stop_job", "running", "stopped", own), ("stop_job", "paused", "stopped", own),
+                       ("complete_job", "running", "completed", own)]
         if job_control.get("resume_after_reload") is True:
-            # A reloaded part resumes only the job this machine paused; the job record is the machine's own.
-            transitions.append(("resume_job", "loaded", "running", {"matches": {"status": "paused", "machine": rid}}))
+            # A paused job continues where it was paused, also after its part is unloaded and loaded back in;
+            # once reloaded, only the part's own record still says its job is paused.
+            transitions.append(("resume_job", "loaded", "running", paused))
         for name, before, after, process_guard in transitions:
             parameters = {"part_name": deepcopy(PART_PARAMETER)}
             if name not in {"start_job", "complete_job"}:
@@ -277,8 +280,7 @@ def _declare_machine_jobs(models: dict, scene: dict) -> None:
                          parameters=parameters,
                          capability=({"part_location": rid, f"{rid}.resource_state": before},
                                      {"part_location": rid, f"{rid}.resource_state": after}))
-            if process_guard is not None:
-                model["events"][-1]["product_guards"] = {"current_process": process_guard}
+            model["events"][-1].setdefault("product_guards", {})["current_process"] = deepcopy(process_guard)
             if name == "complete_job":
                 model["events"][-1]["controllable"] = False
 

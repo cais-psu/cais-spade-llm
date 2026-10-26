@@ -554,7 +554,12 @@ def _resource_fact(prepared: dict, session: dict, jid: str, field: str, ref: str
     if field == "snapshot":
         value = snapshot
     elif field == "static_capabilities":
+        from .multi_turn_outline_facts import job_control_text
+
         value = _public_resource_capabilities(entry)
+        # The lookup states job control in the same words as the resource's line, not by its flags' names.
+        if "job_control" in value:
+            value["job_control"] = job_control_text(value["job_control"]) or value["job_control"]
         physical = session.get("projected_physical_evidence") or {}
         if (physical.get("elapsed_time_obligations")
                 or any(physical.get("jids", {}).get(rid) == jid for rid in physical.get("unresolved_processing", {}))):

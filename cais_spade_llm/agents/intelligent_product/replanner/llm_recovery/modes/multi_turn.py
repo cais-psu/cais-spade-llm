@@ -2744,15 +2744,16 @@ def _commit_selected_candidate_task(
 
 
 
-def _stated_current_process(previous: Any, stated: Any, resource_jid: str) -> dict[str, Any] | None:
+def _stated_current_process(previous: Any, stated: Any, machine: str) -> dict[str, Any] | None:
     """Apply a stated ``current_process`` to the part's unfinished process.
 
     A bare status (``"paused"``) or a partial record changes the recorded process and keeps its
-    process, result and machine; ``None`` means no process is unfinished.
+    process, result and machine; ``None`` means no process is unfinished. A new record names the
+    acting resource as its machine, by resource id as ``start_job`` does and the job guards read it.
     """
     if stated is None:
         return None
-    base = deepcopy(previous) if isinstance(previous, dict) else {"machine": resource_jid}
+    base = deepcopy(previous) if isinstance(previous, dict) else {"machine": machine}
     if isinstance(stated, dict):
         return {**base, **deepcopy(stated)}
     return {**base, "status": deepcopy(stated)}
@@ -2823,7 +2824,8 @@ def _apply_task_effects_to_symbolic_state(  # noqa: C901, PLR0912, PLR0915
                 part[field_name] = deepcopy(end_state.get(field_name))
         if "current_process" in end_state:
             part["current_process"] = _stated_current_process(
-                previous_part.get("current_process"), end_state.get("current_process"), resource_jid)
+                previous_part.get("current_process"), end_state.get("current_process"),
+                recovery_des_model.get("resource_id") or resource_jid)
         if "part_location" in end_state:
             part["part_location"] = deepcopy(end_state.get("part_location"))
             part["current_location"] = deepcopy(end_state.get("part_location"))

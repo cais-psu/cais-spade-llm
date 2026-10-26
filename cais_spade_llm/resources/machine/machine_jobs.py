@@ -37,18 +37,24 @@ def machine_primitive_contracts(machine: dict) -> dict[str, list[dict]]:
     processes = machine.get("process_capabilities") or {}
     results = sorted({result for process in processes.values() for result in process.get("supported_results", [])})
 
-    def control(before: dict, status: str) -> dict:
+    def own_job(**fields) -> dict:
+        # A machine commands only a job in its own record, as the command refuses any other job: the
+        # part's unfinished job names this machine.
+        return {"current_process": {"matches": {**fields, "machine": rid}}}
+
+    def control(before: dict, status: str, job: dict | None = None) -> dict:
         return {"preconditions": {"resource_state": before, **part},
+                "product_guards": job or own_job(),
                 "effects": {"resource_state": {"set": status}},
                 "product_effects": {"current_process": {"set_status": status}}}
 
     resume = []
     # The command refuses every resume unless the machine declares resume_after_reload.
     if machine.get("simulation_process", {}).get("job_control", {}).get("resume_after_reload") is True:
-        # A reloaded part resumes only the job this machine paused; the job record is the machine's own.
+        # A paused job continues where it was paused, also after its part is unloaded and loaded back in;
+        # once reloaded, only the part's own record still says its job is paused.
         resume = [control({"equals": "paused"}, "running"),
-                  {**control({"equals": "loaded"}, "running"),
-                   "product_guards": {"current_process": {"matches": {"status": "paused", "machine": rid}}}}]
+                  control({"equals": "loaded"}, "running", own_job(status="paused"))]
     return deepcopy({
         "select_program": [{"preconditions": {"resource_state": {"not_equals": "running"}},
                             "parameters": {"program": {"enum": sorted(machine.get("program_options") or {})}},
@@ -73,6 +79,7 @@ def machine_primitive_contracts(machine: dict) -> dict[str, list[dict]]:
             "after_sec": {"subtract": [{"$evidence": "job.processing_time_sec"},
                                        {"$evidence": "job.processing_active_sec"}]},
             "preconditions": {"resource_state": {"equals": "running"}, **part},
+            "product_guards": own_job(),
             "effects": {"resource_state": {"set": "completed"}},
             "product_effects": {"current_process": {"set": None},
                                 "processCompleted": [{"process": "trim", "result": {"set_from_param": "result"}}]},

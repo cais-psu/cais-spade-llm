@@ -879,15 +879,35 @@ def test_a_machine_keeps_each_job_by_its_part_so_a_paused_one_stays_in_view():
     assert [job["status"] for job in multi_turn_diagnostic.machine_jobs("res-mill", session, prepared)] == ["paused", "running"]
 
 
-def test_a_resource_states_its_declared_job_control_flags():
+def test_a_stated_new_job_names_its_machine_by_resource_id_as_the_job_guards_read_it():
+    session = {"symbolic_resources": {"res-mill": {"resource_state": "loaded", "part_name": "blank"}},
+               "symbolic_parts": {"blank": {"current_process": None}},
+               "recovery_des_models": {"res-mill": {"resource_id": "mill", "state_variables": {}}}}
+    multi_turn._apply_task_effects_to_symbolic_state(
+        {"resource_jid": "res-mill", "part_name": "blank",
+         "expected_end_state": {"current_process": {"process": "trim", "result": "square", "status": "running"}}},
+        session)
+    assert session["symbolic_parts"]["blank"]["current_process"] == {
+        "machine": "mill", "process": "trim", "result": "square", "status": "running"}
+
+
+def test_a_resource_states_what_its_declared_job_control_does():
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
 
     job_control = {"version": 1, "resume_after_reload": True, "restart_stopped_jobs": False,
                    "semantics": "active simulation time"}
     prepared = {"recovery_resources": {"machine": {"static_capabilities": {"job_control": job_control}}, "station": {}}}
-    # Only the declared flags are stated, by name and value; the version and description are not flags.
+    # The job commands are stated by what they do, not by the flags' names, which read as more than they allow.
     assert facts._capabilities("machine", prepared, {}) == (
-        "capabilities: job control: resume_after_reload true, restart_stopped_jobs false")
+        "capabilities: job control: a paused job continues from where it was paused, also after its part is "
+        "unloaded and loaded back in; a stopped job cannot be restarted")
+    job_control["resume_after_reload"] = False
+    assert facts._capabilities("machine", prepared, {}) == (
+        "capabilities: job control: a paused job cannot continue; a stopped job cannot be restarted")
+    # The capabilities lookup states it in the same words, not by the flags' names.
+    value, _ = multi_turn_context._resource_fact(prepared, {}, "machine", "static_capabilities",
+                                                 "/resources/machine/static_capabilities")
+    assert value["job_control"] == "a paused job cannot continue; a stopped job cannot be restarted"
     assert facts._capabilities("station", prepared, {}) == ""
 
 
@@ -1018,6 +1038,42 @@ def test_nominal_events_take_over_once_the_interrupted_outcome_holds(shared_cell
     assert [(step["resource_jid"], step["event_name"], step.get("part_name")) for step in connection] == [
         ("arm_a", "move_home", None), ("arm_a", "pick_approach", "peg"), ("arm_a", "pick_grasp", "peg")]
     assert {step["candidate_source"] for step in connection} == {"nominal_connection"}
+
+
+def test_a_nominal_pick_acts_only_at_a_place_its_robot_declares_it_reaches(shared_cell, tmp_path):
+    record, specs = _with_pick_events(_resume_only_cell(shared_cell))
+    reach = record["prepared_recovery_request"]["recovery_resources"]["arm_a"]["static_capabilities"]
+    prepared, session = _draft((record, specs), tmp_path / "both")
+    _apply(_cell_recovery()[:4], session, prepared)
+    assert [task["event_name"] for task in multi_turn_diagnostic.nominal_connection(session, prepared)] == [
+        "move_home", "pick_approach", "pick_grasp"]
+    # The peg rests in the buffer; an arm that declares only the cell cannot take it back from there.
+    reach["reachability"] = ["cell"]
+    prepared, session = _draft((record, specs), tmp_path / "cell_only")
+    _apply(_cell_recovery()[:4], session, prepared)
+    assert multi_turn_diagnostic.nominal_connection(session, prepared) is None
+
+
+def test_a_nominal_place_or_grasp_acts_only_at_a_place_its_robot_declares_it_reaches(shared_cell, tmp_path):
+    record, specs = _with_pick_events(shared_cell)
+    request = record["prepared_recovery_request"]
+    peg = next(row for row in request["llm_input"]["part_facts"] if row["part_name"] == "peg")
+    # arm_a holds the peg; its place step goes where the peg goes, and only to a place arm_a reaches.
+    for goal, offered in (("cell", True), ("elsewhere", False)):
+        peg["goal_location"] = goal
+        prepared, session = _draft((record, specs), tmp_path / goal)
+        steps = multi_turn_diagnostic._nominal_successors(session, prepared, {"arm_a"}, {"peg"}, 0)
+        assert any(step["event_name"] == "place_approach" for step in steps) is offered, goal
+    # A grasp acts where the arm already is.
+    grasp = next(row for row in request["recovery_resources"]["arm_a"]["recovery_des_model"]["events"]
+                 if row["event_name"] == "pick_grasp")
+    grasp["parameter_bindings"] = {"origin_resource_location": {"location_type": "current_location"}}
+    for place, offered in (("buffer", True), ("elsewhere", False)):
+        request["recovery_resources"]["arm_a"]["recovery_snapshot"].update(
+            resource_state="at_pick", resource_location=place, held_part=None)
+        prepared, session = _draft((record, specs), tmp_path / f"grasp_{place}")
+        steps = multi_turn_diagnostic._nominal_successors(session, prepared, {"arm_a"}, {"gear"}, 0)
+        assert any(step["event_name"] == "pick_grasp" for step in steps) is offered, place
 
 
 def test_a_nominal_step_s_own_bookkeeping_guards_are_recorded_as_assumed(shared_cell, tmp_path):
