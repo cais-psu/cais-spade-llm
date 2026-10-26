@@ -473,6 +473,25 @@ def test_selecting_saved_observations_only_defers_the_input():
     client.delete()
 
 
+def test_ra_feasibility_switch_is_offline_and_reaches_the_bridge():
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    state["source"] = "offline"
+    bridge.get_part_slippage_example.return_value = state
+    bridge.set_failure_example_options.return_value = state
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+        switch = next(element for element in client.elements.values()
+                      if isinstance(element, ui.switch) and element.text == "RA feasibility check")
+        assert switch.visible and switch.value is False
+        switch.value = True
+    bridge.set_recovery_ra_feasibility_check.assert_called_once_with(True)
+    client.delete()
+
 def test_saved_observation_selection_survives_an_older_poll(monkeypatch):
     from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
     from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage

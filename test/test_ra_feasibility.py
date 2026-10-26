@@ -59,7 +59,9 @@ def session():
                 **resource, "domain": [None, "loading_position_1", "loading_position_2"]}}},
         },
         "symbolic_resources": {
-            UR: {"resource_state": "picked", "held_part": "P1", "resource_location": "home", "current_pose": pose},
+            # Every capture records a UR5e's gripper_state, which its gripper primitives require.
+            UR: {"resource_state": "picked", "held_part": "P1", "gripper_state": "closed", "resource_location": "home",
+                 "current_pose": pose},
             BUFFER: {"resource_state": "idle", "zone_1_part": None},
             M1: {"resource_state": "loaded", "part_name": "P2", "selected_program": "square"},
             CONVEYOR: {"resource_state": "idle", "part_location.P1": "loading_position_1"},
@@ -109,6 +111,16 @@ def test_a_failed_precondition_is_refused_without_looking_for_a_primitive_that_f
     held = next(row for row in result["conditions"] if row["condition"] == "held_part")
     assert held["status"] == "INFEASIBLE"
     assert "grasp_part needs held_part = null; projected held_part is P1" in held["reason"]
+
+
+def test_a_failed_gripper_refuses_its_release_but_not_an_arm_move(cell, session):
+    session["symbolic_resources"][UR]["gripper_state"] = "failed"
+    release = check_event(_release(), session, {}, cell)
+    assert release["feasibility_status"] == "INFEASIBLE"
+    assert "release_part needs gripper_state ≠ failed; projected gripper_state is failed" in " | ".join(release["reasons"])
+    x, y, z = ARM["reference_pose"][:3]
+    moved = check_event(_event(UR, {"pose": {"x": x, "y": y, "z": z + 0.05}}), session, {}, cell)
+    assert moved["feasibility_status"] == "FEASIBLE"
 
 
 @pytest.mark.parametrize("pose, status", [

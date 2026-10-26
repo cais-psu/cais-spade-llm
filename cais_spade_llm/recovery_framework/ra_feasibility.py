@@ -14,7 +14,7 @@ Primitives never declare where a part or resource is (they must not be symbolica
 location, slot and custody conditions are decided by the acting resource's capability: a known place
 (recorded geometry), within its physical reach, plus navigation for a mobile base. Some conditions need
 no derivation: ``resource_state`` is the free DES state name, an unchanged value needs nothing, and
-bookkeeping (``task_ctx.*``, private fields, the KMR's ``approached_part``) is skipped.
+bookkeeping (``task_ctx.*``, private fields) is skipped.
 
 Results state facts only, never a fix: FEASIBLE with the primitive set, INFEASIBLE with the fact that
 refuses the event, or NEEDS_CONTEXT when recorded evidence or a bounded search leaves it unresolved.
@@ -29,8 +29,6 @@ from typing import Any
 from scipy.spatial.transform import Rotation
 
 FEASIBLE, INFEASIBLE, NEEDS_CONTEXT = "FEASIBLE", "INFEASIBLE", "NEEDS_CONTEXT"
-# The user decided on October 24 that the KMR's approach record is bookkeeping, like task_ctx.*.
-_BOOKKEEPING = frozenset({"approached_part"})
 # Gripper headings tried for a top-down grasp or release, about the world vertical.
 _TOP_DOWN_YAWS_RAD = (0.0, math.pi / 2, math.pi, -math.pi / 2)
 # Largest recorded surfaces of a place body tried as its work area.
@@ -155,7 +153,7 @@ class _Check:
         row = {"entity": self.name_of(jid), "condition": name, "after": deepcopy(after)}
         if name == "resource_state":
             return {**row, "derivation": "free", "status": FEASIBLE}
-        if name in _BOOKKEEPING or name.startswith(("task_ctx.", "_")) or (declaration or {}).get("private"):
+        if name.startswith(("task_ctx.", "_")) or (declaration or {}).get("private"):
             return {**row, "derivation": "bookkeeping", "status": FEASIBLE}
         if declaration is None:
             return {**row, "derivation": "undeclared", "status": INFEASIBLE,

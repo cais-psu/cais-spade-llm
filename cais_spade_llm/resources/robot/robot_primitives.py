@@ -1719,7 +1719,7 @@ def _robot_prompt_composites(
         ),
         "params": grasp_params,
         "required_params": grasp_required,
-        "preconditions": {"held_part": {"equals": None}},
+        "preconditions": {"held_part": {"equals": None}, "gripper_state": {"not_equals": "failed"}},
         "effects": {
             "current_state": {"set": "picked"},
             "gripper_state": {"set": "closed"},
@@ -1767,7 +1767,7 @@ def _robot_prompt_composites(
         ),
         "params": release_params,
         "required_params": release_required,
-        "preconditions": {"held_part": {"exists": True}},
+        "preconditions": {"held_part": {"exists": True}, "gripper_state": {"not_equals": "failed"}},
         "effects": {
             "current_state": {"set": "idle"},
             "gripper_state": {"set": "open"},

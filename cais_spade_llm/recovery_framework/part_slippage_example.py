@@ -118,6 +118,7 @@ class PartSlippageExample:
         self.scenario = "Part slippage"
         self.safety_files: list[str] = default_safety_files(self.scenario)
         self.observation_path = ""
+        self.check_ra_feasibility = False
         self._defer_preparation = False
         self._selection_revision = 0
         self._selected_observation_summary: dict | None = None
@@ -144,6 +145,7 @@ class PartSlippageExample:
             "safety_status": "skipped", **deepcopy(self._status),
             "defer_preparation": self._defer_preparation,
             "selection_revision": self._selection_revision,
+            "check_ra_feasibility": self.check_ra_feasibility,
         }
         runtime = self._runtime
         if self.source == "gazebo" and runtime is not None and self._status["status"] in {"running_example", "blocked", "stopped"}:
@@ -285,6 +287,22 @@ class PartSlippageExample:
                 self._status = {"status": "running_example", "message": "Reconnected to the paused failure."}
         return self.snapshot()
 
+    def set_ra_feasibility_check(self, enabled: bool) -> dict:
+        """Turn the RA feasibility check on or off for the next Offline outline attempt.
+
+        Args:
+            enabled: Check each proposed recovery event with Alg. 1 and Eq. 12 before it is applied.
+
+        Returns:
+            The current workflow state.
+        """
+        if type(enabled) is not bool:
+            raise ValueError("The RA feasibility check is on or off")
+        if self.snapshot()["busy"]:
+            raise ValueError("Stop the current action before changing the RA feasibility check")
+        self.check_ra_feasibility = enabled
+        return self.snapshot()
+
     def saved_observations(self) -> list[dict]:
         """List retained observation sources without querying Gazebo."""
         return list_observations()
@@ -309,7 +327,7 @@ class PartSlippageExample:
                 raise ValueError("Saved observations belong to a different failure scenario")
             self._selected_observations = observations
             self._selected_observation_summary = observation_summary(observations)
-            self._draft = OutlineDraft(observations, self.safety_files)
+            self._draft = OutlineDraft(observations, self.safety_files, check_ra_feasibility=self.check_ra_feasibility)
             self._draft._save()
         except (OSError, ValueError, KeyError, TypeError) as exc:
             self._draft = None
@@ -453,7 +471,7 @@ class PartSlippageExample:
         if action == "generate_outline_fresh":
             if self.source != "offline" or self.snapshot()["busy"] or not self.observation_path:
                 raise ValueError("Select saved observations in Offline and wait for the current action")
-            options = (self.observation_path, self.scenario, list(self.safety_files))
+            options = (self.observation_path, self.scenario, list(self.safety_files), self.check_ra_feasibility)
             self._fresh_cancel = threading.Event()
             self._draft = None
             self._status = {"status": "preparing_outline", "message": "Preparing a fresh outline from the verified capture."}
@@ -482,7 +500,8 @@ class PartSlippageExample:
             previous = load_draft(path, observations) if path is not None else None
             settings = previous.get("llm_settings", {}) if previous else {}
             draft = OutlineDraft(observations, self.safety_files,
-                model=settings.get("model"), reasoning_effort=settings.get("reasoning_effort"))
+                model=settings.get("model"), reasoning_effort=settings.get("reasoning_effort"),
+                check_ra_feasibility=self.check_ra_feasibility and action == "generate_outline_only")
             if action == "load_draft":
                 if previous is None:
                     raise ValueError("No complete draft for these saved observations")
@@ -584,7 +603,8 @@ class PartSlippageExample:
                 worker.exception()
             raise
 
-    async def _generate_outline_fresh(self, path: str, scenario: str, safety_files: list[str]) -> None:
+    async def _generate_outline_fresh(self, path: str, scenario: str, safety_files: list[str],
+                                      check_ra_feasibility: bool) -> None:
         from .outline_draft import OutlineDraft
 
         def prepare():
@@ -594,7 +614,7 @@ class PartSlippageExample:
             summary = observation_summary(observations)
             if self._fresh_cancel.is_set():
                 return observations, summary, None
-            owner = OutlineDraft(observations, safety_files)
+            owner = OutlineDraft(observations, safety_files, check_ra_feasibility=check_ra_feasibility)
             owner._save()
             return observations, summary, owner
 

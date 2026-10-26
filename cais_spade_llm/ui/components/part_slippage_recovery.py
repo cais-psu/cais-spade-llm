@@ -167,6 +167,15 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
             ui.notify(str(exc), type="warning")
         update()
 
+    def ra_check_changed() -> None:
+        if updating:
+            return
+        try:
+            bridge.set_recovery_ra_feasibility_check(ra_check.value)
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
+        update()
+
     for key, title, artifact_stage in (
         ("outline", "Recovery outline", "recovery_outline"),
         ("primitive", "Primitive composition", "recovery_primitves"),
@@ -174,6 +183,10 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         with ui.card().classes("w-full") as stage_card:
             ui.label(title).classes("text-lg font-semibold")
             status = ui.label().classes("text-sm text-slate-600")
+            if key == "outline":
+                ra_check = ui.switch("RA feasibility check", value=bool(state.get("check_ra_feasibility")))
+                ra_check.tooltip("Checks each proposed event with Alg. 1 and Eq. 12 before it is applied; "
+                                 "a refusal returns to the LLM. Offline only; CCA checks stay off.")
             with ui.row():
                 generate_action = "generate_outline" if key == "outline" else "generate_primitives"
                 controls[generate_action] = ui.button("Generate", on_click=lambda action=generate_action: act(action)).props("outline")
@@ -210,6 +223,7 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                            "card": stage_card,
                            "turn_view": turn_view}
     recovery_mode.on_value_change(mode_changed)
+    ra_check.on_value_change(ra_check_changed)
 
     with ui.card().classes("w-full") as execution_card:
         ui.label("Execution").classes("text-lg font-semibold")
@@ -235,7 +249,8 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         if offline and current.get("defer_preparation"):
             safety_note.text = "Generate runs these selections in a fresh attempt."
         if draft:
-            safety_badge.text = "Unvalidated outline — no validation checks"
+            safety_badge.text = ("RA-checked outline — RA feasibility only, no CCA checks" if draft.get("ra_feasibility_check")
+                                 else "Unvalidated outline — no validation checks")
         progress.text = current["message"]
         run_id.text = f"Run: {current['run_id']}" if current.get("run_id") else ""
         provenance = current.get("attempt_provenance") or {}
@@ -308,6 +323,9 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         mode_note.text = "Offline always uses Manual." if offline else (f"Recorded modes: Recovery outline — {current['outline_mode']}; "
                           f"Primitive composition — {current['primitive_mode']}.") if not modes_match else ""
         mode_note.set_visibility(offline or not modes_match)
+        ra_check.value = bool(current.get("check_ra_feasibility"))
+        ra_check.set_visibility(offline)
+        ra_check.set_enabled(not current.get("busy"))
         for field in fields.values():
             field.set_enabled(not current.get("busy") and status not in {"running_example", "executing", "resuming"})
         if offline and status == "preparing_outline":
@@ -371,7 +389,8 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                           if review_only else "\n".join(f"{row['resource_id']} · {row['outline_id']} · {row['status']}" for row in records)
                           or "Ready after both generation stages complete.")
         if draft:
-            execution.text = "Unvalidated draft: composition and execution are disabled."
+            execution.text = (("RA-checked" if draft.get("ra_feasibility_check") else "Unvalidated")
+                              + " draft: composition and execution are disabled.")
 
     update()
     load_options()

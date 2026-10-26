@@ -134,6 +134,23 @@ def test_a_condition_the_device_reports_is_passed_through_in_its_own_words():
         grounding.ground_failure(capture_v2(fault_reports={"arm_b": {"reported_state": "failed"}}), settings=SETTINGS))
 
 
+def test_a_reported_condition_in_configured_words_is_the_model_condition():
+    settings = {**SETTINGS, "fault_report_conditions": {"gripper": {"not working": {"gripper_state": "failed"}}}}
+    report = {"arm_b": {"reported_state": "failed", "gripper": "not working"}}
+    grounded = grounding.ground_failure(capture_v2(fault_reports=report), settings=settings)
+    assert grounded["resources"]["arm_b"]["gripper_state"] == "failed"
+    # The live valuation declares no gripper field, so the condition is not a belief update.
+    assert [row["field"] for row in grounded["belief_updates"] if "field" in row] == ["resource_state"]
+    unlisted = {"arm_b": {"reported_state": "failed", "gripper": "slipping"}}
+    assert "gripper_state" not in grounding.ground_failure(
+        capture_v2(fault_reports=unlisted), settings=settings)["resources"]["arm_b"]
+    # The configured words reach the projected state through the prepared request.
+    broken = {"arm_b": {"reported_state": "failed", "gripper": "not working (hardware fault, needs repair)"}}
+    prepared = {"llm_input": {"observed_runtime_state": {"resources": [
+        {"resource_jid": "jid-b", "current_state": "idle", "gripper_state": "open"}]}}}
+    grounding.apply_grounding(prepared, capture_v2(fault_reports=broken))
+    assert prepared["llm_input"]["observed_runtime_state"]["resources"][0]["gripper_state"] == "failed"
+
 def test_the_reporting_device_is_passed_through_without_a_derived_label():
     report = {"arm_b": {"reported_state": "failed", "source": "gripper object detection"}}
     grounded = grounding.ground_failure(capture_v2(fault_reports=report), settings=SETTINGS)

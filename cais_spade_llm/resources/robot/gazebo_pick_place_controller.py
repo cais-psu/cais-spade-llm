@@ -4552,6 +4552,8 @@ class GazeboPickPlaceController:
         preconditions:
           held_part:
             equals: null
+          gripper_state:
+            not_equals: failed
         effects:
           current_state:
             set: picked
@@ -4630,6 +4632,8 @@ class GazeboPickPlaceController:
         preconditions:
           held_part:
             not_equals: null
+          gripper_state:
+            not_equals: failed
         effects:
           current_state:
             set: idle
@@ -4971,7 +4975,9 @@ class GazeboPickPlaceController:
         ---
         description: Open the robot gripper.
         params: {}
-        preconditions: {}
+        preconditions:
+          gripper_state:
+            not_equals: failed
         effects:
           gripper_state:
             set: open
@@ -4987,7 +4993,9 @@ class GazeboPickPlaceController:
         description: Close the robot gripper.
         params:
           position: {type: number, description: "Optional custom gripper position override. If omitted, uses the default close position."}
-        preconditions: {}
+        preconditions:
+          gripper_state:
+            not_equals: failed
         effects:
           gripper_state:
             set: closed

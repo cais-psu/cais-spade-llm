@@ -12147,6 +12147,7 @@
     "goal_status_not_completed": [5, 6],
     "job_states_not_completed": ["interrupted", "stopped"],
     "fault_report_values": ["failed"],
+    "fault_report_conditions": {"gripper": {"not working (hardware fault, needs repair)": {"gripper_state": "failed"}}},
     "region_margin_m": 0.0,
     "location_parameters": ["destination_location", "origin_resource_location", "target_resource", "source_resource"]
   }

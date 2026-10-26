@@ -786,6 +786,45 @@ still look the details up. `connection_blockers` today names neither.
 
 ## RA feasibility validation — October 23, 2026 — plan approved by the user; checker built offline October 24–25 (`77af184`, `dcab31b`), awaiting the user's replay review
 
+**October 26: the user's review of the morning decisions (read this first; uncommitted).**
+- Decision 1, undeclared names: the RA refuses them, as built. Alg. 1 has nothing to derive from a name the model
+  does not declare, so this is the RA's own result, not a PA form check.
+- Decision 2, fallback: kept. The first feasible candidate in the LLM's order is applied (R_neural ∩ R_feasible);
+  the LLM is not told its pick was refused. Only when every candidate fails do the facts return as feedback.
+- Decision 3: NEEDS_CONTEXT refuses like INFEASIBLE. Every known limit that answers NEEDS_CONTEXT now refuses.
+- Decision 4: the `approached_part` name skip (`_BOOKKEEPING`) is removed. Its part-name domain already makes it a
+  place condition; a shadow replay of the three drafts that state it gives the same verdicts.
+- Decision 5: UI toggle built. The Recovery outline card has an Offline-only "RA feasibility check" switch, through
+  the new `SystemBridge.set_recovery_ra_feasibility_check(enabled)`; a checked draft is labelled "RA-checked
+  outline — RA feasibility only, no CCA checks". No live LLM drafts and no CCA work until the user asks.
+- Decision 6: kept. No ordering inside one event.
+- `resource_state` (the machine pause/resume finding): free for every resource, with no declared-list check and
+  no machine-specific rule (user: "it should not just reject those as long as conditions are correct"). A
+  machine's job is checked through the part's `current_process`, whose producers' preconditions read the
+  machine's `resource_state`; a label-only event changes and checks nothing.
+- Fault as a condition (option B, user "go for b"): UR5e `grasp_part`, `release_part`, `open_gripper` and
+  `close_gripper` require `gripper_state ≠ failed` (frontmatter, and the composite catalog in
+  `robot_primitives.py`). The scene's `execution_monitoring.fault_report_conditions` maps the device's words
+  `gripper: "not working (hardware fault, needs repair)"` to `gripper_state = failed`; the grounding writes it on
+  the reporting robot's grounded row and `observed_runtime_state` row only, never as a live belief update (the
+  live valuation has no gripper field). All four v5 `beliefs.json` were re-stored (`observations.json`
+  unchanged; only the ur5e-1 capture's content changed). The failed ur5e-1 can no longer grasp ("grasp_part
+  needs gripper_state ≠ failed"), its arm moves still pass, the turn-1 prompt is unchanged, and a shadow replay of
+  8 v5 drafts gives the same 168 verdicts. `gripper_state` stays an undeclared primitive-level condition (not in
+  the prompt). The KMR records no `gripper_state`, so a KMR gripper fault cannot be expressed yet.
+- Paper wording (recording it in `PAPER_FRAMEWORK.md` waits for the user's OK): Alg. 1 reads "primitives whose
+  declared effects produce v′_i"; Eq. 12 becomes ∀c ∃ρ∈P_c ∃θ_ρ∈Θ_{i,ρ}: C_ρ(v_i,v′_i,θ_ρ)=1; a task-level
+  state label no primitive produces is not derived; location, slot and custody are decided by capability;
+  delayed completion needs a definition; candidates are checked in the LLM's order; an unresolved search is a
+  rejection.
+- Open RA items: refusing because they answer NEEDS_CONTEXT (pose-place support and clearance; the KMR base
+  search missing tight spots; tilted grasp orientations); lenient (placing into a machine accepts any of its
+  areas); deferred model data (machine program and result limits, the KMR's parked arm and arm moves, part fit);
+  runtime (the live recovery pose check still uses `gripper_reach`; switch it before the next Gazebo run).
+  Deferred by the user until RA-checked drafts are actually run: across 168 candidates in 8 replayed v5 drafts,
+  only one hit any of these (the KMR delivering KET4 to M2's tray, ur5e-1 `draft_b1ecbb8d…`), and a checked run
+  would apply the LLM's next feasible candidate there. Fix a limit only when a checked run hits it.
+
 **Resume here (updated 2026-10-24).** The physical nominal check is done (`87f9356`, `288c8de`). On 2026-10-24 the
 user revised how backward derivation works: it goes from each changed state condition to the primitives whose
 declared effects produce it, never through nominal events (Steps 2 and 3). Later that day the user decided that the

@@ -388,6 +388,10 @@ def ground_failure(observations: dict, *, settings: dict | None = None) -> dict:
         if rid in raw["reported_fault_states"]:
             values["resource_state"] = raw["reported_fault_states"][rid]
             updates.append({"resource_id": rid, "field": "resource_state", "value": values["resource_state"]})
+        # A reported condition in configured words is the model condition those words name. It is not a
+        # belief update: the live valuation has no such field, so it reaches only the projected state.
+        for name, words in raw["fault_report_conditions"].get(rid, {}).items():
+            values.update(deepcopy(settings.get("fault_report_conditions", {}).get(name, {}).get(words, {})))
         values["faults"] = [row["rule"] for row in signals if row.get("resource_id") == rid]
     # The stop cancelled other resources' work. Each is left as it stopped: its activity's start is
     # undone, custody is as measured, and a base the work moved is at its measured pose rather than
@@ -624,6 +628,8 @@ def apply_grounding(prepared: dict, observations: dict) -> dict | None:
             if part.get("observed_pose"):
                 row["observed_pose"] = deepcopy(part["observed_pose"])
     jids = observations.get("jids") or {}
+    reported_fields = {field for words in settings.get("fault_report_conditions", {}).values()
+                       for conditions in words.values() for field in conditions}
     for row in (prepared["llm_input"].get("observed_runtime_state") or {}).get("resources") or []:
         rid = next((rid for rid, jid in jids.items() if jid == row.get("resource_jid")), None)
         values = grounded["resources"].get(rid) if rid in event["faulted_resources"] else None
@@ -632,6 +638,7 @@ def apply_grounding(prepared: dict, observations: dict) -> dict | None:
                 row[key] = values.get("resource_state")
             if "held_part" in row and "held_part" in values:
                 row["held_part"] = values["held_part"]
+            row.update({field: deepcopy(values[field]) for field in reported_fields & set(values)})
     # A resource whose work the stop cancelled is shown as it stopped (rule A3 in ground_failure).
     stopped = {row["resource_id"] for row in event["signals"] if row.get("rule") == "A3"}
     for row in (prepared["llm_input"].get("observed_runtime_state") or {}).get("resources") or []:

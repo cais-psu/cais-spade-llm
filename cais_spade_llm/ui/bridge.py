@@ -39184,6 +39184,19 @@ class SystemBridge:
             safety_files=safety_files, observation_path=observation_path,
             defer_preparation=defer_preparation)
 
+    def set_recovery_ra_feasibility_check(self, enabled: bool) -> dict[str, Any]:
+        """Turn the RA feasibility check on or off for the next Offline outline attempt.
+
+        Args:
+            enabled: Check each proposed recovery event with Alg. 1 and Eq. 12 before it is applied.
+
+        Returns:
+            The bridge-owned workflow state.
+        """
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).set_ra_feasibility_check(enabled)
+
     def get_default_recovery_observations(self) -> dict[str, str]:
         """Return the four retained failure inputs available for fresh attempts."""
         from cais_spade_llm.recovery_framework.part_slippage_example import default_observation_paths
