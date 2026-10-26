@@ -207,6 +207,45 @@ def test_transition_log_disagreement_is_reported():
         ("resource_state", "picked", "failed"), ("held_part", "peg", None)}
 
 
+def test_work_the_stop_cancelled_leaves_its_resource_where_it_stopped():
+    record = capture_v2(fault_reports={"arm_a": {"reported_state": "failed"}})
+    # arm_b had started t3 when the stop cancelled it; its own worker reports the cancellation.
+    record["failure"]["resource_values_before"]["arm_b"] = {"resource_state": "travelling", "held_part": None,
+                                                           "resource_location": "cell"}
+    before = {"resource_state": "idle", "held_part": None, "resource_location": "cell"}
+    record["transitions"].append({"kind": "start", "acknowledgement": {"task_id": "t3", "revision": 2},
+                                  "before": {"arm_b": before}, "after": {"arm_b": {**before, "resource_state": "travelling"}}})
+    record["physical_evidence"]["resources"]["arm_b"]["base_pose"] = [2.0, 1.0, 0, 0, 0, 0.7071068, 0.7071068]
+    worker = {"cancelled": True, "status": "failed", "operations": [{"operation": "move", "success": False, "status": "canceled"}],
+              "primitive_results": [{"task_id": "t3", "effects": {"base_pose": "observed"}}]}
+    record["checkpoint_motion_cancellation"] = {"status": "observed_stopped", "resources": {"arm_b": {"worker_result": worker}}}
+    grounded = grounding.ground_failure(record, settings=SETTINGS)
+    event = grounded["fault_event"]
+    assert [row["rule"] for row in event["signals"]] == ["B2", "A3"]
+    # The cancellation is an outcome of the stop, not a fault: arm_a's task stays the failed one.
+    assert (event["faulted_resources"], event["failed_task_id"]) == (["arm_a"], "t2")
+    assert event["signals"][1]["values"] == {"function_name": "pick_grasp", "origin_resource_location": "cell",
+                                             "status": "canceled"}
+    arm_b = grounded["resources"]["arm_b"]
+    assert (arm_b["resource_state"], arm_b["resource_location"], arm_b["held_part"]) == ("idle", None, None)
+    assert arm_b["current_pose"] == pytest.approx({"x": 2.0, "y": 1.0, "yaw": 1.5707963}, abs=1e-6)
+    assert [(row["field"], row["value"]) for row in grounded["belief_updates"] if row.get("resource_id") == "arm_b"] == [
+        ("resource_state", "idle"), ("resource_location", None)]
+    # The prompt and the planning session start from the observed row.
+    prepared = {"llm_input": {"observed_runtime_state": {"resources": [
+        {"resource_jid": "jid-b", "current_state": "travelling", "resource_state": "travelling", "held_part": None,
+         "resource_location": "cell", "current_location": "cell"}]}}}
+    grounding.apply_grounding(prepared, record)
+    row, = prepared["llm_input"]["observed_runtime_state"]["resources"]
+    assert (row["current_state"], row["resource_state"], row["resource_location"], row["current_location"]) == (
+        "idle", "idle", None, None)
+    assert row["current_pose"] == arm_b["current_pose"]
+    # An earlier completed result left in the worker, or a stop never observed, cancelled nothing.
+    for status, result in (("observed_stopped", {**worker, "cancelled": False}), ("cancellation_requested", worker)):
+        record["checkpoint_motion_cancellation"] = {"status": status, "resources": {"arm_b": {"worker_result": result}}}
+        assert rules(record) == ["B2"]
+
+
 def test_rules_never_see_recorded_labels_or_the_scenario_name():
     record = capture(part_tracker={"gear": {"state": "misplaced"}}, setup={"failure_scenario": "x"},
                      prepared_recovery_request={"llm_input": {"fault_event": {"failure_type": "Supplied scenario name"}}})
@@ -217,7 +256,8 @@ def test_rules_never_see_recorded_labels_or_the_scenario_name():
 OFFICIAL = {
     # Restored ur5e-3 route and URs without collision checks (2026-10-24).
     "capture_ad64bf1628564c3fa7f928b7bdebd5d9": (["A1", "B2", "C1"], ["ur5e-4"], "environment_8", "place_approach"),
-    "capture_37e090a54d0242f4948ae80c95d3cd76": (["A2", "B2"], ["M1"], "environment_25", "complete_job"),
+    # The stop cancelled the KMR's trip environment_22 (A3); M1 stays the only faulted resource.
+    "capture_37e090a54d0242f4948ae80c95d3cd76": (["A2", "B2", "A3"], ["M1"], "environment_25", "complete_job"),
     "capture_3ad495d2bd7845269fa70f1a09963bc9": (["B2"], ["Conveyor"], "cf4b66ddc51348a2987d5207878e5eea_pending_0", "place_approach"),
     "capture_b7dea70c1db74e1e9e98849380c09655": (["B2"], ["ur5e-1"], "67689d8a6f1a4b9c87a47a16f000e313_pending_1", "pick_grasp"),
 }

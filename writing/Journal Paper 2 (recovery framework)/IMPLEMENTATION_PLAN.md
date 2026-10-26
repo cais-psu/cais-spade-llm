@@ -832,6 +832,25 @@ the first run to use the staging trays and the Conveyor. Not a success:
   KMR idle at M2. Awaiting the user: how a cancelled trip is recorded (the KMR's state after cancellation), or
   whether a cancelled trip restarts from where it stopped.
 
+**October 26, later: the cancelled KMR trip is grounded as what happened (user chose option (a)).** In the recovery
+models a trip is one event (idle at M2 → idle at Storage), so nothing starts from `travelling`. New rule A3 in
+`failure_grounding` (`detect_cancelled_work`), from raw facts only: a resource's own worker result in
+`checkpoint_motion_cancellation` (`status` observed_stopped, `cancelled: true`) names a pending task of that resource.
+That gives one `task_outcome` row (function, the configured `location_parameters`, the controller's status word). The
+stopped resource is left as it stopped: its activity's start transition is undone, custody is as measured, and a base
+the work moved (`base_pose` effect) has no named location and the measured planar pose. A3 is an outcome of the
+stop, not a fault: the faulted resource, failed task, Recovery Goal and resumed tasks are unchanged. Only
+`capture_37e090a5…` changes (re-stored); the other three captures derive their stored grounding unchanged. The
+turn-1 prompt now reads "- task_outcome (KMR, task environment_22): function_name move_to_resource, target_resource
+Storage, source_resource M2, status canceled" and "KMR (kmr)  idle; held_part none; approached_part none; pose
+(-3.033, 3.052, yaw 1.573); …". Replays on the new grounding: `draft_f7d4be63…` (KMR ends idle at M2) still
+completes the handoff; `draft_373bd875…`, `draft_f931aa72…` (KMR left at a free spot) and `draft_e3717701…` (KMR never
+moved) do not. "Fix B" (a pending trip counts as done when the KMR ends at Storage) was not built: the current
+connection search already accepts that end through one trip back to M2. Tests: `test_failure_grounding` (A3 test,
+official table); the neighbouring recovery suites pass (614 passed, 1 skipped). Still open: the reach gap in
+`_nominal_successors` (generic robot pick/place ignore declared reachable locations), the machine resume rule and the
+job-control wording (awaiting the user).
+
 **October 25, late night: Machining with gpt-6.1-sol at xhigh effort — a valid recovery, misjudged by a handoff bug.**
 `draft_f7d4be63…`: 25 calls, 20 events, 10.1 min, about 332k tokens. The KMR takes RGOCG4 from M2 to Storage, fetches
 KET4 from M1 into M2, KET4's trim runs and completes on M2, the KMR stores the finished KET4 in Storage, brings

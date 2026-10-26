@@ -11,6 +11,7 @@ views are excluded, so the same rules apply to any disruption.
 import argparse
 import json
 import logging
+import math
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
@@ -93,8 +94,15 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
         nodes = observations.get("pending_nodes") or []
         sources = {"reported_fault_states": "/resource_states/*/resource_state", "pending_nodes": "/pending_nodes"}
     resources = physical.get("resources") or {}
+    stop = observations.get("checkpoint_motion_cancellation") or {}
+    # A resource's own worker reports the work the stop cancelled; an earlier result it still holds,
+    # such as a completed task, is not one.
+    cancelled = {rid: row["worker_result"] for rid, row in (stop.get("resources") or {}).items()
+                 if stop.get("status") == "observed_stopped" and isinstance(row.get("worker_result"), dict)
+                 and row["worker_result"].get("cancelled") is True}
     return {
-        "transitions": [{key: deepcopy(row.get(key)) for key in ("acknowledgement", "after", "product_after")}
+        "transitions": [{key: deepcopy(row.get(key)) for key in ("kind", "acknowledgement", "before", "after",
+                                                                 "product_after")}
                         for row in observations.get("transitions") or []],
         "resource_values_before": deepcopy(failure.get("resource_values_before") or {}),
         "part_tracker_before": {name: {key: deepcopy(row.get(key)) for key in _PART_FIELDS}
@@ -118,9 +126,18 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
                   for name, row in (physical.get("parts") or {}).items()},
         "part_bounds": {name: deepcopy(row.get("local_bounds")) for name, row in (geometry.get("parts") or {}).items()},
         "regions": {name: deepcopy(row.get("bounds")) for name, row in (geometry.get("regions") or {}).items()},
+        "cancelled_work": {rid: {"task_ids": [step.get("task_id") for step in result.get("primitive_results") or []],
+                                 "effects": sorted({name for step in result.get("primitive_results") or []
+                                                    for name in step.get("effects") or {}}),
+                                 "status": next((op["status"] for op in result.get("operations") or []
+                                                 if op.get("success") is False and isinstance(op.get("status"), str)),
+                                                None)}
+                           for rid, result in cancelled.items()},
+        "base_poses": {rid: deepcopy(row["base_pose"]) for rid, row in resources.items()
+                       if isinstance(row.get("base_pose"), list)},
         "jids": deepcopy(observations.get("jids") or {}),
         "sources": {
-            "transitions": "/transitions/*/{acknowledgement,after,product_after}",
+            "transitions": "/transitions/*/{kind,acknowledgement,before,after,product_after}",
             "resource_values_before": "/failure/resource_values_before",
             "part_tracker_before": "/failure/part_tracker_before",
             "pending_nodes": sources["pending_nodes"],
@@ -136,6 +153,8 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
             "parts": "/physical_evidence/parts/*/pose",
             "part_bounds": "/physical_evidence/geometry/parts/*/local_bounds",
             "regions": "/physical_evidence/geometry/regions/*/bounds",
+            "cancelled_work": "/checkpoint_motion_cancellation/resources/*/worker_result",
+            "base_poses": "/physical_evidence/resources/*/base_pose",
         },
     }
 
@@ -184,6 +203,16 @@ def _regions_for(location: str, regions: dict) -> dict:
 def _pose_record(pose: list | None) -> dict | None:
     # Part ledgers and recovery prompts name pose components; captures store them in order.
     return dict(zip(_POSE_KEYS, pose, strict=True)) if isinstance(pose, list) and len(pose) == 7 else None
+
+
+def _planar_record(pose: list | None) -> dict | None:
+    # A mobile base is located by its position on the floor and its heading.
+    record = _pose_record(pose)
+    if record is None:
+        return None
+    yaw = math.atan2(2 * (record["qw"] * record["qz"] + record["qx"] * record["qy"]),
+                     1 - 2 * (record["qy"] ** 2 + record["qz"] ** 2))
+    return {"x": record["x"], "y": record["y"], "yaw": yaw}
 
 
 def _held_by(attachments: dict, model_name: str | None) -> str | None:
@@ -236,6 +265,35 @@ def detect_signals(raw: dict, expected: dict, settings: dict) -> list[dict]:
     margin = float(settings["region_margin_m"])
     signals.extend(row for name, part in raw["parts"].items()
                    if (row := _part_discrepancy(raw, expected, name, part, margin)) is not None)
+    return signals
+
+
+def detect_cancelled_work(raw: dict, settings: dict) -> list[dict]:
+    """Report the pending tasks whose execution the stop cancelled (rule A3).
+
+    A resource's own worker result states the cancellation, the task it was executing and the
+    controller's status word. These are outcomes of the stop, not detections of the failure, so
+    they never make their resource faulted.
+
+    Args:
+        raw: Output of :func:`raw_failure_view`.
+        settings: Execution-monitoring settings.
+
+    Returns:
+        One ``task_outcome`` record per cancelled pending task of the reporting resource, with the
+        task's function and the locations it names.
+    """
+    signals = []
+    for rid, work in raw["cancelled_work"].items():
+        for node in raw["pending_nodes"]:
+            params = node.get("params") or {}
+            if node["id"] in work["task_ids"] and params.get("resource_id") == rid:
+                values = {"function_name": node.get("function_name"),
+                          **{key: params[key] for key in settings["location_parameters"] if key in params},
+                          "status": work["status"]}
+                signals.append({"rule": "A3", "signal": "task_outcome", "resource_id": rid, "task_id": node["id"],
+                                "evidence": raw["sources"]["cancelled_work"],
+                                "values": {key: value for key, value in values.items() if value is not None}})
     return signals
 
 
@@ -331,13 +389,36 @@ def ground_failure(observations: dict, *, settings: dict | None = None) -> dict:
             values["resource_state"] = raw["reported_fault_states"][rid]
             updates.append({"resource_id": rid, "field": "resource_state", "value": values["resource_state"]})
         values["faults"] = [row["rule"] for row in signals if row.get("resource_id") == rid]
+    # The stop cancelled other resources' work. Each is left as it stopped: its activity's start is
+    # undone, custody is as measured, and a base the work moved is at its measured pose rather than
+    # at a named location, which only the activity's finish would have set.
+    stopped = [row for row in detect_cancelled_work(raw, settings) if row["resource_id"] not in faulted]
+    for row in stopped:
+        rid, work = row["resource_id"], raw["cancelled_work"][row["resource_id"]]
+        values = resources.get(rid)
+        if values is None:
+            continue
+        start = next((transition for transition in reversed(raw["transitions"]) if transition.get("kind") == "start"
+                      and (transition.get("acknowledgement") or {}).get("task_id") == row["task_id"]), None)
+        before = ((start or {}).get("before") or {}).get(rid) or {}
+        after = ((start or {}).get("after") or {}).get(rid) or {}
+        changes = {field: value for field, value in before.items() if after.get(field) != value}
+        if "held_part_measured" in values:
+            changes["held_part"] = values["held_part_measured"]
+        if "base_pose" in work["effects"] and rid in raw["base_poses"]:
+            changes["resource_location"] = None
+            values["current_pose"] = _planar_record(raw["base_poses"][rid])
+        for field, value in changes.items():
+            if field in values and values[field] != value:
+                updates.append({"resource_id": rid, "field": field, "value": value})
+                values[field] = value
     affected = list(dict.fromkeys(
         [((task or {}).get("params") or {}).get("part_name")] + sorted(discrepant) +
         [name for name, row in expected["parts"].items() if row.get("location") in faulted]))
     jid = raw["jids"].get(faulted[0]) if faulted else None
     fault_event = {
         "detected": bool(signals),
-        "signals": signals,
+        "signals": signals + stopped,
         "faulted_resources": faulted,
         "failed_task_id": task_id,
         "failed_function_name": (task or {}).get("function_name", ""),
@@ -551,6 +632,18 @@ def apply_grounding(prepared: dict, observations: dict) -> dict | None:
                 row[key] = values.get("resource_state")
             if "held_part" in row and "held_part" in values:
                 row["held_part"] = values["held_part"]
+    # A resource whose work the stop cancelled is shown as it stopped (rule A3 in ground_failure).
+    stopped = {row["resource_id"] for row in event["signals"] if row.get("rule") == "A3"}
+    for row in (prepared["llm_input"].get("observed_runtime_state") or {}).get("resources") or []:
+        rid = next((rid for rid, jid in jids.items() if jid == row.get("resource_jid")), None)
+        values = grounded["resources"].get(rid) if rid in stopped else None
+        if values:
+            for key in [key for key in ("current_state", "resource_state") if key in row]:
+                row[key] = values.get("resource_state")
+            for key, field in (("held_part", "held_part"), ("resource_location", "resource_location"),
+                               ("current_location", "resource_location"), ("current_pose", "current_pose")):
+                if field in values and (key in row or key == "current_pose"):
+                    row[key] = deepcopy(values[field])
     return grounded
 
 
