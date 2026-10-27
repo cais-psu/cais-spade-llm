@@ -492,6 +492,29 @@ def test_ra_feasibility_switch_is_offline_and_reaches_the_bridge():
     bridge.set_recovery_ra_feasibility_check.assert_called_once_with(True)
     client.delete()
 
+
+def test_one_cca_switch_needs_the_ra_check_and_reaches_the_bridge():
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    state["source"] = "offline"
+    bridge.get_part_slippage_example.return_value = state
+    bridge.set_failure_example_options.return_value = state
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+        switches = [element for element in client.elements.values()
+                    if isinstance(element, ui.switch) and element.text == "CCA check"]
+        assert len(switches) == 1
+        switch = switches[0]
+        assert switch.visible and switch.value is False and not switch.enabled
+        bridge.get_part_slippage_example.return_value = {**state, "check_ra_feasibility": True}
+        switch.value = True
+    bridge.set_recovery_cca_check.assert_called_once_with(True)
+    client.delete()
+
 def test_saved_observation_selection_survives_an_older_poll(monkeypatch):
     from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
     from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
@@ -784,7 +807,7 @@ def test_recovery_turn_expansions_are_independent_lazy_and_survive_updates(tmp_p
     restored_client.delete()
 
 
-def test_output_separates_ra_physical_and_cca_evidence(recovery_browser):
+def test_output_separates_ra_and_cca_evidence(recovery_browser):
     from cais_spade_llm.ui.components.recovery_turns import render_turn_content
 
     evidence = {"captures": [], "prompts": [], "results": [{"path": "/tmp/turn.json", "payload": {
@@ -802,8 +825,70 @@ def test_output_separates_ra_physical_and_cca_evidence(recovery_browser):
     _finish_reads(client)
     sections = [item for item in client.elements.values()
                 if isinstance(item, ui.expansion) and item is not validation]
-    assert [item.text for item in sections] == ["RA feasibility", "Physical evidence", "CCA safety"]
+    assert [item.text for item in sections] == ["RA feasibility", "CCA safety"]
     assert all(item.value is False for item in sections)
+    client.delete()
+
+
+def test_turn_validation_shows_each_candidate_and_which_cca_check_judged_it(tmp_path, monkeypatch, recovery_browser):
+    from cais_spade_llm.ui.components import recovery_turns
+
+    response = {"kind": "provider_response", "raw_response": {"choices": [{"message": {"content": json.dumps(
+        {"candidate_events": [{"event_name": "place_gear", "resource": "ur5e-4"},
+                              {"event_name": "move_home", "resource": "ur5e-3"}], "selected_candidate_index": 0})}}]}}
+    monkeypatch.setattr(recovery_turns, "read_recovery_turn", Mock(return_value={
+        "captures": [{"status": "captured", "path": "response.json", "record": response}], "results": [], "prompts": []}))
+    ra = [{"candidate_index": 0, "feasibility_status": "FEASIBLE", "event_name": "place_gear", "resource_jid": "jid-4",
+           "conditions": [{"entity": "ur5e-4", "condition": "held_part", "before": "gear_small", "after": None,
+                           "derivation": "producers", "status": "FEASIBLE",
+                           "producers": [{"primitive": "open_gripper", "status": "FEASIBLE"}]},
+                          {"entity": "ur5e-4", "condition": "resource_state", "after": "placed", "derivation": "free",
+                           "status": "FEASIBLE"}],
+           "capability": [{"check": "place", "part": "gear_small", "place": "board", "status": "FEASIBLE",
+                           "witness": {"joint_positions": [0.12345, -1.5]}}], "primitive_set": ["open_gripper"]},
+          {"candidate_index": 1, "feasibility_status": "INFEASIBLE", "event_name": "move_home", "resource_jid": "jid-3",
+           "conditions": [{"entity": "ur5e-3", "condition": "joint_lock", "after": True, "derivation": "undeclared",
+                           "status": "INFEASIBLE", "reason": "joint_lock is not a declared variable of ur5e-3"}],
+           "capability": [], "primitive_set": []}]
+    draft = {
+        "ra_feasibility_checks": [{"turn_index": 2, "llm_selected_candidate_index": 0, "applied_candidate_index": None,
+                                   "results": ra}],
+        "cca_safety_checks": [{"turn_index": 2, "llm_selected_candidate_index": 0, "applied_candidate_index": None,
+                               "results": [{"candidate_index": 0, "safety_status": "UNSAFE", "event_name": "place_gear",
+                                            "steps": [{"step": "during the event", "status": "UNSAFE"}],
+                                            "reasons": ["ur5e-3 is still in the board area"]}]}],
+        "cca_nonblocking_checks": [{"turn_index": 3, "nonblocking_status": "BLOCKING", "blocked": ["RGOCG4"],
+                                    "reasons": ["RGOCG4 cannot reach its remaining requirement"],
+                                    "evidence": {"parts": ["RGOCG4"], "explored_states": 12, "seconds": 0.5,
+                                                 "included_resources": ["Conveyor"]}}]}
+    state = {"run_id": "draft", "artifact_directory": str(tmp_path), "outline_draft": draft}
+    turns = [{"turn": number, "phase": "outline", "status": "need_revision", "files": [], "signature": [number]}
+             for number in (1, 2, 3)]
+    client = Client(context.client.page)
+    with client:
+        view = recovery_turns.RecoveryTurns(ui.column())
+        view.update(state, "outline", turns)
+        assert not view.rows[(1, "outline")]["checks_label"].visible
+        assert view.rows[(2, "outline")]["checks_label"].text == (
+            "RA: candidate 1 FEASIBLE, candidate 2 INFEASIBLE · CCA safety: candidate 1 UNSAFE · no candidate applied")
+        assert view.rows[(3, "outline")]["checks_label"].text == "CCA nonblocking: BLOCKING"
+        panels = [item for item in client.elements.values()
+                  if isinstance(item, ui.expansion) and item.text == "RA and CCA validation"]
+        assert len(panels) == 2
+        for panel in panels:
+            panel.value = True
+    _finish_reads(client)
+    labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+    assert "Candidate 1 · place_gear · ur5e-4" in labels and "Candidate 2 · move_home · ur5e-3" in labels
+    assert "CCA safety (Eq. 13): every specification monitor can still accept" in labels
+    assert "CCA safety (Eq. 13): not checked; the RA refused this candidate." in labels
+    assert "CCA nonblocking (Eq. 6): normal production can carry on" in labels
+    assert "ur5e-3 is still in the board area" in labels
+    tables = [item for item in client.elements.values() if isinstance(item, ui.table)]
+    assert any(row.get("derivation") == "produced by open_gripper (FEASIBLE)" and row["change"] == "gear_small → null"
+               for table in tables for row in table.rows)
+    assert any(row.get("evidence") == "witness: {\"joint_positions\": [0.123, -1.5]}"
+               for table in tables for row in table.rows)
     client.delete()
 
 

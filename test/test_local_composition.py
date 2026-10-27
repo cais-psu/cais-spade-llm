@@ -8,7 +8,7 @@ from copy import deepcopy
 import pytest
 
 from cais_spade_llm.agents.central_controller.local_composition import (
-    Action, Budget, Edge, Scope, analyze, nonblocking_region,
+    Action, AnalysisLimit, Budget, Edge, Scope, analyze, analyze_state, nonblocking_region,
 )
 from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
 
@@ -113,6 +113,29 @@ def test_assembly_lookahead_and_full_reference(part, expected):
     assert plant.initial["assembly_board-v1"] is None
     if expected == "held":
         assert local.witness
+
+
+def _whole_scope(plant, checker):
+    return Scope(resources=set(plant.rows), products=set(plant.rows), rules=set(checker.dfas),
+                 tasks=set(plant.rows))
+
+
+def test_a_state_check_needs_no_candidate_and_reads_the_nonblocking_region():
+    plant, checker = assembly_plant(), monitor(PRECEDENCE)
+    result = analyze_state(plant, checker, dict(checker.current_states), _whole_scope(plant, checker))
+    assert result.status == "nonblocking" and result.root in result.winning
+    # With KET4 already on the board, its assembly must come before the gear's, which the rule forbids.
+    plant.initial["assembly_board-v1"] = "KET4_Square_4mm"
+    result = analyze_state(plant, checker, dict(checker.current_states), _whole_scope(plant, checker))
+    assert (result.status, result.reason) == ("blocking", "no_joint_completion")
+    assert result.root not in result.winning
+
+
+def test_a_state_check_that_cannot_finish_raises_rather_than_returning_a_verdict():
+    plant, checker = assembly_plant(), monitor(PRECEDENCE)
+    with pytest.raises(AnalysisLimit, match="state_limit"):
+        analyze_state(plant, checker, dict(checker.current_states), _whole_scope(plant, checker),
+                      budget=Budget(max_states=2))
 
 
 def test_allowed_assembly_strategy_finishes_and_releases():

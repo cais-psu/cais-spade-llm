@@ -12,9 +12,10 @@ per condition, in no order; composition orders it later.
 
 Primitives never declare where a part or resource is (they must not be symbolically connectable), so
 location, slot and custody conditions are decided by the acting resource's capability: a known place
-(recorded geometry), within its physical reach, plus navigation for a mobile base. Some conditions need
-no derivation: ``resource_state`` is the free DES state name, an unchanged value needs nothing, and
-bookkeeping (``task_ctx.*``, private fields) is skipped.
+(recorded geometry), within its physical reach, plus navigation for a mobile base. A part released where
+no declared place names the spot (a pose place) must rest right there on a recorded surface that nothing
+recorded overlaps. Some conditions need no derivation: ``resource_state`` is the free DES state name, an
+unchanged value needs nothing, and bookkeeping (``task_ctx.*``, private fields) is skipped.
 
 Results state facts only, never a fix: FEASIBLE with the primitive set, INFEASIBLE with the fact that
 refuses the event, or NEEDS_CONTEXT when recorded evidence or a bounded search leaves it unresolved.
@@ -26,6 +27,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 from scipy.spatial.transform import Rotation
 
 FEASIBLE, INFEASIBLE, NEEDS_CONTEXT = "FEASIBLE", "INFEASIBLE", "NEEDS_CONTEXT"
@@ -33,6 +35,8 @@ FEASIBLE, INFEASIBLE, NEEDS_CONTEXT = "FEASIBLE", "INFEASIBLE", "NEEDS_CONTEXT"
 _TOP_DOWN_YAWS_RAD = (0.0, math.pi / 2, math.pi, -math.pi / 2)
 # Largest recorded surfaces of a place body tried as its work area.
 _BODY_SURFACES = 3
+# Recorded shapes that only touch do not overlap.
+_TOUCH_M = 1e-6
 _ORDER = {FEASIBLE: 0, NEEDS_CONTEXT: 1, INFEASIBLE: 2}
 
 
@@ -50,6 +54,9 @@ class RecordedCell:
         floor: The navigation floor map that mobile bases plan around.
         declarations: Every resource's current primitive contracts, per primitive.
         rids: Resource id per JID.
+        part_geometry: Recorded part extents, ``local_bounds`` about each part's own frame.
+        contact_layer_m: The physics engine's recorded contact surface layer, how far resting bodies may
+            sink into each other, or None when the capture records none.
     """
 
     scene: dict
@@ -61,6 +68,8 @@ class RecordedCell:
     floor: dict
     declarations: dict
     rids: dict
+    part_geometry: dict
+    contact_layer_m: float | None
 
 
 def recorded_cell(observations: dict, floor: dict) -> RecordedCell:
@@ -82,7 +91,23 @@ def recorded_cell(observations: dict, floor: dict) -> RecordedCell:
         regions=physical.get("geometry", {}).get("regions", {}),
         bodies=physical.get("physics_evidence", {}).get("models", {}), parts=physical.get("parts", {}), floor=floor,
         declarations=current_primitive_declarations(scene),
-        rids={jid: rid for rid, jid in observations.get("jids", {}).items()})
+        rids={jid: rid for rid, jid in observations.get("jids", {}).items()},
+        part_geometry=physical.get("geometry", {}).get("parts", {}),
+        contact_layer_m=_contact_layer(physical.get("physics_evidence", {})))
+
+
+def _contact_layer(physics: dict) -> float | None:
+    """Return the recorded ODE contact surface layer, as the projected part support reads it."""
+    import xml.etree.ElementTree as ET
+
+    layer = physics.get("contact_surface_layer")
+    sdf = (physics.get("physics_configuration") or {}).get("sdf")
+    if layer is None and isinstance(sdf, str):
+        try:
+            layer = float(ET.fromstring(sdf).findtext("./ode/constraints/contact_surface_layer"))
+        except (ET.ParseError, TypeError, ValueError):
+            return None
+    return float(layer) if isinstance(layer, (int, float)) and math.isfinite(layer) and layer >= 0 else None
 
 
 def _worst(statuses: Iterable[str]) -> str:
@@ -117,6 +142,8 @@ class _Check:
             session_state=session, prepared_recovery_request=prepared)
         self.models = session.get("recovery_des_models") or {}
         self.failure_parts = session.get("base_symbolic_parts") or {}
+        self.checks = session.get("ra_feasibility_checks") or []
+        self.accepted = session.get("accepted_outline_prefix") or []
         self.part_names = set(self.parts) | set(session.get("symbolic_parts") or {})
         self.end = dict(event.get("expected_end_state") or {})
         self.neighbors = dict(event.get("neighbor_end_state") or {})
@@ -170,8 +197,11 @@ class _Check:
                 result = {**row, "derivation": "producers", "status": status, "producers": producers}
                 if status != FEASIBLE:
                     # Primitives that make the stated value but fail on v say why; the others only that they don't.
+                    # Alternatives whose guards on the part fail concern another job or part, unless all do.
                     making = [producer for producer in producers if producer.get("makes_value")] or producers
-                    result["reason"] = "; ".join(producer["reason"] for producer in making if producer.get("reason"))
+                    making = [producer for producer in making if producer.get("part_guards_hold", True)] or making
+                    result["reason"] = "; ".join(dict.fromkeys(producer["reason"] for producer in making
+                                                               if producer.get("reason")))
                 return result
         if self.is_place(jid, name, after, declaration):
             return {**row, "derivation": "place", "status": FEASIBLE}
@@ -185,7 +215,7 @@ class _Check:
         per_part = any(name.endswith("." + part) for part in self.part_names)
         # A condition whose declared values are all places says where something is, null (no named place) too.
         place_domain = bool(domain) and all(self.is_place_value(value) for value in domain)
-        places = after is None or after in self.part_names or self.is_place_value(after)
+        places = after is None or (isinstance(after, str) and after in self.part_names) or self.is_place_value(after)
         if declaration.get("scope") == "part":
             return places
         return holds_parts or per_part or place_domain or (isinstance(after, str) and places)
@@ -201,7 +231,7 @@ class _Check:
         if name == "pose":
             # The derived pose condition comes from the base_pose effect for a mobile base, else current_pose.
             return ("base_pose",) if declaration.get("locates_resource") else ("current_pose",)
-        if name == "resource_location" and after in self.named_poses():
+        if name == "resource_location" and isinstance(after, str) and after in self.named_poses():
             # Only the resource's own named postures come from a primitive; any other place is capability.
             return ("current_pose_ref", "occupancy.location")
         return (name,)
@@ -229,6 +259,7 @@ class _Check:
             return {**row, "status": status, "reason": f"{primitive}: {reason}"}
         row["makes_value"] = True
         failures = self.preconditions(contract, theta)
+        row["part_guards_hold"] = not self.preconditions({"product_guards": contract.get("product_guards")}, theta)
         if failures:
             return {**row, "status": _worst(status for status, _ in failures),
                     "reason": f"{primitive} needs " + "; ".join(reason for _, reason in failures)}
@@ -506,29 +537,87 @@ class _Check:
                 return row[name]
         return None
 
-    def part_place(self) -> tuple[Any, str | None, list[float] | None]:
-        """Return where the event's part is in v: a place, its slot, and its position if recorded.
+    def part_pose(self, part: str) -> tuple[Any, list[float] | None]:
+        """Return where a part is in v: its place, and its pose if one is known.
 
-        The position is the part's observed pose, else its pose recorded at the failure while it is still
-        where it was then.
+        The pose is the part's observed pose; else, while no resource holds it and no place names where
+        it is (or only a resource that has released it), the pose this check found where an applied event
+        left it (a pose place); else its pose recorded at the failure while it is still where it was then.
         """
-        known, place = self.value(self.jid, "part_location", "part")
-        row = self.parts.get(self.part, {})
-        pose = row.get("observed_pose") or row.get("pose")
-        recorded = (self.cell.parts.get(self.part) or {}).get("pose")
-        if pose is None and known and place == (self.failure_parts.get(self.part) or {}).get("part_location"):
-            pose = recorded
-        position = None
-        if isinstance(pose, dict) and all(isinstance(pose.get(axis), (int, float)) for axis in "xyz"):
-            position = [pose["x"], pose["y"], pose["z"]]
-        elif isinstance(pose, list) and len(pose) >= 3:
-            position = list(pose[:3])
-        place = place if known else None
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+            multi_turn,
+        )
+
+        row = self.parts.get(part, {})
+        known, place = multi_turn._projected_state_value(row=row, field_name="part_location", scope="part")
+        pose = _pose_list(row.get("observed_pose") or row.get("pose"))
+        held = row.get("part_holder_resource_jid") or row.get("current_holder_resource_jid")
+        released = place is not None and self.released_by(place, part)
+        if pose is None and known and not held and (place is None or released):
+            pose = self.rest_pose(part)
+        # A part an accepted event set down is no longer where the failure recorded it, although its
+        # location may still name the resource that set it down.
+        moved = released and any(self.moves_part(task, part) for task in self.accepted)
+        if pose is None and known and not moved and place == (self.failure_parts.get(part) or {}).get("part_location"):
+            pose = _pose_list((self.cell.parts.get(part) or {}).get("pose"))
+        return (place if known else None), pose
+
+    def part_place(self) -> tuple[Any, str | None, list[float] | None]:
+        """Return where the event's part is in v: a place, its slot, and its position if known.
+
+        A location that names a resource which put the part down without stating where says nothing; the
+        resource whose own state records the part does.
+        """
+        place, pose = self.part_pose(self.part)
+        if pose is None and place is not None and self.released_by(place, self.part):
+            place, slot = self.recorded_place(self.part) or (None, None)
+            return place, slot, None
         if isinstance(place, str) and place in self.cell.rids.values():
             slot = self.slot_of(self.part, place)
         else:
             slot = None
-        return place, slot, position
+        return place, slot, pose[:3] if pose else None
+
+    def recorded_place(self, part: str) -> tuple[str, str | None] | None:
+        """Return a place whose own state records the part, and the variable or slot that records it.
+
+        Gripping resources (they declare a held part) and bookkeeping do not say where a part rests, and two
+        records of the part leave it unresolved.
+        """
+        records = []
+        for jid, row in self.resources.items():
+            variables = self.variables(jid)
+            if "held_part" in variables:
+                continue
+            for name, declaration in variables.items():
+                if name.startswith(("task_ctx.", "_")) or (declaration or {}).get("private"):
+                    continue
+                if row.get(name) == part:
+                    records.append((self.name_of(jid), name))
+                elif name.endswith("." + part) and row.get(name):
+                    records.append((self.name_of(jid), row[name] if isinstance(row[name], str) else None))
+        return records[0] if len(records) == 1 else None
+
+    def rest_pose(self, part: str) -> list[float] | None:
+        """Return the pose at which this check let an applied event leave a part at a pose place.
+
+        Only the last applied event that took or put the part counts: a later one moved it again.
+        """
+        for turn in reversed(self.checks):
+            applied = next((row for row in turn.get("results", [])
+                            if row.get("candidate_index") == turn.get("applied_candidate_index")), None)
+            rows = [row for row in (applied or {}).get("capability", []) if row.get("part") == part]
+            if rows:
+                return next((_pose_list(row["rest_pose"]) for row in rows if row.get("rest_pose")), None)
+        return None
+
+    def released_by(self, place: Any, part: str) -> bool:
+        """Return whether a part's location names a gripping resource whose own held part says it does not hold it."""
+        jid = next((key for key, rid in self.cell.rids.items() if place in (key, rid)), None)
+        if jid is None or "held_part" not in self.variables(jid):
+            return False
+        known, held = self.value(jid, "held_part")
+        return known and held != part
 
     def destination(self) -> tuple[Any, str | None, dict | None]:
         """Return where the event puts its part: a neighbor's slot, else the stated part location."""
@@ -567,31 +656,232 @@ class _Check:
             return [self.transport_check(own_slot)]
         held_known, held_before = self.value(self.jid, "held_part")
         location_known, location_before = self.value(self.jid, "part_location", "part")
-        holding = (held_known and held_before == self.part) or location_before == self.jid
+        # A gripping resource's own held part decides custody; for any other resource the part's location does.
+        grips = held_known and "held_part" in self.variables(self.jid)
+        holding = held_before == self.part if grips else location_before == self.jid
         held_after = self.end.get("held_part", held_before if held_known else None)
         place, slot, neighbor = self.destination()
         takes = held_after == self.part or place in (self.jid, self.rid)
-        puts = place not in (None, self.jid, self.rid) and (neighbor is not None or place != location_before)
+        puts = place not in (None, self.jid, self.rid) and (neighbor is not None or place != location_before or holding)
+        # Set down where no declared place names the spot, the part rests at the stated pose (a pose place):
+        # released from the gripper, or taken from where it is and set down in one event.
+        released = ("part_location" in self.end and place is None and neighbor is None and location_before is not None
+                    or holding and "held_part" in self.end and held_after is None)
         rows = []
-        if (takes or puts) and not holding:
+        if (takes or puts or released) and not holding:
             rows.append({"check": "pick", "part": self.part, **self.reach_part()})
         if puts:
             rows.append({"check": "place", "part": self.part,
                          **self.reach_place(place, slot, f"{_text(place)}" + (f" {slot}" if slot else ""))})
             if neighbor is not None:
                 rows.append(self.capacity(neighbor, slot))
-        elif holding and "held_part" in self.end and held_after is None:
-            # Released without a stated place, the part rests at the release pose (a pose place).
-            rows.append({"check": "place", "part": self.part, "status": NEEDS_CONTEXT,
-                         "reason": f"the support and clearance of {self.part} at a release pose are not checked yet"
-                         if isinstance(self.end.get("pose"), dict) else f"the event does not state where {self.part} goes"})
+        elif released:
+            rows.append({"check": "place", "part": self.part, **self.pose_place()})
         return rows
+
+    def pose_place(self) -> dict:
+        """Check a part released at the stated pose where no declared place names the spot (a pose place).
+
+        The part leaves the gripper as the grasp the resource recorded at the failure holds it, while the
+        resource still holds it from then; any other grasp is not recorded, so the release is unresolved.
+        The part must rest right there, flat on recorded surfaces of one height: its bottom on their top
+        faces, sunk at most by the recorded contact allowance and never above them (settling is not
+        modelled), its recorded centre of mass over where it touches down, its footprint on them, where no
+        declared place names the spot and no recorded object or part overlaps it. A mobile resource's pose
+        places its base, not the part.
+        """
+        stated = self.end.get("pose")
+        if self.mobile() or not isinstance(stated, dict):
+            return {"status": NEEDS_CONTEXT, "reason": f"the event does not state where {self.part} goes"}
+        if not all(isinstance(stated.get(axis), (int, float)) for axis in "xyz"):
+            return {"status": NEEDS_CONTEXT, "reason": f"pose {_text(stated)} does not state x, y and z"}
+        tool = self.stated_tool_pose(stated)
+        if tool is None:
+            return {"status": NEEDS_CONTEXT, "reason": f"pose {_text(stated)} has no orientation to check"}
+        bounds = (self.cell.part_geometry.get(self.part) or {}).get("local_bounds")
+        if not bounds:
+            return {"status": NEEDS_CONTEXT, "reason": f"the capture records no geometry for {self.part}"}
+        layer, depth = self.cell.contact_layer_m, self.contact_depth()
+        if layer is None or depth is None:
+            return {"status": NEEDS_CONTEXT, "reason": f"the capture records no contact surface layer or contact "
+                                                       f"depth for {self.part}"}
+        grasp = self.recorded_grasp()
+        if grasp is None:
+            return {"status": NEEDS_CONTEXT, "reason": f"the capture records no grasp of {self.part} by {self.rid} "
+                                                       "that still holds"}
+        rotation = Rotation.from_quat(tool[3:]) * Rotation.from_quat(grasp[3:])
+        origin = np.add(tool[:3], Rotation.from_quat(tool[3:]).apply(grasp[:3]))
+        return self.rest_at(f"{self.part} released at pose {_text(stated)}", origin, rotation, bounds, min(layer, depth))
+
+    def support_under(self, where: str, box: list[list[float]], sink: float) -> tuple[dict | None, dict | None]:
+        """Return the recorded surface right under a part's bottom, or the fact that it has none there.
+
+        As the projected part support reads the physics record, a part may sink into a surface by the smaller
+        of the contact layer and both collisions' contact depths (``sink`` holds the part's and the layer),
+        and contact never bridges an air gap.
+        """
+        (bottom, top), center = box[2], [(box[0][0] + box[0][1]) / 2, (box[1][0] + box[1][1]) / 2]
+        under = [{**surface, "sink": min(sink, surface["depth"])} for surface in self.surfaces()
+                 if _footprint_contains(surface, center)]
+        inside = [surface for surface in under
+                  if surface["bottom"] < top and surface["top"] > bottom + surface["sink"] + _TOUCH_M]
+        if inside:
+            return None, {"status": INFEASIBLE, "reason": f"{where} would sit inside {inside[0]['id']}"}
+        support = max((surface for surface in under if surface["top"] <= bottom + surface["sink"] + _TOUCH_M),
+                      key=lambda surface: surface["top"], default=None)
+        # A shape recorded only by its bounds (a mesh, a cylinder, a tilted box) between that surface and the
+        # part may hold the part instead, or the part may sit inside it.
+        floor = support["top"] if support else -math.inf
+        unchecked = [collision["id"] for _, collision in self.static_collisions()
+                     if _vertical_box(collision) is None and _bounds_contain(collision["bounds"], center)
+                     and collision["bounds"][2][0] < top and collision["bounds"][2][1] > floor + _TOUCH_M]
+        if unchecked:
+            return None, {"status": NEEDS_CONTEXT, "reason": f"{where} would rest on or in the recorded bounds of "
+                                                             f"{', '.join(unchecked)}, whose shapes are not checked"}
+        if support is None:
+            return None, {"status": INFEASIBLE, "reason": f"no recorded surface lies under {where}"}
+        if support["top"] < bottom - _TOUCH_M:
+            return None, {"status": INFEASIBLE, "reason": f"{where} would drop {(bottom - support['top']) * 1000:.1f} mm "
+                                                         f"onto {support['id']}"}
+        return support, None
+
+    def rest_at(self, where: str, origin: np.ndarray, rotation: Rotation, bounds: list[list[float]],
+                sink: float) -> dict:
+        """Check that a part placed at a pose rests right there, flat on recorded surfaces, at a free spot."""
+        box = _part_box(origin, rotation, bounds)
+        (bottom, top), center = box[2], [(box[0][0] + box[0][1]) / 2, (box[1][0] + box[1][1]) / 2]
+        support, refused = self.support_under(where, box, sink)
+        if refused:
+            return refused
+        tipping = self.tips_over(origin, rotation, bounds, support["sink"])
+        if tipping:
+            return {"status": NEEDS_CONTEXT, "reason": f"{where} {tipping} on {support['id']}"}
+        corners = [[x, y] for x in box[0] for y in box[1]]
+        level = [surface for surface in self.surfaces() if abs(surface["top"] - support["top"]) <= support["sink"] + _TOUCH_M
+                 and any(_footprint_contains(surface, point) for point in [center, *corners])]
+        if not all(any(_footprint_contains(surface, corner) for surface in level) for corner in corners):
+            return {"status": INFEASIBLE, "reason": f"{where} would rest past the edge of {support['id']}"}
+        rest = [box[0], box[1], [support["top"], support["top"] + top - bottom]]
+        place = self.place_named_at(rest, level)
+        if place:
+            return {"status": INFEASIBLE,
+                    "reason": f"{where} would rest in {place}, which the event does not state as its location"}
+        exact, bounded = self.overlaps(rest, {surface["id"] for surface in level})
+        if exact:
+            return {"status": INFEASIBLE, "reason": f"{where} would overlap {', '.join(exact)} where it rests"}
+        if bounded:
+            return {"status": NEEDS_CONTEXT, "reason": f"{where} would rest within the recorded bounds of "
+                                                       f"{', '.join(bounded)}, whose shapes are not checked"}
+        resting = np.add(origin, [0.0, 0.0, support["top"] - bottom])
+        return {"status": FEASIBLE, "support": support["id"],
+                "rest_pose": dict(zip(("x", "y", "z", "qx", "qy", "qz", "qw"),
+                                      [*resting.tolist(), *rotation.as_quat().tolist()], strict=True))}
+
+    def contact_depth(self) -> float | None:
+        """Return the event's part's recorded collision contact depth, or None when the capture records none."""
+        depths = [collision.get("contact_min_depth") for link in ((self.cell.bodies.get(self.part) or {}).get("links")
+                                                                  or {}).values() for collision in link.get("collisions", [])]
+        valid = [depth for depth in depths if isinstance(depth, (int, float)) and math.isfinite(depth) and depth >= 0]
+        return min(valid) if valid and len(valid) == len(depths) else None
+
+    def tips_over(self, origin: np.ndarray, rotation: Rotation, bounds: list[list[float]], sink: float) -> str | None:
+        """Return why a part resting on its lowest points would not stay there, or None when it would.
+
+        Its recorded extent touches the surface at the corners within the contact allowance of its lowest
+        one; its recorded centre of mass must lie strictly inside them, as the static support model of the
+        projected part support requires.
+        """
+        from cais_spade_llm.resources.recovery_geometry import _support_polygon
+
+        body = self.cell.bodies.get(self.part) or {}
+        link = next(iter((body.get("links") or {}).values()), {})
+        pose, centre = _pose_list(body.get("pose")), link.get("center_of_mass")
+        if not pose or len(pose) != 7 or not (isinstance(centre, list) and len(centre) == 3):
+            return "has no recorded centre of mass, so its rest is not checked"
+        local_centre = Rotation.from_quat(pose[3:]).inv().apply(np.subtract(centre, pose[:3]))
+        points = rotation.apply([[x, y, z] for x in bounds[0] for y in bounds[1] for z in bounds[2]]) + origin
+        contacts = [point.tolist() for point in points if point[2] <= points[:, 2].min() + sink + _TOUCH_M]
+        try:
+            _support_polygon(contacts, (rotation.apply(local_centre) + origin).tolist(), [0.0, 0.0, -1.0])
+        except ValueError:
+            return "would tip over, its recorded centre of mass outside where it touches down,"
+        return None
+
+    def recorded_grasp(self) -> list[float] | None:
+        """Return the grasp the resource recorded on the event's part at the failure, while it holds it from then.
+
+        Once an accepted event has taken or released the part, the grasp it is held by is no longer recorded.
+        """
+        attachment = (self.cell.resources.get(self.rid) or {}).get("attachment") or {}
+        grasp = attachment.get("grasp_transform")
+        if (attachment.get("part_name") != self.part or attachment.get("observed_attachment_complete") is not True
+                or not (isinstance(grasp, list) and len(grasp) == 7) or self.value(self.jid, "held_part") != (True, self.part)):
+            return None
+        return None if any(self.moves_part(task, self.part) for task in self.accepted) else grasp
+
+    def moves_part(self, task: dict, part: str) -> bool:
+        """Return whether an accepted event took or released a part: who holds it, or where it is, changed."""
+        start, end = task.get("expected_start_state") or {}, task.get("expected_end_state") or {}
+        held = "held_part" in end and start.get("held_part") != end["held_part"] and part in (
+            start.get("held_part"), end["held_part"])
+        located = (task.get("part_name") == part and "part_location" in end
+                   and self.name_of(start.get("part_location")) != self.name_of(end["part_location"]))
+        handed = any((values or {}).get("held_part") == part
+                     for values in (task.get("neighbor_end_state") or {}).values())
+        return held or located or handed
+
+    def static_collisions(self) -> list[tuple[str, dict]]:
+        """Return every recorded collision shape of the scene's fixed models, with its model's name."""
+        return [(name, collision) for name, model in self.cell.bodies.items() if model.get("static") is True
+                for link in (model.get("links") or {}).values() for collision in link.get("collisions", [])
+                if collision.get("bounds")]
+
+    def surfaces(self) -> list[dict]:
+        """Return the recorded fixed boxes with a horizontal top face, which can support a part."""
+        return [{**surface, "model": name} for name, collision in self.static_collisions()
+                if (surface := _vertical_box(collision)) is not None]
+
+    def place_named_at(self, rest: list[list[float]], supports: list[dict]) -> str | None:
+        """Return the declared place a resting part would be in: a recorded area it meets, or a resource's body."""
+        x, y = (rest[0][0] + rest[0][1]) / 2, (rest[1][0] + rest[1][1]) / 2
+        for name, region in self.cell.regions.items():
+            if not region.get("bounds"):
+                continue
+            (x0, x1), (y0, y1), (z0, z1) = region["bounds"]
+            if x0 <= x <= x1 and y0 <= y <= y1 and rest[2][0] < z1 and z0 < rest[2][1]:
+                return name
+        bodies = {(self.cell.scene.get(rid) or {}).get("gazebo_model") or rid: rid for rid in self.cell.rids.values()}
+        return next((bodies[surface["model"]] for surface in supports if surface["model"] in bodies), None)
+
+    def overlaps(self, rest: list[list[float]], supports: set[str]) -> tuple[list[str], list[str]]:
+        """Return what overlaps a resting part: recorded boxes exactly, other shapes and parts by their bounds."""
+        exact, bounded = [], []
+        for _, collision in self.static_collisions():
+            if collision["id"] in supports or not _boxes_overlap(rest, collision["bounds"]):
+                continue
+            box = _vertical_box(collision)
+            if box is None:
+                bounded.append(collision["id"])
+            elif _footprints_overlap(box, rest):
+                exact.append(collision["id"])
+        for part in sorted(self.part_names - {self.part}):
+            row = self.parts.get(part, {})
+            bounds = (self.cell.part_geometry.get(part) or {}).get("local_bounds")
+            _, pose = self.part_pose(part)
+            if row.get("part_holder_resource_jid") or row.get("current_holder_resource_jid") or not bounds or not pose:
+                continue
+            orientation = pose[3:] if len(pose) == 7 else [0.0, 0.0, 0.0, 1.0]
+            if _boxes_overlap(rest, _part_box(pose[:3], Rotation.from_quat(orientation), bounds)):
+                bounded.append(part)
+        return exact, bounded
 
     def reach_part(self) -> dict:
         place, slot, position = self.part_place()
         if position is not None:
             area = {"name": "observed pose", "bounds": [[position[0]] * 2, [position[1]] * 2, [position[2]] * 2]}
             return self.reach_area(area, f"{self.part}'s observed position")
+        if place is None:
+            return {"status": NEEDS_CONTEXT, "reason": f"the projected state does not record where {self.part} is"}
         return self.reach_place(place, slot, f"{self.part} at {_text(place)}" + (f" {slot}" if slot else ""))
 
     def transport_check(self, condition: str) -> dict:
@@ -614,6 +904,67 @@ class _Check:
             return {"check": "capacity", "place": place, "slot": slot, "status": INFEASIBLE,
                     "reason": f"{place} {slot or condition} holds {holder} in the projected state"}
         return {"check": "capacity", "place": place, "slot": slot, "status": FEASIBLE}
+
+
+def _pose_list(pose: Any) -> list[float] | None:
+    """Return a recorded or projected pose as [x, y, z] or [x, y, z, qx, qy, qz, qw], or None."""
+    axes = ("x", "y", "z", "qx", "qy", "qz", "qw")
+    if isinstance(pose, dict) and all(isinstance(pose.get(axis), (int, float)) for axis in axes[:3]):
+        values = [pose.get(axis) for axis in axes]
+        return values if all(isinstance(value, (int, float)) for value in values) else values[:3]
+    if isinstance(pose, list) and len(pose) >= 3 and all(isinstance(value, (int, float)) for value in pose):
+        return list(pose[:7]) if len(pose) >= 7 else list(pose[:3])
+    return None
+
+
+def _part_box(origin: Iterable[float], rotation: Rotation, bounds: list[list[float]]) -> list[list[float]]:
+    """Return the world bounds of a part's recorded extent placed at a pose."""
+    corners = rotation.apply([[x, y, z] for x in bounds[0] for y in bounds[1] for z in bounds[2]]) + np.asarray(origin)
+    return [[float(corners[:, axis].min()), float(corners[:, axis].max())] for axis in range(3)]
+
+
+def _bounds_contain(bounds: list[list[float]], point: list[float]) -> bool:
+    return bounds[0][0] <= point[0] <= bounds[0][1] and bounds[1][0] <= point[1] <= bounds[1][1]
+
+
+def _boxes_overlap(first: list[list[float]], second: list[list[float]]) -> bool:
+    return all(first[axis][0] < second[axis][1] - _TOUCH_M and second[axis][0] < first[axis][1] - _TOUCH_M
+               for axis in range(3))
+
+
+def _vertical_box(collision: dict) -> dict | None:
+    """Return a recorded box's horizontal footprint and its height range when one of its axes is vertical."""
+    shape = collision.get("geometry") or {}
+    if shape.get("type") != "box" or not collision.get("bounds"):
+        return None
+    axes = Rotation.from_quat(collision["pose"][3:]).apply(np.eye(3))
+    vertical = next((index for index, axis in enumerate(axes) if abs(abs(axis[2]) - 1.0) < 1e-6), None)
+    if vertical is None:
+        return None
+    level = [index for index in range(3) if index != vertical]
+    return {"id": collision["id"], "center": list(collision["pose"][:2]), "axes": [axes[index][:2] for index in level],
+            "half": [shape["size"][index] / 2 for index in level],
+            "bottom": collision["bounds"][2][0], "top": collision["bounds"][2][1],
+            # A depth the record lacks allows no sinking.
+            "depth": collision["contact_min_depth"] if isinstance(collision.get("contact_min_depth"), (int, float)) else 0.0}
+
+
+def _footprint_contains(box: dict, point: list[float]) -> bool:
+    offset = np.subtract(point, box["center"])
+    return all(abs(float(np.dot(offset, axis))) <= half + _TOUCH_M
+               for axis, half in zip(box["axes"], box["half"], strict=True))
+
+
+def _footprints_overlap(box: dict, rest: list[list[float]]) -> bool:
+    """Return whether a box's footprint and a resting part's footprint overlap, by separating axes."""
+    corners = [np.add(box["center"], sign_a * box["half"][0] * box["axes"][0] + sign_b * box["half"][1] * box["axes"][1])
+               for sign_a in (-1, 1) for sign_b in (-1, 1)]
+    square = [np.array([x, y]) for x in rest[0] for y in rest[1]]
+    for axis in (*box["axes"], np.array([1.0, 0.0]), np.array([0.0, 1.0])):
+        first, second = [float(np.dot(corner, axis)) for corner in corners], [float(np.dot(corner, axis)) for corner in square]
+        if max(first) <= min(second) + _TOUCH_M or max(second) <= min(first) + _TOUCH_M:
+            return False
+    return True
 
 
 def _param_in_domain(name: str, value: Any, parameters: dict) -> tuple[bool, str]:

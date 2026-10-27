@@ -39197,6 +39197,20 @@ class SystemBridge:
 
         return example_for_bridge(self).set_ra_feasibility_check(enabled)
 
+    def set_recovery_cca_check(self, enabled: bool) -> dict[str, Any]:
+        """Turn the CCA check on or off for the next Offline outline attempt.
+
+        Args:
+            enabled: Have the CCA check each event the RA finds feasible for safety (Eq. 13) and the
+                declared completion for nonblocking (Eq. 6); needs the RA feasibility check.
+
+        Returns:
+            The bridge-owned workflow state.
+        """
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).set_cca_check(enabled)
+
     def get_default_recovery_observations(self) -> dict[str, str]:
         """Return the four retained failure inputs available for fresh attempts."""
         from cais_spade_llm.recovery_framework.part_slippage_example import default_observation_paths

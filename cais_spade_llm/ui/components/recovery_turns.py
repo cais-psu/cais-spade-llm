@@ -397,15 +397,188 @@ def _validation_records(records: list[dict], *, state_key: str) -> None:
             evidence = stage.get("evidence") or {}
             key = f"{state_key}:{record['record']}:{index}"
             if role == "ResourceAgent":
-                _expansion("RA feasibility", key + ":ra",
-                    lambda evidence=evidence: {name: value for name, value in evidence.items() if name != "geometry_evidence"}, _text)
-                if "geometry_evidence" in evidence:
-                    _expansion("Physical evidence", key + ":physical",
-                               lambda evidence=evidence: evidence["geometry_evidence"], _text)
+                _expansion("RA feasibility", key + ":ra", lambda evidence=evidence: evidence, _text)
             elif role == "CentralControllerAgent":
                 _expansion("CCA safety", key + ":cca", lambda evidence=evidence: evidence, _text)
             else:
                 _text(stage)
+
+
+_VERDICT_COLORS = {"FEASIBLE": "positive", "SAFE": "positive", "NONBLOCKING": "positive", "NEEDS_CONTEXT": "warning",
+                   "INFEASIBLE": "negative", "UNSAFE": "negative", "BLOCKING": "negative"}
+# How the RA derived a changed condition (Alg. 1) when no producing primitive is involved.
+_DERIVATIONS = {"free": "free: resource_state names the DES state", "unchanged": "unchanged",
+                "bookkeeping": "bookkeeping: not derived", "undeclared": "not a declared variable",
+                "place": "a place: decided by capability", "no_producer": "no primitive produces it"}
+
+
+def turn_checks(draft: dict | None, turn: int) -> dict:
+    """Return what the RA and the CCA judged on one outline turn, from the draft's kept check records."""
+    found = {}
+    for key in ("ra_feasibility_checks", "cca_safety_checks", "cca_nonblocking_checks"):
+        rows = [row for row in (draft or {}).get(key) or [] if row.get("turn_index") == turn]
+        if rows:
+            found[key] = rows[-1]
+    return found
+
+
+def _checks_summary(checks: dict) -> str:
+    """State a turn's verdicts in one line: each candidate per check, then what the turn applied."""
+    parts = []
+    ra = checks.get("ra_feasibility_checks")
+    if ra:
+        parts.append("RA: " + ", ".join(f"candidate {row['candidate_index'] + 1} {row['feasibility_status']}"
+                                        for row in ra["results"]))
+    if "cca_safety_checks" in checks:
+        parts.append("CCA safety: " + (", ".join(f"candidate {row['candidate_index'] + 1} {row['safety_status']}"
+                                                  for row in checks["cca_safety_checks"]["results"])
+                                        or "no feasible candidate to check"))
+    if ra:
+        applied = ra.get("applied_candidate_index")
+        parts.append(f"applied candidate {applied + 1}" if type(applied) is int else "no candidate applied")
+    nonblocking = checks.get("cca_nonblocking_checks")
+    if nonblocking:
+        parts.append(f"CCA nonblocking: {nonblocking['nonblocking_status']}")
+    return " · ".join(parts)
+
+
+def _llm_candidates(data: dict) -> list:
+    """Return the candidate events of the turn's last LLM response that proposed any, as the LLM named them."""
+    for capture in reversed(data["captures"]):
+        record = capture["record"]
+        if capture["status"] != "captured" or record.get("kind") != "provider_response":
+            continue
+        for choice in record.get("raw_response", {}).get("choices", []):
+            content = choice.get("message", {}).get("content")
+            try:
+                response = json.loads(content) if isinstance(content, str) else None
+            except json.JSONDecodeError:
+                continue
+            events = response.get("candidate_events") if isinstance(response, dict) else None
+            if isinstance(events, list) and events:
+                return events
+    return []
+
+
+def _verdict(title: str, status: object) -> None:
+    with ui.row().classes("items-center gap-2"):
+        ui.label(title).classes("font-semibold text-sm")
+        ui.badge(str(status), color=_VERDICT_COLORS.get(status, "grey"))
+
+
+def _rows_table(columns: list[tuple[str, str]], rows: list[dict]) -> None:
+    ui.table(columns=[{"name": key, "label": title, "field": key, "align": "left"} for key, title in columns],
+             rows=[{"row": index, **row} for index, row in enumerate(rows)], row_key="row").classes("w-full").props(
+        "flat dense wrap-cells")
+
+
+def _value(value: object) -> str:
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+def _rounded(value: object) -> object:
+    if isinstance(value, float):
+        return round(value, 3)
+    if isinstance(value, dict):
+        return {key: _rounded(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rounded(item) for item in value]
+    return value
+
+
+def _ra_conditions(conditions: list[dict]) -> None:
+    rows = []
+    for row in conditions:
+        if row.get("derivation") == "producers":
+            derivation = "produced by " + ", ".join(f"{producer['primitive']} ({producer['status']})"
+                                                     for producer in row.get("producers", []))
+        else:
+            derivation = _DERIVATIONS.get(row.get("derivation"), str(row.get("derivation")))
+        change = _value(row.get("after"))
+        if "before" in row:
+            change = f"{_value(row['before'])} → {change}"
+        rows.append({"entity": row.get("entity"), "condition": row.get("condition"), "change": change,
+                     "derivation": derivation, "status": row.get("status"), "reason": row.get("reason", "")})
+    _rows_table([("entity", "Entity"), ("condition", "Condition"), ("change", "Before → after"),
+                 ("derivation", "Derivation (Alg. 1)"), ("status", "Status"), ("reason", "Reason")], rows)
+
+
+def _ra_capability(capability: list[dict]) -> None:
+    rows = [{"check": row.get("check"), "target": " ".join(str(row[key]) for key in ("part", "place", "slot") if row.get(key)),
+             "status": row.get("status"),
+             "evidence": row.get("reason") or _fields_text(_rounded({key: row[key] for key in ("witness", "support", "rest_pose")
+                                                                     if key in row}))}
+            for row in capability]
+    _rows_table([("check", "Check"), ("target", "Part or place"), ("status", "Status"),
+                 ("evidence", "Reason or witness (Eq. 12)")], rows)
+
+
+def _cca_safety(result: dict | None) -> None:
+    if result is None:
+        ui.label("CCA safety (Eq. 13): not checked; the RA refused this candidate.").classes("text-sm text-slate-500")
+        return
+    _verdict("CCA safety (Eq. 13): every specification monitor can still accept", result["safety_status"])
+    if result.get("steps"):
+        _rows_table([("step", "Step"), ("status", "Status")], result["steps"])
+    for reason in result.get("reasons") or []:
+        ui.label(reason).classes("text-sm whitespace-pre-wrap")
+
+
+def _cca_nonblocking(check: dict) -> None:
+    with ui.card().classes("w-full"):
+        ui.label("Declared recovery_complete").classes("font-semibold")
+        _verdict("CCA nonblocking (Eq. 6): normal production can carry on", check["nonblocking_status"])
+        for reason in check.get("reasons") or []:
+            ui.label(reason).classes("text-sm whitespace-pre-wrap")
+        if check.get("blocked"):
+            ui.label("Blocked: " + ", ".join(check["blocked"])).classes("text-sm")
+        evidence = check.get("evidence") or {}
+        if evidence.get("parts"):
+            seconds = evidence.get("seconds")
+            ui.label(f"Composition searched to the end: {evidence.get('explored_states')} states"
+                     + (f" in {seconds:.1f} s" if isinstance(seconds, (int, float)) else "")
+                     + "; parts with work left: " + ", ".join(evidence["parts"])
+                     + "; resources: " + ", ".join(evidence.get("included_resources") or [])).classes("text-sm text-slate-500")
+        elif "explored_states" in evidence:
+            ui.label("No part has work left; nothing to compose.").classes("text-sm text-slate-500")
+        ui.label("The CCA accepts the declared completion." if check["nonblocking_status"] == "NONBLOCKING" else
+                 "The CCA refuses the declared completion: the reasons return to the LLM and synthesis continues "
+                 "from the same state.").classes("font-semibold text-sm")
+
+
+def render_turn_validation(checks: dict, candidates: list) -> None:
+    """Show how the RA and the CCA judged one outline turn: each candidate, then what the turn applied."""
+    ra = checks.get("ra_feasibility_checks")
+    safety_record = checks.get("cca_safety_checks")
+    safety = {row["candidate_index"]: row for row in (safety_record or {}).get("results", [])}
+    if ra:
+        passes = "RA feasibility and CCA safety" if safety_record is not None else "RA feasibility"
+        ui.label(f"The LLM chose candidate {ra['llm_selected_candidate_index'] + 1}. Candidates are checked in the "
+                 f"LLM's order, its choice first; the first that passes {passes} is applied.").classes("text-sm")
+        for result in ra["results"]:
+            index = result["candidate_index"]
+            event = candidates[index] if index < len(candidates) and isinstance(candidates[index], dict) else {}
+            with ui.card().classes("w-full"):
+                ui.label(f"Candidate {index + 1} · {result.get('event_name')} · "
+                         f"{event.get('resource') or result.get('resource_jid')}").classes("font-semibold")
+                _verdict("RA feasibility (Alg. 1, Eq. 12)", result["feasibility_status"])
+                ui.label("Changed conditions: how each is produced").classes("text-sm")
+                _ra_conditions(result.get("conditions") or [])
+                if result.get("capability"):
+                    ui.label("Capability: reach, place and navigation").classes("text-sm")
+                    _ra_capability(result["capability"])
+                if result.get("primitive_set"):
+                    ui.label("Primitive set: " + ", ".join(result["primitive_set"])).classes("text-sm")
+                if safety_record is not None:
+                    _cca_safety(safety.get(index))
+        applied = ra.get("applied_candidate_index")
+        ui.label(f"Applied candidate {applied + 1}." if type(applied) is int else
+                 "No candidate passed: nothing is applied, and the reasons above return to the LLM as validation "
+                 "feedback.").classes("font-semibold text-sm")
+    if checks.get("cca_nonblocking_checks"):
+        _cca_nonblocking(checks["cca_nonblocking_checks"])
+    with ui.expansion("Complete check records").classes("w-full"):
+        _text(checks)
 
 
 class RecoveryTurns:
@@ -421,6 +594,22 @@ class RecoveryTurns:
 
     def _expansion(self, label: str, key: str, reader, render):
         return _expansion(label, key, reader, render)
+
+    def _show_checks(self, row: dict, checks: dict, key: str, directory: Path) -> None:
+        """Summarize a turn's RA and CCA verdicts on its card; its validation expansion shows how each was reached."""
+        row["checks"] = checks
+        row["checks_label"].text = _checks_summary(checks)
+        row["checks_label"].set_visibility(bool(checks))
+        if not checks:
+            return
+        if row["validation"] is not None:
+            row["validation"]()
+            return
+        with row["checks_box"]:
+            _, row["validation"] = self._expansion("RA and CCA validation", key,
+                lambda row=row: (row["checks"], _llm_candidates(read_recovery_turn(directory, row["data"]))),
+                lambda value: render_turn_validation(*value))
+        row["refresh"].append(row["validation"])
 
     def update(self, state: dict, stage: str, turns: list[dict]) -> None:
         """Append new turns and refresh open content without collapsing it."""
@@ -450,13 +639,17 @@ class RecoveryTurns:
                 if key not in self.rows:
                     with ui.card().classes("w-full"):
                         label = ui.label().classes("font-semibold")
-                        row = {"data": turn, "label": label, "signature": None, "refresh": []}
+                        checks_label = ui.label().classes("text-sm")
+                        checks_label.set_visibility(False)
+                        row = {"data": turn, "label": label, "signature": None, "refresh": [],
+                               "checks": {}, "checks_label": checks_label, "validation": None}
                         for tab in ("input", "output"):
                             state_key = f"{identity}:{json.dumps(key)}:{tab}"
                             _, refresh = self._expansion(tab.title(), state_key,
                                 lambda row=row, directory=directory: read_recovery_turn(directory, row["data"]),
                                 lambda data, tab=tab, state_key=state_key: render_turn_content(data, tab, state_key=state_key))
                             row["refresh"].append(refresh)
+                        row["checks_box"] = ui.column().classes("w-full")
                         self.rows[key] = row
                 row = self.rows[key]
                 row["label"].text = (f"Turn {turn['turn']} · handoff to nominal work · no LLM call"
@@ -465,6 +658,10 @@ class RecoveryTurns:
                 if turn.get("resource_jid"):
                     row["label"].text += f" · {turn['resource_jid']}"
                 row["data"] = turn
+                # The draft keeps each check's verdicts by turn; turns of a run without a draft have none.
+                checks = turn_checks(state.get("outline_draft"), turn["turn"]) if stage == "outline" else {}
+                if checks != row["checks"]:
+                    self._show_checks(row, checks, f"{identity}:{json.dumps(key)}:validation", directory)
                 if row["signature"] != turn["signature"]:
                     row["signature"] = turn["signature"]
                     for refresh in row["refresh"]:

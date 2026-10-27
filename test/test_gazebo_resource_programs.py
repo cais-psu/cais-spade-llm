@@ -56,10 +56,23 @@ def test_machine_contracts_follow_the_machine_automaton(scene):
     models = build_environment_models(scene)
     declarations = current_primitive_declarations(scene)
 
-    def guards_of(preconditions):
+    # The job commands also declare their program limits, one alternative per program and result (Eq. 12's
+    # C_rho): the selected program, and the job's process and result it makes. The automaton leaves programs out.
+    limited = {"start_job", "resume_job"}
+
+    def guards_of(name, preconditions):
+        preconditions = {key: value for key, value in preconditions.items()
+                         if not (name in limited and key == "selected_program")}
         state = preconditions["resource_state"]
         return [{**preconditions, "resource_state": {"equals": value}} for value in state["in"]] if "in" in state \
             else [preconditions]
+
+    def job_guards_of(product_guards):
+        product_guards = deepcopy(product_guards)
+        matches = (product_guards or {}).get("current_process", {}).get("matches")
+        for key in ("process", "result"):
+            (matches or {}).pop(key, None)
+        return product_guards
 
     checked = 0
     for machine in scene["machines"]:
@@ -75,16 +88,28 @@ def test_machine_contracts_follow_the_machine_automaton(scene):
             # Every process effect also meets the product's own plan order, which the product declares.
             product_guards = {key: value for key, value in event.get("product_guards", {}).items()
                               if key != "ordered_requirements"} or None
-            index = next(index for index, contract in enumerate(contracts[name])
-                         if event["guards"] in guards_of(contract["preconditions"])
-                         and product_guards == contract.get("product_guards")
-                         and event["updates"] == contract["effects"]
-                         and process == contract.get("product_effects", {}).get("current_process")
-                         and contract.get("controllable", True) == event.get("controllable", True)
-                         and event["product_effects"]["processCompleted"]
-                         == contract.get("product_effects", {}).get("processCompleted", []))
-            matched.add((name, index))
+            indices = [index for index, contract in enumerate(contracts[name])
+                       if event["guards"] in guards_of(name, contract["preconditions"])
+                       and product_guards == job_guards_of(contract.get("product_guards"))
+                       and event["updates"] == contract["effects"]
+                       and process == contract.get("product_effects", {}).get("current_process")
+                       and contract.get("controllable", True) == event.get("controllable", True)
+                       and event["product_effects"]["processCompleted"]
+                       == contract.get("product_effects", {}).get("processCompleted", [])]
+            assert indices, (rid, name, event["guards"])
+            matched.update((name, index) for index in indices)
             checked += 1
+        # Each start_job alternative pairs a declared program with a result its validated effects make, and
+        # each resume variant does too.
+        made = {(program, effect["process"], effect["result"]) for program, option in machine["program_options"].items()
+                for effect in option["program"]["effects"]}
+        assert {(contract["preconditions"]["selected_program"]["equals"], contract["parameters"]["process"]["enum"][0],
+                 contract["parameters"]["result"]["enum"][0]) for contract in contracts["start_job"]} == made
+        for before in ({"equals": "paused"}, {"equals": "loaded"}):
+            assert {(contract["preconditions"]["selected_program"]["equals"],
+                     contract["product_guards"]["current_process"]["matches"]["process"],
+                     contract["product_guards"]["current_process"]["matches"]["result"])
+                    for contract in contracts["resume_job"] if contract["preconditions"]["resource_state"] == before} == made
         assert matched == {(name, index) for name, variants in contracts.items() for index in range(len(variants))}
     assert checked
 

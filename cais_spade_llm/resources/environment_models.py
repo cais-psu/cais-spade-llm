@@ -877,16 +877,36 @@ def _bound(field: str, params: dict) -> str:
     return field
 
 
-def owners(models: dict, valuation: dict, products: dict, product_name: str) -> dict:
-    """Check coherent control state and exclusive custody for registered parts."""
+def owners(models: dict, valuation: dict, products: dict, product_name: str, *,
+           errors: list[tuple[str | None, str]] | None = None) -> dict:
+    """Check coherent control state and exclusive custody for registered parts.
+
+    Args:
+        models: Each resource's model.
+        valuation: Each resource's values.
+        products: Each registered part's state.
+        product_name: The product the parts are assembled into.
+        errors: When given, each violation is appended as (resource id or None, message) and the check
+            goes on; otherwise the first violation raises ``ValueError``.
+
+    Returns:
+        The custodian of each held or assembled part.
+    """
+    def fail(rid: str | None, message: str) -> None:
+        if errors is None:
+            raise ValueError(message)
+        errors.append((rid, message))
+
     if set(valuation) != set(models):
-        raise ValueError("Valuation must contain every configured resource")
+        fail(None, "Valuation must contain every configured resource")
+        return {}
     result = {}
     for rid, values in valuation.items():
         model = models[rid]
         expected = set(model["current_valuation"])
         if set(values) != expected:
-            raise ValueError(f"Incomplete resource valuation: {rid}")
+            fail(rid, f"Incomplete resource valuation: {rid}")
+            continue
         for field, value in values.items():
             declaration = declaration_for(model, field)
             # A fault is an uncontrollable event into a declared fault state;
@@ -895,37 +915,49 @@ def owners(models: dict, valuation: dict, products: dict, product_name: str) -> 
                 field == "resource_state"
                 and (value in declared_fault_states() or value in model.get("fault_states", ()))
             ):
-                raise ValueError(f"Invalid resource value: {rid}.{field}")
+                fail(rid, f"Invalid resource value: {rid}.{field}")
             part = _custody_part(rid, field, value, product_name)
             if part is not None:
                 if part not in products or part in result:
-                    raise ValueError("Unknown or duplicate part custody")
-                result[part] = rid
+                    fail(rid, "Unknown or duplicate part custody")
+                else:
+                    result[part] = rid
         if "held_part" in values and values["resource_state"] in tasks.HOLDING_STATES | tasks.FREE_STATES and (
             (values["resource_state"] in tasks.HOLDING_STATES) != (values["held_part"] is not None)
         ):
-            raise ValueError("Resource state disagrees with held_part")
+            fail(rid, "Resource state disagrees with held_part")
         if "approached_part" in values and (
             (values["resource_state"] in tasks.APPROACH_STATES) != (values["approached_part"] is not None)
         ):
-            raise ValueError("KMR approach state disagrees with approached_part")
+            fail(rid, "KMR approach state disagrees with approached_part")
         if "staging_part" in values and (
             (values["resource_state"] == "idle") != (values["part_name"] is None)
         ):
-            raise ValueError("Machine state disagrees with workholding")
+            fail(rid, "Machine state disagrees with workholding")
         if rid == "3D Printing Station":
-            _check_printer_state(values)
+            try:
+                _check_printer_state(values)
+            except ValueError as exc:
+                if errors is None:
+                    raise
+                errors.append((rid, str(exc)))
     for part, state in products.items():
         # A part assembled on the product is located on it; the product holds it.
         if part != product_name and state.get("location") == product_name:
             if part in result:
-                raise ValueError("Assembled part also has resource custody")
-            result[part] = product_name
-    conveyor_parts(models["Conveyor"], valuation["Conveyor"])
+                fail(None, "Assembled part also has resource custody")
+            else:
+                result[part] = product_name
+    try:
+        conveyor_parts(models["Conveyor"], valuation["Conveyor"])
+    except ValueError as exc:
+        if errors is None:
+            raise
+        errors.append(("Conveyor", str(exc)))
     if (valuation["Exit"]["resource_state"] == "occupied") != (
         valuation["Exit"]["part_name"] is not None
     ):
-        raise ValueError("Exit state disagrees with occupancy")
+        fail("Exit", "Exit state disagrees with occupancy")
     return result
 
 

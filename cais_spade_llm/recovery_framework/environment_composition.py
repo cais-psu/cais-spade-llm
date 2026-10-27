@@ -16,6 +16,7 @@ from cais_spade_llm.product.environment import fingerprint
 from cais_spade_llm.resources.environment_models import (
     candidates, event_bindings, feasibility, matches_requirement, project_activity, project_transition,
 )
+from cais_spade_llm.resources.nominal_des import FINISH_SUFFIX
 
 
 def task_key(task: dict) -> str:
@@ -195,10 +196,14 @@ class EnvironmentPlant:
             updates = row["event"].get("updates", {})
             if updates.get("held_part") == {"set": None}:
                 releases.add(rid)
+        # A finish is named after its start, so a robot's move_home_done is part of its move_home.
+        homing = {"move_home", "move_home" + FINISH_SUFFIX}
+        # A robot not yet at rest keeps its way home: a reservation can give it a release goal.
         rows = [row for row in rows
                 if "held_part" not in self.context.models[row["task"]["resource_id"]]["state_variables"]
                 or row["task"]["resource_id"] in releases
-                or self.initial["resources"][row["task"]["resource_id"]].get("held_part") == part]
+                or self.initial["resources"][row["task"]["resource_id"]].get("held_part") == part
+                or row["task"]["event_name"] in homing and not self._at_rest(row["task"]["resource_id"])]
         unique = {task_key(row["task"]): row for row in rows}
         # Capability locations are an overapproximation: omit only transitions
         # whose source custody cannot be reached by any declared selected behavior.
@@ -227,14 +232,21 @@ class EnvironmentPlant:
                         reachable.add(target)
             changed = before != (len(reachable), len(selected))
         active_actors = {row["task"]["resource_id"] for row in selected.values()
-                         if row["task"]["event_name"] != "move_home"}
+                         if row["task"]["event_name"] not in homing}
         proposed = getattr(self, "proposed", None)
         self._templates[part] = [row for row in selected.values()
-                                if row["task"]["event_name"] != "move_home"
+                                if row["task"]["event_name"] not in homing
                                 or row["task"]["resource_id"] in active_actors
+                                or not self._at_rest(row["task"]["resource_id"])
                                 or self.initial["resources"][row["task"]["resource_id"]].get("task_ctx.part_name") == part
                                 or proposed is not None and task_key(row["task"]) == proposed.key]
         return self._templates[part]
+
+    def _at_rest(self, rid: str) -> bool:
+        """Whether a resource's starting values already meet one of its model's marked conditions."""
+        values = self.initial["resources"][rid]
+        return any(all(values.get(key) == expected["equals"] for key, expected in condition.items())
+                   for condition in self.context.models[rid].get("marked_state_conditions", []))
 
     def _rule_resources(self, rule: dict) -> set[str]:
         resources = set()
@@ -275,8 +287,27 @@ class EnvironmentPlant:
         if part not in self.initial["products"]:
             raise IncompleteModel("unknown_candidate_part")
         scope = Scope(products={part})
-        self.scope = scope
         scope.reasons.append({"kind": "candidate", "task": candidate.key, "part": part})
+        return self._close(scope, running, checker, budget, full=full)
+
+    def select_parts(self, parts: set[str], checker: BaseSafetyChecker, budget: Budget) -> Scope:
+        """Select the continuations of several parts at once, with nothing proposed or running.
+
+        A part with no selectable continuation toward its unmet goal is recorded in the scope's
+        reasons as ``missing_continuation`` instead of making the selection incomplete: when the
+        current values are checked, that part is blocked, which is a verdict, not a missing model.
+        """
+        unknown = sorted(set(parts) - set(self.initial["products"]))
+        if unknown:
+            raise IncompleteModel("unknown_part: " + unknown[0])
+        scope = Scope(products=set(parts))
+        scope.reasons.extend({"kind": "checked_part", "part": part} for part in sorted(parts))
+        return self._close(scope, (), checker, budget, full=False, blocked_parts=True)
+
+    def _close(self, scope: Scope, running: tuple[Action, ...], checker: BaseSafetyChecker,
+               budget: Budget, *, full: bool, blocked_parts: bool = False) -> Scope:
+        """Close ``scope`` over continuations, occupancy, specifications and release goals."""
+        self.scope = scope
         known_tasks = [item.task for item in running] + self.admitted
         rule_by_id = {rule["id"]: rule for rule in checker.safety_rules}
         changed = True
@@ -384,10 +415,16 @@ class EnvironmentPlant:
         for name in sorted(scope.products):
             if (not self._part_templates(name, budget)
                     and not matches_requirement(self.initial["products"][name], self._desired(name))):
-                raise IncompleteModel("missing_continuation: " + name)
+                if not blocked_parts:
+                    raise IncompleteModel("missing_continuation: " + name)
+                scope.reasons.append({"kind": "missing_continuation", "part": name})
             scope.goals.append({"part_name": name, "operation": self._desired(name)})
         used_resources = set().union(*(row["resources"] for row in self._selected_templates))
         for rid in sorted(used_resources):
+            # Normal production never moves a resource it may not use or that is out of service, so it
+            # owes that one no release.
+            if rid not in self.context.permitted_resources or rid in self.context.unavailable_resources:
+                continue
             model = self.context.models[rid]
             # Printer output and buffers retain completed material. Their global
             # marked state is not a local operation's release obligation.

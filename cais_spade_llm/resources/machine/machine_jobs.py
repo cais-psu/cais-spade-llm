@@ -14,17 +14,48 @@ MACHINE_PRIMITIVES = ("select_program", "start_job", "pause_job", "resume_job", 
 JOB_CONTROL_VERSION = 1
 
 
+def program_refusal(installed: dict, target: dict) -> str | None:
+    """Return why a machine with an installed configuration refuses to select a program, or None.
+
+    ``MachineJobs`` raises with this reason, and the primitive contracts offer only the programs it
+    accepts, so both judge a program by the same rule.
+
+    Args:
+        installed: The machine's installed configuration (tool, workholding, program).
+        target: The configuration of the program to select, as ``program_options`` declares it.
+
+    Returns:
+        The command's refusal reason, or None when the program can be selected.
+    """
+    for key in ("tool", "workholding"):
+        if not installed.get(key) or not target.get(key):
+            return "NEEDS_CONTEXT: installed " + key + " is unavailable"
+        if target[key] != installed[key]:
+            return "Program requires a different " + key
+    declaration = target.get("program", {})
+    if declaration.get("validated") is not True:
+        return "NEEDS_CONTEXT: program has no validated effects"
+    if any(installed.get(key) != value for key, value in declaration.get("required_configuration", {}).items()):
+        return "Installed configuration does not satisfy the selected program"
+    return None
+
+
 def machine_primitive_contracts(machine: dict) -> dict[str, list[dict]]:
     """Declare what each job command needs and changes, as ``MachineJobs.command`` enforces it.
 
     Machine primitives are dispatched by name, so their contracts are data beside the commands. They
-    name the machine's ``resource_state`` and the part's ``current_process``, which carries the job and
-    the machine that holds it; none names where a part is. Completion is not a command: it is the
-    observed ``complete_job`` outcome, uncontrollable as in the machine automaton, once the running job's
-    active processing time has passed. ``$evidence: job.*`` reads the machine's job for the part.
+    name the machine's ``resource_state`` and ``selected_program`` and the part's ``current_process``,
+    which carries the job and the machine that holds it; none names where a part is. The command's
+    program limits are declared too: a program is selected only when the installed tool and workholding
+    accept it, a job starts only with a result its selected program's validated effects establish, and
+    a paused job resumes only with the program that makes its result selected again. So ``start_job``
+    and ``resume_job`` have one alternative per program and result. Completion is not a command: it is
+    the observed ``complete_job`` outcome, uncontrollable as in the machine automaton, once the running
+    job's active processing time has passed. ``$evidence: job.*`` reads the machine's job for the part.
 
     Args:
-        machine: The machine's scene entry, with ``resource_id`` and ``simulation_process.job_control``.
+        machine: The machine's scene entry, with ``resource_id``, ``program_options``,
+            ``current_configuration`` and ``simulation_process.job_control``.
 
     Returns:
         Each primitive's alternative contracts, plus ``complete_job``: ``preconditions`` and ``effects``
@@ -35,7 +66,18 @@ def machine_primitive_contracts(machine: dict) -> dict[str, list[dict]]:
     rid = machine["resource_id"]
     part = {"part_name": {"equals_from_param": "part_name"}}
     processes = machine.get("process_capabilities") or {}
-    results = sorted({result for process in processes.values() for result in process.get("supported_results", [])})
+    options = machine.get("program_options") or {}
+    # Selecting a program keeps the installed tool and workholding, which every program must match, so the
+    # programs a machine can select follow from the configuration installed at the capture.
+    selectable = sorted(name for name, option in options.items()
+                        if program_refusal(machine.get("current_configuration") or {}, option) is None)
+    # Once selected, a program becomes the installed configuration, and a job starts only when that
+    # configuration satisfies the program itself. Each such program establishes the processes and results
+    # of its validated effects, within the machine's declared process capabilities.
+    makes = [(program, effect["process"], effect["result"]) for program in selectable
+             if program_refusal(options[program], options[program]) is None
+             for effect in options[program]["program"].get("effects", [])
+             if effect.get("result") in (processes.get(effect.get("process")) or {}).get("supported_results", [])]
 
     def own_job(**fields) -> dict:
         # A machine commands only a job in its own record, as the command refuses any other job: the
@@ -48,27 +90,38 @@ def machine_primitive_contracts(machine: dict) -> dict[str, list[dict]]:
                 "effects": {"resource_state": {"set": status}},
                 "product_effects": {"current_process": {"set_status": status}}}
 
+    def resumed(before: dict, **job) -> list[dict]:
+        # The command resumes a job only with the job's own program selected again. The part's job record
+        # names its process and result, not its program, so the program is the one that makes them: exact
+        # while one selectable program makes each result, as every declared machine has it.
+        variants = []
+        for program, process, result in makes:
+            variant = control(before, "running", own_job(**job, process=process, result=result))
+            variant["preconditions"]["selected_program"] = {"equals": program}
+            variants.append(variant)
+        return variants
+
     resume = []
     # The command refuses every resume unless the machine declares resume_after_reload.
     if machine.get("simulation_process", {}).get("job_control", {}).get("resume_after_reload") is True:
         # A paused job continues where it was paused, also after its part is unloaded and loaded back in;
         # once reloaded, only the part's own record still says its job is paused.
-        resume = [control({"equals": "paused"}, "running"),
-                  control({"equals": "loaded"}, "running", own_job(status="paused"))]
+        resume = [*resumed({"equals": "paused"}), *resumed({"equals": "loaded"}, status="paused")]
     return deepcopy({
         "select_program": [{"preconditions": {"resource_state": {"not_equals": "running"}},
-                            "parameters": {"program": {"enum": sorted(machine.get("program_options") or {})}},
+                            "parameters": {"program": {"enum": selectable}},
                             "effects": {"selected_program": {"set_from_param": "program"}}}],
         "start_job": [{
-            "preconditions": {"resource_state": {"equals": "loaded"}, **part},
-            "parameters": {"process": {"enum": sorted(processes)}, "result": {"enum": results}},
+            "preconditions": {"resource_state": {"equals": "loaded"}, **part,
+                              "selected_program": {"equals": program}},
+            "parameters": {"process": {"enum": [process]}, "result": {"enum": [result]}},
             # A paused job resumes and a stopped one cannot restart, so the part has no unfinished job here.
             "product_guards": {"current_process": {"not_matches": {"machine": rid}}},
             "effects": {"resource_state": {"set": "running"}},
             "product_effects": {"current_process": {"set": {
                 "process": {"set_from_param": "process"}, "result": {"set_from_param": "result"},
                 "status": "running", "machine": rid}}},
-        }],
+        } for program, process, result in makes],
         "pause_job": [control({"equals": "running"}, "paused")],
         "resume_job": resume,
         "stop_job": [control({"in": ["running", "paused"]}, "stopped")],
@@ -399,17 +452,9 @@ class MachineJobs:
         if program not in self.programs:
             raise ValueError("Requested program is not declared")
         target = self.programs[program]
-        installed = self.record["current_configuration"]
-        for key in ("tool", "workholding"):
-            if not installed.get(key) or not target.get(key):
-                raise ValueError("NEEDS_CONTEXT: installed " + key + " is unavailable")
-            if target[key] != installed[key]:
-                raise ValueError("Program requires a different " + key)
-        declaration = target.get("program", {})
-        if declaration.get("validated") is not True:
-            raise ValueError("NEEDS_CONTEXT: program has no validated effects")
-        if any(installed.get(key) != value for key, value in declaration.get("required_configuration", {}).items()):
-            raise ValueError("Installed configuration does not satisfy the selected program")
+        refusal = program_refusal(self.record["current_configuration"], target)
+        if refusal:
+            raise ValueError(refusal)
         return deepcopy(target)
 
     def _ready(self, part: str, observations: dict) -> None:

@@ -51,6 +51,18 @@ def draft_rows(draft: dict) -> list[dict]:
     return rows
 
 
+def _draft_checks(draft: dict) -> list[str]:
+    """Name the checks an outline draft ran."""
+    return [name for name, key in (("RA feasibility", "ra_feasibility_check"), ("CCA safety", "cca_safety_check"),
+                                   ("CCA nonblocking", "nonblocking_check")) if draft.get(key)]
+
+
+def _checked_kind(draft: dict) -> str:
+    """Say which agents checked an outline draft: RA-checked, RA- and CCA-checked, or Unvalidated."""
+    agents = list(dict.fromkeys(name.split()[0] for name in _draft_checks(draft)))
+    return f"{'- and '.join(agents)}-checked" if agents else "Unvalidated"
+
+
 def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C901, PLR0915 - shared page controls
     """Render one bridge-owned workflow; navigation only stops page polling."""
     state = bridge.get_part_slippage_example()
@@ -176,6 +188,15 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
             ui.notify(str(exc), type="warning")
         update()
 
+    def cca_check_changed() -> None:
+        if updating:
+            return
+        try:
+            bridge.set_recovery_cca_check(cca_check.value)
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
+        update()
+
     for key, title, artifact_stage in (
         ("outline", "Recovery outline", "recovery_outline"),
         ("primitive", "Primitive composition", "recovery_primitves"),
@@ -184,9 +205,14 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
             ui.label(title).classes("text-lg font-semibold")
             status = ui.label().classes("text-sm text-slate-600")
             if key == "outline":
-                ra_check = ui.switch("RA feasibility check", value=bool(state.get("check_ra_feasibility")))
+                with ui.row().classes("items-center gap-4"):
+                    ra_check = ui.switch("RA feasibility check", value=bool(state.get("check_ra_feasibility")))
+                    cca_check = ui.switch("CCA check", value=bool(state.get("check_cca")))
                 ra_check.tooltip("Checks each proposed event with Alg. 1 and Eq. 12 before it is applied; "
-                                 "a refusal returns to the LLM. Offline only; CCA checks stay off.")
+                                 "a refusal returns to the LLM. Offline only.")
+                cca_check.tooltip("Checks each event the RA finds feasible against the selected specifications "
+                                  "(safety, Eq. 13) and the LLM's recovery_complete (nonblocking, Eq. 6); a refusal "
+                                  "returns to the LLM. Needs the RA feasibility check. Offline only.")
             with ui.row():
                 generate_action = "generate_outline" if key == "outline" else "generate_primitives"
                 controls[generate_action] = ui.button("Generate", on_click=lambda action=generate_action: act(action)).props("outline")
@@ -224,6 +250,7 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                            "turn_view": turn_view}
     recovery_mode.on_value_change(mode_changed)
     ra_check.on_value_change(ra_check_changed)
+    cca_check.on_value_change(cca_check_changed)
 
     with ui.card().classes("w-full") as execution_card:
         ui.label("Execution").classes("text-lg font-semibold")
@@ -249,8 +276,12 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         if offline and current.get("defer_preparation"):
             safety_note.text = "Generate runs these selections in a fresh attempt."
         if draft:
-            safety_badge.text = ("RA-checked outline — RA feasibility only, no CCA checks" if draft.get("ra_feasibility_check")
-                                 else "Unvalidated outline — no validation checks")
+            checks = _draft_checks(draft)
+            safety_badge.text = f"{_checked_kind(draft)} outline — " + (", ".join(checks) or "no validation checks")
+            if draft.get("cca_safety_check"):
+                assumed = "; ".join(row["reason"] for row in draft.get("cca_assumptions") or [] if row.get("reason"))
+                safety_note.text = ("The CCA checks each event against the selected specifications."
+                                    + (f" Assumed, not checked: {assumed}." if assumed else ""))
         progress.text = current["message"]
         run_id.text = f"Run: {current['run_id']}" if current.get("run_id") else ""
         provenance = current.get("attempt_provenance") or {}
@@ -326,6 +357,9 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         ra_check.value = bool(current.get("check_ra_feasibility"))
         ra_check.set_visibility(offline)
         ra_check.set_enabled(not current.get("busy"))
+        cca_check.value = bool(current.get("check_cca"))
+        cca_check.set_visibility(offline)
+        cca_check.set_enabled(not current.get("busy") and bool(current.get("check_ra_feasibility")))
         for field in fields.values():
             field.set_enabled(not current.get("busy") and status not in {"running_example", "executing", "resuming"})
         if offline and status == "preparing_outline":
@@ -389,8 +423,7 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                           if review_only else "\n".join(f"{row['resource_id']} · {row['outline_id']} · {row['status']}" for row in records)
                           or "Ready after both generation stages complete.")
         if draft:
-            execution.text = (("RA-checked" if draft.get("ra_feasibility_check") else "Unvalidated")
-                              + " draft: composition and execution are disabled.")
+            execution.text = f"{_checked_kind(draft)} draft: composition and execution are disabled."
 
     update()
     load_options()

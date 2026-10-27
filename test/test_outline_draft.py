@@ -467,3 +467,32 @@ def test_ra_feasibility_toggle_reaches_the_next_offline_draft(observations, monk
     asyncio.run(run())
     assert created.call_args.kwargs["check_ra_feasibility"] is True
     assert example.snapshot()["status"] == "blocked"
+
+
+def test_one_cca_toggle_needs_the_ra_check_and_runs_both_cca_checks(observations, monkeypatch):
+    from cais_spade_llm.recovery_framework import part_slippage_example
+
+    created = Mock(side_effect=ValueError("draft recorded"))
+    monkeypatch.setattr(outline_draft, "OutlineDraft", created)
+    monkeypatch.setattr(part_slippage_example, "read_observations", lambda path: deepcopy(observations))
+    example = PartSlippageExample(SimpleNamespace(system_running=False))
+    example.set_options(source="offline", scenario=observations["scenario"], safety_files=[],
+        observation_path=observations["source_path"], defer_preparation=True)
+    assert example.snapshot()["check_cca"] is False
+    with pytest.raises(ValueError, match="RA feasibility check first"):
+        example.set_cca_check(True)
+    example.set_ra_feasibility_check(True)
+    assert example.set_cca_check(True)["check_cca"] is True
+    # The CCA safety check places robots from the RA's reach results, so it cannot stay on alone.
+    assert example.set_ra_feasibility_check(False)["check_cca"] is False
+    example.set_ra_feasibility_check(True)
+    example.set_cca_check(True)
+
+    async def run():
+        await example.action("generate_outline_fresh")
+        await example._task
+
+    asyncio.run(run())
+    checks = ("check_ra_feasibility", "check_nonblocking", "check_cca_safety")
+    assert {key: created.call_args.kwargs[key] for key in checks} == dict.fromkeys(checks, True)
+    assert created.call_args.kwargs["cca_assumptions"] == []

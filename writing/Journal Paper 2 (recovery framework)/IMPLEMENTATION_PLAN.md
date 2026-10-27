@@ -725,7 +725,64 @@ send check time could drop with coarser sweeps; the prepared nominal path in `_c
   plan rebuild projecting a started activity from its start, and the protected `cca_safety_logic.json`
   being rewritten by nominal starts (the harness restores it).
 
-## CCA nonblocking check (Eq. 6) — design approved by the user October 25, 2026; not built
+## CCA safety check on outline events (Eq. 13) — decided by the user October 26, 2026; built offline October 26 (uncommitted)
+
+**Plan (user, October 26), one step at a time.**
+1. Monitor states at $s_F$ (done offline, read-only).
+2. Eq. 13 on each outline event (this section).
+3. Eq. 8 over $s_N$, built together with Eq. 6 stage 2.
+4. The Section 5.3 physical check of the composed motions.
+
+**Decisions (user, October 26).**
+- **Generality.** One reader per kind of condition, never per rule. The seven rules use `resource_region`, `part_region_entry`, `process_result_completed` and `process_target_completed`; a specification using any other kind stops the check before it starts.
+- **Uncontrollable events, 1(b).** After each event, every uncontrollable event its end state enables (a running job that completes on its own) is checked once more. The CCA cannot prevent it, so a safe state must stay safe under it (controllability). This step is not committed.
+- **Robot posture, 3(a).** The outline places the acting robot at the RA's reach configuration. The executed trajectory is checked again at composition (step 4).
+- **Part slippage: no recapture.** The capture, taken with the CCA bypassed, has ur5e-3's upper arm 5.7 cm into the board area's corner while ur5e-4 is over the board. That breaks `SAFE_shared_area_mutex(ur5e-3, ur5e-4)` at $s_F$.
+  - The user chose to assume the CCA was on: ur5e-3 waited clear of the board area until an event moves it. This is the declared assumption `cca_assumptions`.
+  - Any other failure state that already breaks a rule stops the check with that fact.
+
+**Built (uncommitted).**
+- **`recovery_framework/cca_safety.py`.**
+  - `capture_inputs` merges the selected files into the plant document, compiles and grounds it (97 rule instances), and replays the monitors to $s_F$. Occupancy before $s_F$ is unknown; the final observation uses recorded boxes, held parts and the assumptions.
+  - `check_event` judges an event in steps: during (work poses and placed-part entries), after (end pose and new ledger), then the one-step uncontrollable lookahead. Reasons state facts only.
+  - Also `commit`, `recorded` and `refusal_findings`.
+- **Placing the acting robot.**
+  - A named posture places it there; a mobile base uses its stated base pose before the dock its location names (arm parked, or carrying while it holds a part); otherwise its last reach configuration.
+  - An event stating no new position, or restating the one it has, leaves the robot where it was.
+  - A robot moving at the failure (a recorded start without a finish) that restates its recorded location cannot be placed (NEEDS_CONTEXT).
+  - An actor the event leaves in place keeps its recorded boxes and any assumption.
+- **Ledger.** The projected `processCompleted`, plus the declared results of the planned tasks the recovery claimed, credited as the nonblocking check credits them.
+- **Uncontrollable completions.** Read from the session's `recovery_des_models` guards (for `complete_job`: machine `running` with that part) and declared product effects, limited to completing the part's current process; faulted resources are skipped.
+- **Hook.** `multi_turn_validated_event._check_feasible_and_safe` checks the LLM's candidates in its order, RA then CCA, and applies the first that passes both (Eq. 9).
+  - `ra_feasibility_checks` keeps its shape, which the RA's `rest_pose` reads (applied candidate, RA results by `candidate_index`).
+  - New `cca_safety_checks`, and `validation_stages` per turn for the Recovery UI's RA and CCA panels.
+  - With the CCA off, the RA-only path is unchanged.
+- **Switches and wiring.**
+  - `OutlineDraft(check_cca_safety=..., cca_assumptions=...)`; the CCA needs the RA switch.
+  - Seed flag; `cca_safety` in `_CODE_AUTHORED_FEEDBACK`; record fields; the check-aware message is kept while a draft generates.
+- **Tests.** `test/test_cca_safety.py` (27).
+
+**Review and replay.**
+- **Independent review** (three lenses: monitors, geometry, integration) found eight issues; all are fixed except the UI wiring (open item below):
+  - a KMR stated base pose lost to its dock;
+  - an assumption dropped for an actor left in place (found twice);
+  - claimed assembly results missing from the ledger;
+  - a restated pose read as unknown;
+  - a dead entry guard;
+  - a progress message that said "validation is bypassed".
+- **Replay of the 20 saved drafts** (no LLM calls; RA then CCA as the loop runs them; RA code as of about 15:10, still changing in another chat):
+  - Of 216 events the RA refuses 25; on the rest the CCA finds 186 SAFE, 3 UNSAFE and 2 NEEDS_CONTEXT.
+  - First CCA refusals: draft_7f2e3ec7 event 2 (ur5e-3 picks the loose gear_small while ur5e-4 is still over the board) and draft_6544e81b / draft_8f0e1b83 event 3 (NEEDS_CONTEXT: ur5e-4 "retreats to the print station", the location it records while moving at the failure). Their event-4 refusals are hypothetical, after event 3.
+  - With the earlier RA code, the CCA also refused draft_12c2a926 and draft_86164600 at event 2 (the KMR takes KET4 out of M1 while ur5e-1 is in M1's area: `SAFE_M1_mutex`); the current RA refuses those events first (NEEDS_CONTEXT).
+  - draft_7e9d4cc0 event 1 breaks the trim-order rule by 1(b) (M2 still running RGOCG4's circle trim); the RA refuses it first.
+  - draft_af2012d3, which pauses M2 by stating only its `resource_state`, passes once completions are read from the model's guards.
+
+**Open.**
+- ~~**The Recovery UI's new "CCA check" switch** passes `check_cca_safety` without `cca_assumptions`.~~ Resolved October 27 (user: "yes fix it"). The assumption is per-scenario configuration: `recovery_case_safety.default_cca_assumptions` holds the one Part slippage row (ur5e-3 clear of `assembly_board-v1`), and the switch passes it through `PartSlippageExample._checks`. A CCA-checked draft's page shows it as "Assumed, not checked". Checked on `capture_ad64bf16…`: without the assumption `capture_inputs` stops on `SAFE_shared_area_mutex`; with it, it starts (97 rule instances).
+- **Plain state and event conditions** have no reader yet; none of the seven rules uses them.
+- **Nominal model.** ur5e-3 picks only from buffer zone 4 (`slippage_initialization.py` requires it), and that pick reaches 3.5 cm (grasp) to 5.7 cm (lifted) into the board area; zones 1–3 and home are clear. In a CCA-on nominal run, ur5e-3 and ur5e-4 cannot work at the board at the same time.
+
+## CCA nonblocking check (Eq. 6) — design approved by the user October 25, 2026; built offline October 26 on the runtime models (uncommitted)
 
 **Decisions (user, October 25).** The CCA checks Eq. 6: the paper's $R_{\text{safe}}$ is Eqs. 6 and 8, nonblocking
 is a property of the composed plant only the CCA holds, the RA is local, and the PA must not judge its own output.
@@ -734,44 +791,72 @@ per-event progress check. Completion comes from the models' marked states, not f
 supplies the remaining plan and the handoff condition $H$ and ends synthesis only when the CCA accepts. The paper
 reasoning and wording are in `PAPER_FRAMEWORK.md` ("Nonblocking validation").
 
-**What exists.** `multi_turn_diagnostic.declare_recovery_complete` searches up to 6 connecting nominal events
-(`nominal_connection`) and records `handoff` (whether the recorded handoff conditions $H$ of each part's next nominal
-step hold); it never refuses. `handoff` says so itself: "complete nominal continuation not checked". The refusal
-text today is "no sequence of up to 6 declared nominal events reaches its next task" (`connection_blockers`
-deliberately does not list the states the next task needs).
+**Decisions (user, October 26, later; supersede the morning's two-stage plan and its "stranded parts" note).**
+- One nominal model: the runtime `environment_models`, which describe each resource's capabilities and drop the
+  scenario's part assignments on purpose. `nominal_des.py` (the older version with assignments) is not used, and
+  making the runtime models keep the assignments was rejected. So a part left off its usual route is accepted when
+  some resource can carry it on: the trimmed KET4 on M2's staging tray (`draft_373bd875…`) is not stranded, since
+  ur5e-2 may move any part between M2, its tray and the Conveyor. The morning's claim that it was stranded came
+  from `nominal_des.py` and is withdrawn.
+- No step bound and no NEEDS_CONTEXT: the 6-event search was arbitrary. The CCA searches its local parallel
+  composition to the end; running out of the memory budget is an error, never a verdict.
+- One rule: whatever the recovery leaves that normal production cannot continue is refused and named (option a):
+  a resource left in a state its model does not have, a part that cannot reach its remaining requirement from
+  where it is, a resource that cannot carry on, or parts that cannot finish together.
+- The stage-1 version (the handoff condition $H$ plus the 6-event search) was backed out. Without the flag,
+  `declare_recovery_complete` still records that older diagnostic.
 
-**Build in two stages.**
-1. Refuse `recovery_complete` when $H$ cannot be reached. Behind a session flag `check_nonblocking`
-   (`OutlineDraft` argument, default off, like `check_ra_feasibility`), in a CCA-owned module called from
-   `handle_validated_candidates` on a completion reply. A refusal returns `need_revision` with one finding
-   (`constraint_code: cca_nonblocking`, code-authored) stating the blocked planned task as a fact; an
-   inconclusive bounded search is reported as NEEDS_CONTEXT, not as a rejection. Test: replay the v5 Machining
-   outline `draft_3e3eb08d…`; its last reply must be refused, naming the blocked task.
-2. Full Eq. 6: run the remaining planned events $s_N$ from $x^R_m$ through to the marked states of every resource
-   model and part (all remaining tasks, not only each part's next step). This would catch an outline that leaves a
-   machine's job paused when $H$ holds (the v5 ur5e-1 outlines; whether normal work stalls there is unconfirmed).
-
-**Stranded parts (user, October 26).** A recovery that leaves a part where no normal-production event acts on it
-violates Eq. 6, even when $H$ holds. Machining `draft_373bd875…` leaves the trimmed KET4 on M2's staging tray. In the
-nominal model (`nominal_des.py`, from the manifest's `handling_robot` and `nominal_parts`), each machine's handling
-robot handles only that machine's parts: ur5e-2 picks M2's parts from M2 or M2's tray and places them on the Conveyor
-or the tray, and M2's `part_name` and `staging_part` values are only M2's parts. So no nominal event takes KET4 from
-the tray (or from inside M2) toward its remaining requirement, assembly at `GMC_Laser_Plate_Virtual/KET4_Square_4mm`.
-Stage 1 misses it: only the three tasks pending at the failure are checked, and with the KMR set idle at M2 that
-outline passes `handoff` (checked offline). Stage 2 catches it only if:
-- it searches the CCA's nominal models (the ones Eq. 13 admits nominal events with), not the recovery models. Their
-  generic robot pick and place accept any part at any place without reach: today's connection search lets ur5e-1
-  pick KET4 from M2's tray and place it on assembly_board-v1, neither of them among its reachable locations;
-- its goal is each part's remaining requirements (the product's `requirements` minus `processCompleted`) and the
-  resources' marked states. The capture records only each part's current operation (KET4: trim on M1), so the rest
-  of the route comes from the nominal model built from the manifest, searched per part toward its goal (the route
-  from M2's tray to the plate is far longer than the 6-event connection search).
-
-The refusal is computed from model data, never from a rule about trays or part names: the declared domains and
-guards decide that no nominal event acts on the part where it is. Under the decision below it states the part,
-where it is and its remaining requirement ("KET4_Square_4mm cannot reach its remaining requirement (assembly at
-GMC_Laser_Plate_Virtual/KET4_Square_4mm) from M2 staging tray"), not why. It comes when the LLM declares
-`recovery_complete`, before normal production takes over, and synthesis continues from the same state.
+**Built (October 26, uncommitted; base `273b854`).**
+- Where: `recovery_framework/cca_nonblocking.py` (`capture_inputs`, `check_completion`, `refusal_findings`), called
+  from `multi_turn_validated_event.handle_validated_candidates` on `recovery_complete` when `check_nonblocking` is
+  on (`OutlineDraft(check_nonblocking=...)`, default off; seeded by `build_multi_turn_session_seed`). The capture's
+  runtime inputs ride on the provider as `cca_capture`, as the RA's `recorded_cell` does. No UI toggle (a
+  `SystemBridge` change; ask first). Each verdict is kept in `cca_nonblocking_checks` (session and draft record).
+- End state: `EnvironmentProductContext` rebuilt from the capture's recorded `inputs`. Each resource takes the
+  outline's projected values for its model's fields and the grounded failure-time values for the rest. Bookkeeping
+  no event states is derived as the model does: a robot an event acted on keeps only the destination it is
+  positioned at (place_approach's effect), and the belt's `part_order` follows its parts' positions unless an
+  event stated it. Parts take their projected location and process record plus the declared process results of
+  each planned task the recovery claimed (a robot's recovery event records no assembly; Part slippage's gear_small
+  needs this). Faulted resources are unavailable. Executors are bound as the runtime binds them.
+- Validity first: a value an event left unknown is reported alone. Otherwise `owners(..., errors=...)` (a new
+  optional collector; the default still raises the first violation with the same message) names every resource
+  whose values its model does not have, with any value outside its domain quoted, plus custody and location
+  mismatches. Such a state is refused without a search.
+- Composition: parts = the order's parts the recovery touched or the remaining plan names, with unfinished work.
+  Goal = each part's last processPlan step (the ordered guards imply the earlier ones), plus release goals for the
+  permitted, in-service resources the continuations use. `EnvironmentPlant.select_parts` builds a multi-part scope
+  (a part with no continuation is recorded, not raised), and `local_composition.analyze_state` is candidate-free
+  (accept iff the root is in `nonblocking_region`). No specification monitors: the seven predefined specs use
+  physical APs the composition cannot evaluate.
+- Fixes in `environment_composition.py`:
+  - Activity model B regression: `move_home_done` counted as an activity, which put every robot and its home goal
+    in every scope (Machining took 72k states and 160 s). It now counts as `move_home`. A robot not yet at rest
+    keeps its way home, because a reservation (e.g. the KMR's M1 trips reserve ur5e-1) can give it a release goal.
+  - No release goal for a resource normal production may not use (the Conveyor capture runs normal production
+    without M2 and ur5e-2) or that is out of service (faulted ur5e-1).
+- Results on all 19 saved v5 drafts (replayed with no LLM calls; at most 33 s and 452 MB each):
+  - Part slippage: 3/3 accepted (about 250 states, 0.4 s).
+  - Machine left `completed`, `paused` or `stopped` with its part removed (the LLM states only `part_name` when it
+    unloads): all three ur5e-1 drafts and six Machining drafts. This is the most common refusal; per the October 26
+    decision the LLM must restate the machine's state.
+  - KMR or robot `positioned` holding nothing, or the KMR at a place it cannot be (`"Buffer For Machined parts"`):
+    four Machining drafts and one Conveyor draft.
+  - KMR idle at no named place (no KMR event starts there): two Conveyor drafts.
+  - Stuck parts: unfinished RGOCG4 at the output nest, and KET4, which cannot get past it (`3e3eb08d…`, 22,530
+    states, 33 s); trimmed KET4 back in Storage (`f7d4be63…`; normal production only takes parts from Storage into
+    machines).
+  - Belt order the LLM stated: the text "none" (`23c036c5…`), rank 1 for a lone part (`f931aa72…`).
+  - `af2012d3…`: `held_part "none"` (the LLM wrote the word), and KET4 recorded at M1 while M2 holds it. The outline
+    projection put KET4 back at M1 although its events loaded it into M2; this looks like a projection bug and was
+    not investigated.
+- Independent review (three lenses, each finding checked by a skeptic): behaviour preserved (`owners()` identical
+  on 16,000 fuzzed states; `analyze()` identical on 28 toy scenarios and two real plants). Fixed: the faulted
+  robot's release goal, the robot positioned with its part, unstated values, and the stated belt order. Rejected:
+  a part with a later step recorded but an earlier one missing (only the last step is checked; the verifier found
+  no way to reach that state today); a part outside the order left inside the scope (`IncompleteModel`, so a draft
+  error rather than a refusal; never seen).
+- Tests: `test/test_cca_nonblocking.py` (12) and `test_local_composition.py` (+2).
 
 **Decided by the user (October 26): the refusal states only what is blocked, option (a).** It names the planned task
 that cannot start ("normal production cannot start environment_24 (M2 complete_job of RGOCG4-50_Round_4mm, trim →
@@ -812,7 +897,7 @@ still look the details up. `connection_blockers` today names neither.
   needs gripper_state ≠ failed"), its arm moves still pass, the turn-1 prompt is unchanged, and a shadow replay of
   8 v5 drafts gives the same 168 verdicts. `gripper_state` stays an undeclared primitive-level condition (not in
   the prompt). The KMR records no `gripper_state`, so a KMR gripper fault cannot be expressed yet.
-- Paper wording (recording it in `PAPER_FRAMEWORK.md` waits for the user's OK): Alg. 1 reads "primitives whose
+- Paper wording (user OK, recorded in `PAPER_FRAMEWORK.md` on October 26): Alg. 1 reads "primitives whose
   declared effects produce v′_i"; Eq. 12 becomes ∀c ∃ρ∈P_c ∃θ_ρ∈Θ_{i,ρ}: C_ρ(v_i,v′_i,θ_ρ)=1; a task-level
   state label no primitive produces is not derived; location, slot and custody are decided by capability;
   delayed completion needs a definition; candidates are checked in the LLM's order; an unresolved search is a
@@ -820,7 +905,13 @@ still look the details up. `connection_blockers` today names neither.
 - Open RA items: refusing because they answer NEEDS_CONTEXT (pose-place support and clearance; the KMR base
   search missing tight spots; tilted grasp orientations); lenient (placing into a machine accepts any of its
   areas); deferred model data (machine program and result limits, the KMR's parked arm and arm moves, part fit);
-  runtime (the live recovery pose check still uses `gripper_reach`; switch it before the next Gazebo run).
+  runtime: the `gripper_reach` cylinder in `RobotAgent._configured_pick_place_recovery_feasibility`
+  (`robot_agent.py` 2639) is not on the live recovery path (October 26). Saved execution calls
+  `check_recovery_primitive_feasibility`, which sets `function_name` to the primitive, and the cylinder runs only
+  for `pick_approach`/`place_approach`, which no resource offers as a recovery primitive in the scene's
+  `resource_programs`. Live `move_cartesian`/`move_pose` targets are judged by MoveIt planning
+  (`_prepare_cartesian_motion`, CCA-bypass simulation) or answer NEEDS_CONTEXT; the composition path already uses
+  the joint witness. Nothing to switch before the next Gazebo run.
   Deferred by the user until RA-checked drafts are actually run: across 168 candidates in 8 replayed v5 drafts,
   only one hit any of these (the KMR delivering KET4 to M2's tray, ur5e-1 `draft_b1ecbb8d…`), and a checked run
   would apply the LLM's next feasible candidate there. Fix a limit only when a checked run hits it.
@@ -940,9 +1031,9 @@ tray, the Conveyor brings KET4 to loading position 2, ur5e-2 loads it into M2, M
 the trim. RGOCG4 stays paused on the tray, the KMR is never moved (the prompt now says its trip was cancelled at
 (-3.033, 3.052)), and KET4 ends inside M2, where normal production does not handle it (the CCA check's case).
 RA crash found: `ra_feasibility._Check.is_place` (line 188) tests `after in self.part_names` on a record value such as
-a stated `current_process`, which raises "unhashable type: 'dict'"; a checked run would fail on such a step. The fix
-(test only text values there) awaits the user, because the other chat has uncommitted work in that file; the replay
-above applied it in scratch only.
+a stated `current_process`, which raises "unhashable type: 'dict'"; a checked run would fail on such a step. Fixed
+October 26 (only text values are tested there and in `effect_fields`); a robot restating a job record now answers
+`no_producer` (regression test in `test_ra_feasibility.py`).
 
 **October 25, late night: Machining with gpt-6.1-sol at xhigh effort — a valid recovery, misjudged by a handoff bug.**
 `draft_f7d4be63…`: 25 calls, 20 events, 10.1 min, about 332k tokens. The KMR takes RGOCG4 from M2 to Storage, fetches

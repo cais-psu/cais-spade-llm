@@ -119,6 +119,7 @@ class PartSlippageExample:
         self.safety_files: list[str] = default_safety_files(self.scenario)
         self.observation_path = ""
         self.check_ra_feasibility = False
+        self.check_cca = False
         self._defer_preparation = False
         self._selection_revision = 0
         self._selected_observation_summary: dict | None = None
@@ -146,6 +147,7 @@ class PartSlippageExample:
             "defer_preparation": self._defer_preparation,
             "selection_revision": self._selection_revision,
             "check_ra_feasibility": self.check_ra_feasibility,
+            "check_cca": self.check_cca,
         }
         runtime = self._runtime
         if self.source == "gazebo" and runtime is not None and self._status["status"] in {"running_example", "blocked", "stopped"}:
@@ -290,6 +292,9 @@ class PartSlippageExample:
     def set_ra_feasibility_check(self, enabled: bool) -> dict:
         """Turn the RA feasibility check on or off for the next Offline outline attempt.
 
+        Turning it off also turns off the CCA check, whose safety check places each acting robot from
+        the RA's reach results.
+
         Args:
             enabled: Check each proposed recovery event with Alg. 1 and Eq. 12 before it is applied.
 
@@ -301,7 +306,39 @@ class PartSlippageExample:
         if self.snapshot()["busy"]:
             raise ValueError("Stop the current action before changing the RA feasibility check")
         self.check_ra_feasibility = enabled
+        if not enabled:
+            self.check_cca = False
         return self.snapshot()
+
+    def set_cca_check(self, enabled: bool) -> dict:
+        """Turn the CCA check on or off for the next Offline outline attempt.
+
+        One switch runs both CCA checks: safety of each event the RA finds feasible (Eq. 13) and
+        nonblocking of the LLM's declared completion (Eq. 6).
+
+        Args:
+            enabled: Have the CCA check the outline; needs the RA feasibility check.
+
+        Returns:
+            The current workflow state.
+        """
+        if type(enabled) is not bool:
+            raise ValueError("The CCA check is on or off")
+        if self.snapshot()["busy"]:
+            raise ValueError("Stop the current action before changing the CCA check")
+        if enabled and not self.check_ra_feasibility:
+            raise ValueError("Turn on the RA feasibility check first: the CCA safety check places each "
+                             "acting robot from the RA's reach results")
+        self.check_cca = enabled
+        return self.snapshot()
+
+    def _checks(self) -> dict:
+        """Return the OutlineDraft check arguments for the switches turned on, with the scenario's CCA assumptions."""
+        from cais_spade_llm.recovery_framework.recovery_case_safety import default_cca_assumptions
+
+        return {"check_ra_feasibility": self.check_ra_feasibility,
+                "check_nonblocking": self.check_cca, "check_cca_safety": self.check_cca,
+                "cca_assumptions": default_cca_assumptions(self.scenario) if self.check_cca else None}
 
     def saved_observations(self) -> list[dict]:
         """List retained observation sources without querying Gazebo."""
@@ -327,7 +364,7 @@ class PartSlippageExample:
                 raise ValueError("Saved observations belong to a different failure scenario")
             self._selected_observations = observations
             self._selected_observation_summary = observation_summary(observations)
-            self._draft = OutlineDraft(observations, self.safety_files, check_ra_feasibility=self.check_ra_feasibility)
+            self._draft = OutlineDraft(observations, self.safety_files, **self._checks())
             self._draft._save()
         except (OSError, ValueError, KeyError, TypeError) as exc:
             self._draft = None
@@ -471,7 +508,7 @@ class PartSlippageExample:
         if action == "generate_outline_fresh":
             if self.source != "offline" or self.snapshot()["busy"] or not self.observation_path:
                 raise ValueError("Select saved observations in Offline and wait for the current action")
-            options = (self.observation_path, self.scenario, list(self.safety_files), self.check_ra_feasibility)
+            options = (self.observation_path, self.scenario, list(self.safety_files), self._checks())
             self._fresh_cancel = threading.Event()
             self._draft = None
             self._status = {"status": "preparing_outline", "message": "Preparing a fresh outline from the verified capture."}
@@ -501,7 +538,7 @@ class PartSlippageExample:
             settings = previous.get("llm_settings", {}) if previous else {}
             draft = OutlineDraft(observations, self.safety_files,
                 model=settings.get("model"), reasoning_effort=settings.get("reasoning_effort"),
-                check_ra_feasibility=self.check_ra_feasibility and action == "generate_outline_only")
+                **(self._checks() if action == "generate_outline_only" else {}))
             if action == "load_draft":
                 if previous is None:
                     raise ValueError("No complete draft for these saved observations")
@@ -604,7 +641,7 @@ class PartSlippageExample:
             raise
 
     async def _generate_outline_fresh(self, path: str, scenario: str, safety_files: list[str],
-                                      check_ra_feasibility: bool) -> None:
+                                      checks: dict) -> None:
         from .outline_draft import OutlineDraft
 
         def prepare():
@@ -614,7 +651,7 @@ class PartSlippageExample:
             summary = observation_summary(observations)
             if self._fresh_cancel.is_set():
                 return observations, summary, None
-            owner = OutlineDraft(observations, safety_files, check_ra_feasibility=check_ra_feasibility)
+            owner = OutlineDraft(observations, safety_files, **checks)
             owner._save()
             return observations, summary, owner
 

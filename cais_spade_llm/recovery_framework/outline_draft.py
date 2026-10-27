@@ -179,8 +179,9 @@ class OutlineDraft:
 
     def __init__(self, observations: dict, safety_files: list[str], *, root: Path = DRAFTS,
                  model: str | None = None, reasoning_effort: str | None = None,
-                 check_ra_feasibility: bool = False) -> None:
-        """Prepare a detached framework session; only the RA feasibility check, when on, checks the outline.
+                 check_ra_feasibility: bool = False, check_nonblocking: bool = False,
+                 check_cca_safety: bool = False, cca_assumptions: list[dict] | None = None) -> None:
+        """Prepare a detached framework session; only the checks turned on check the outline.
 
         Args:
             observations: Immutable saved failure input and its recorded provenance.
@@ -190,6 +191,15 @@ class OutlineDraft:
             reasoning_effort: Optional attempt-specific provider reasoning setting.
             check_ra_feasibility: Check each proposed event with Alg. 1 and Eq. 12 against the capture's
                 recorded cell; a refusal returns to the LLM as validation feedback.
+            check_nonblocking: Have the CCA check the LLM's declared completion (Eq. 6) in the
+                composition of the capture's runtime models; a refusal names what normal production
+                cannot continue, and synthesis continues.
+            check_cca_safety: Have the CCA check each event the RA finds feasible against every selected
+                specification (Eq. 13); needs ``check_ra_feasibility``, whose reach results place the
+                acting robot. A refusal states the broken specification and its facts.
+            cca_assumptions: Declared facts about the failure state the capture could not show, each
+                ``{"resource", "clear_of", "reason"}``: the resource counts as outside those regions until
+                an event moves it (captures are taken with the CCA bypassed).
         """
         from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 
@@ -214,6 +224,19 @@ class OutlineDraft:
 
             self.prepared["recovery_session"]["check_ra_feasibility"] = True
             self.provider.recorded_cell = recorded_cell(observations, _navigation_floor())
+        if check_nonblocking:
+            from .cca_nonblocking import capture_inputs
+
+            self.prepared["recovery_session"]["check_nonblocking"] = True
+            self.provider.cca_capture = capture_inputs(observations)
+        if check_cca_safety:
+            if not check_ra_feasibility:
+                raise ValueError("The CCA safety check places each acting robot from the RA's reach results; "
+                                 "turn on the RA feasibility check too")
+            from .cca_safety import capture_inputs as safety_inputs
+
+            self.prepared["recovery_session"]["check_cca_safety"] = True
+            self.provider.cca_safety_capture = safety_inputs(observations, safety_files, cca_assumptions)
         self.planner = ProcessPlanner(self.provider, [])
         self.planner.nodes = deepcopy(observations.get("pending_nodes", []))
         self.provider.part_tracker = deepcopy(observations.get("part_tracker", {}))
@@ -222,10 +245,12 @@ class OutlineDraft:
         self.prepared["recovery_debug"] = {"artifact_directory": str(self.directory), "per_turn_debug_dir": str(self.directory)}
         self.prepared["_stop_after_multi_turn_phase"] = "outline"
         self._task: asyncio.Task | None = None
+        self._generating_message = "Generating multi_turn outline; validation is bypassed."
         self._stopped = False
         self.record = {"version": 2, "kind": "outline_draft", "pipeline": "execute_multi_turn_recovery",
             "outline_diagnostic_bypass": True, "ra_feasibility_check": check_ra_feasibility,
-            "run_id": self.directory.name,
+            "nonblocking_check": check_nonblocking, "cca_safety_check": check_cca_safety,
+            "cca_assumptions": deepcopy(cca_assumptions or []), "run_id": self.directory.name,
             "status": "draft_ready", "scenario": observations["scenario"],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "source_path": observations["source_path"], "source_sha256": observations["source_sha256"],
@@ -248,7 +273,7 @@ class OutlineDraft:
         self.provider.ask_llm_structured = recorded_ask
 
         async def progress(**kwargs):
-            self.record["message"] = kwargs.get("message", "Generating multi_turn outline; validation is bypassed.")
+            self.record["message"] = kwargs.get("message", self._generating_message)
             self._save()
 
         self.provider.report_runtime_recovery_turn_progress = progress
@@ -299,7 +324,10 @@ class OutlineDraft:
         )
 
         handoff = self.record["nominal_handoff"]
-        kind = "RA-checked" if self.record["ra_feasibility_check"] else "Unvalidated"
+        checks = [name for name, on in (("RA", self.record["ra_feasibility_check"]),
+                                        ("nonblocking", self.record["nonblocking_check"]),
+                                        ("CCA safety", self.record.get("cca_safety_check"))) if on]
+        kind = f"{'- and '.join(checks)}-checked" if checks else "Unvalidated"
         if handoff.get("complete"):
             assumed = "; ".join(row["reason"] for row in handoff.get("assumptions") or [] if row.get("reason"))
             if not assumed:
@@ -322,8 +350,12 @@ class OutlineDraft:
             raise ValueError("Start fresh before generating another outline")
         self.directory.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
-        checked = "the RA feasibility check is on" if self.record["ra_feasibility_check"] else "validation is bypassed"
-        self.record.update(status="generating_draft", message=f"Generating multi_turn outline; {checked}.")
+        checks = [name for name, on in (("the RA feasibility check", self.record["ra_feasibility_check"]),
+                                        ("the CCA nonblocking check", self.record["nonblocking_check"]),
+                                        ("the CCA safety check", self.record.get("cca_safety_check"))) if on]
+        checked = f"{' and '.join(checks)} {'is' if len(checks) == 1 else 'are'} on" if checks else "validation is bypassed"
+        self._generating_message = f"Generating multi_turn outline; {checked}."
+        self.record.update(status="generating_draft", message=self._generating_message)
         self._save()
         try:
             while not self._stopped:
@@ -334,6 +366,10 @@ class OutlineDraft:
                 self.record["nominal_handoff"] = deepcopy(self.session.get("diagnostic_nominal_handoff", {}))
                 if self.record["ra_feasibility_check"]:
                     self.record["ra_feasibility_checks"] = deepcopy(self.session.get("ra_feasibility_checks", []))
+                if self.record["nonblocking_check"]:
+                    self.record["cca_nonblocking_checks"] = deepcopy(self.session.get("cca_nonblocking_checks", []))
+                if self.record.get("cca_safety_check"):
+                    self.record["cca_safety_checks"] = deepcopy(self.session.get("cca_safety_checks", []))
                 status = self.session.get("status")
                 if status == "ready_for_primitive_generation":
                     self.record.update(status="draft", message=self._finished_message())

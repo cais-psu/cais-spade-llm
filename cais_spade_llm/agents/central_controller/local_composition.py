@@ -277,6 +277,65 @@ def _edges(plant: Plant, checker: BaseSafetyChecker, scope: Scope,
                    action.controllable), successor
 
 
+def _explore(plant: Plant, checker: BaseSafetyChecker, rules: list[str], root: Node,
+             result: Analysis, budget: Budget) -> set[StateKey]:
+    """Build the joint graph reachable from ``root`` into ``result`` and return its marked states."""
+    result.root = state_key(plant, result.scope, root)
+    result.nodes[result.root] = root
+    queue = deque([result.root])
+    marked = set()
+    while queue:
+        budget.check(len(result.nodes))
+        key = queue.popleft()
+        node = result.nodes[key]
+        result.graph[key] = []
+        if _marked(plant, checker, result.scope, rules, node):
+            marked.add(key)
+        for edge, successor in _edges(plant, checker, result.scope, rules, node, budget):
+            result.graph[key].append(edge)
+            result.scope.tasks.add(edge.action)
+            if successor is None or edge.target in result.nodes:
+                continue
+            budget.check(len(result.nodes) + 1)
+            result.nodes[edge.target] = successor
+            queue.append(edge.target)
+    return marked
+
+
+def analyze_state(plant: Plant, checker: BaseSafetyChecker, current_states: dict[str, str],
+                  scope: Scope, *, budget: Budget | None = None) -> Analysis:
+    """Check whether the plant's current values are nonblocking in a closed joint composition.
+
+    There is no proposed start: the composition of ``scope`` is searched from ``plant.initial``
+    with nothing running, and the current values are nonblocking when they lie in the
+    supervisor's nonblocking region, so some marked state stays reachable whatever completions
+    occur. The search is exhaustive; ``AnalysisLimit`` and ``IncompleteModel`` propagate, since a
+    search that could not finish is no verdict.
+
+    Args:
+        plant: Detached nominal model whose ``initial`` values are checked.
+        checker: Parsed specification transitions, never live mutable history.
+        current_states: Each scoped rule's monitor state.
+        scope: Closed dependency set, already selected.
+        budget: Exploration and synthesis limits.
+
+    Returns:
+        Analysis whose status is ``nonblocking`` or ``blocking``, with its graph, nodes and region.
+    """
+    budget = budget or Budget()
+    rules = sorted(scope.rules)
+    if any(rule not in current_states for rule in rules):
+        raise IncompleteModel("monitor_history_unavailable")
+    result = Analysis("blocking", "no_joint_completion", scope)
+    root = Node(plant.initial, (), tuple(current_states[rule] for rule in rules))
+    marked = _explore(plant, checker, rules, root, result, budget)
+    result.winning = nonblocking_region(result.graph, marked, budget)
+    if result.root in result.winning:
+        result.status, result.reason = "nonblocking", ""
+    result.elapsed = budget.clock() - budget.started
+    return result
+
+
 def analyze(plant: Plant, checker: BaseSafetyChecker, current_states: dict[str, str],
             candidate: Action, running: tuple[Action, ...] = (), *,
             budget: Budget | None = None, full: bool = False) -> Analysis:
@@ -306,25 +365,7 @@ def analyze(plant: Plant, checker: BaseSafetyChecker, current_states: dict[str, 
                                  if action.key in result.scope.tasks)
         root = Node(plant.initial, relevant_running,
                     tuple(current_states[rule] for rule in rules))
-        result.root = state_key(plant, result.scope, root)
-        result.nodes[result.root] = root
-        queue = deque([result.root])
-        marked = set()
-        while queue:
-            budget.check(len(result.nodes))
-            key = queue.popleft()
-            node = result.nodes[key]
-            result.graph[key] = []
-            if _marked(plant, checker, result.scope, rules, node):
-                marked.add(key)
-            for edge, successor in _edges(plant, checker, result.scope, rules, node, budget):
-                result.graph[key].append(edge)
-                result.scope.tasks.add(edge.action)
-                if successor is None or edge.target in result.nodes:
-                    continue
-                budget.check(len(result.nodes) + 1)
-                result.nodes[edge.target] = successor
-                queue.append(edge.target)
+        marked = _explore(plant, checker, rules, root, result, budget)
         result.winning = nonblocking_region(result.graph, marked, budget)
         result.status = "complete"
         result.status = result.decision(result.root, candidate)

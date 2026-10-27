@@ -73,6 +73,29 @@ name the section or equation it implements. If it maps to none, ask the user fir
   - Backward derivation collects primitives of transitions $Tr_i(x,e)=x'$ with $\nu_i(x')=v'_i$.
   - Forward validation requires
     $\forall\rho\,\exists\theta_\rho\in\Theta_{i,\rho}: C_\rho(v_i,v'_i,\theta_\rho)=1$ (Eq. 12).
+- **Feasibility validation, revised wording (decided by the user, October 24–26; to be written into the
+  paper).**
+  - Backward derivation: Algorithm 1 reads "primitives whose declared effects produce $v'_i$". It goes
+    from each changed condition $c$ of $v'_i$ to $P_c$, the primitives of resource $i(k)$ whose declared
+    effects make the stated value. A recovery event is a new transition, so derivation never goes
+    through nominal events.
+  - Eq. 12 becomes
+    $\forall c\,\exists\rho\in P_c\,\exists\theta_\rho\in\Theta_{i,\rho}: C_\rho(v_i,v'_i,\theta_\rho)=1$:
+    one feasible producer per condition, with no order between them and no chaining through a failed
+    precondition (the RA is a verifier, not a planner).
+  - A task-level state label that no primitive produces (`resource_state`) is not derived.
+  - Location, slot and custody have no producing effect (primitives are not symbolically connectable).
+    They are decided by the acting resource's capability: a known place, kinematic reach over its own
+    chain, and navigation for a mobile base.
+  - Delayed completion needs a definition in the paper: a machine's job completes after the remaining
+    processing time, $(1-\text{processing fraction})\times\text{processing time}$, with the part's
+    `processCompleted`, as the machine's observed, uncontrollable `complete_job` outcome while running.
+  - Candidates are checked in the LLM's order and the first feasible one is applied
+    ($R_{\text{neural}}\cap R_{\text{feasible}}$). Facts return as feedback only when every candidate
+    fails.
+  - An unresolved search (NEEDS_CONTEXT) is a rejection, like INFEASIBLE: a finite search does not
+    prove a pose reachable. A name the model does not declare is rejected, because Algorithm 1 has
+    nothing to derive from it.
 - **Safety validation.** The CCA extends $\pi(s_F s^R_{k-1}e^R_k)=\pi(s_F s^R_{k-1})\ell(x^R_k)$
   (Eq. 13) and checks that an accepting state stays reachable in each monitor.
 - **Nonblocking validation (Eq. 6; decided by the user, October 25; to be written into the paper).**
@@ -156,11 +179,44 @@ name the section or equation it implements. If it maps to none, ask the user fir
   $i(k)$ only); its values enter the projected state and the handoff condition $H$, and should enter
   the CCA labels (Eq. 13) once the check reads them. The nominal models already change other resources
   in one event (a delivery sets the buffer's slot).
-- **Eq. 6** maps to the bounded search for connecting nominal events (at most 6) and the handoff
-  check. Today code only records the result; the CCA check at `recovery_complete` is designed (see
-  "Nonblocking validation") but not built. A continuation longer than the bounded search comes back
-  unresolved, not rejected. Full completion to a marked state, and Eq. 8 over $s_N$, are not checked
-  yet (CCA).
+- **Algorithm 1 and Eq. 12** map to `recovery_framework/ra_feasibility.py` (`check_event`), as revised
+  above. It runs behind the session flag `check_ra_feasibility` (off by default; an Offline-only switch on
+  the Recovery outline card). Known limits that answer NEEDS_CONTEXT (pose-place support, the KMR base
+  search, tilted grasps) are left until a checked run hits one.
+- **Eq. 6** maps to the CCA's nonblocking check at `recovery_complete` (built October 26, behind the
+  session flag `check_nonblocking`, off by default; `recovery_framework/cca_nonblocking.py`). It
+  composes the runtime resource models (the ones normal production and Eq. 13 admission use) for the
+  parts the recovery touched or the remaining plan names, starting from $x^R_m$, and accepts when
+  $x^R_m$ lies in the composition's nonblocking region: every such part can still reach its remaining
+  requirement and every resource it uses can return to rest, whatever completions occur. The search is
+  exhaustive (no step bound, no NEEDS_CONTEXT); a refusal names a resource left in a state its model
+  does not have, a part that cannot reach its remaining requirement from where it is, or a resource
+  that cannot carry on. The runtime models are capability models, not the scenario's routes, so a part
+  left off its usual route is accepted when some resource can carry it on. Without the flag code only
+  records the older diagnostic: a bounded search (at most 6 nominal events) toward the handoff
+  condition $H$. Eq. 8 over $s_N$ is not checked: the selected predefined specifications use physical
+  propositions the composition cannot evaluate.
+- **Eq. 13** maps to the CCA's per-event safety check (built October 26, behind the session flag
+  `check_cca_safety`, which needs `check_ra_feasibility`; `recovery_framework/cca_safety.py`). Candidates
+  are checked in the LLM's order, RA first, and the first one both pass is applied (Eq. 9). The
+  predefined specifications are compiled and grounded as the nominal physical gate grounds them, and
+  their monitors start at $s_F$, replayed from the capture's recorded transitions. Labels $\ell(x^R_k)$
+  come from one reader per kind of condition: the projected `processCompleted` ledger, and physical
+  evidence for a resource in a region or a part entering one (unmoved resources keep their recorded
+  collision boxes; the acting robot is placed by forward kinematics at the RA's reach configuration for
+  each work point and at its end pose). An event is judged during it, after it, and once more for each
+  uncontrollable event its end state enables, as if that event then happened on its own. A refusal
+  states the broken specification and the facts of the step that breaks it. Decided by the user on
+  October 26, to be written into the paper:
+  - Eq. 13 also covers the uncontrollable events $x^R_k$ enables (a running job that completes on its
+    own): the CCA cannot prevent them, so a safe state must stay safe under each of them
+    (controllability).
+  - The outline uses the RA's reach configuration as the robot's posture; the executed trajectory is
+    checked again at composition (Section 5.3).
+  - Captures are taken with the CCA bypassed, so a failure state may already break a specification
+    (Part slippage: ur5e-3's arm, waiting with KET4 at buffer zone 4, reaches into the board area while
+    ur5e-4 is over it). The check then stops unless an assumption is declared; for Part slippage the
+    user chose to assume the CCA was on and ur5e-3 waited clear of the board area until it moves.
 - **"Connected to the remaining product plan" is not defined in the paper.** The implementation
   uses:
   - replaced work $W=\bigcup_i B_i$, where $B_i$ is the longest prefix of resource $i$'s remaining

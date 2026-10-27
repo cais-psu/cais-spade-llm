@@ -1295,6 +1295,19 @@ def test_part_slippage_safety_defaults_preserve_manual_choices_and_deferred_poli
     assert selected["selected_safety_files"] == [absolute_mutex, *expected[1:]]
 
 
+def test_only_part_slippage_declares_a_cca_failure_state_assumption():
+    from cais_spade_llm.recovery_framework.recovery_case_safety import default_cca_assumptions
+
+    assumed = default_cca_assumptions("Part slippage")
+    assert [(row["resource"], row["clear_of"]) for row in assumed] == [("ur5e-3", ["assembly_board-v1"])]
+    assumed[0]["clear_of"].append("changed")
+    assert default_cca_assumptions("Part slippage")[0]["clear_of"] == ["assembly_board-v1"]
+    for scenario in ("Conveyor breakdown", "ur5e-1 breakdown", "Machining breakdown during part processing"):
+        assert default_cca_assumptions(scenario) == []
+    with pytest.raises(ValueError, match="existing failure scenario"):
+        default_cca_assumptions("Unknown")
+
+
 @pytest.mark.parametrize("change", [
     {"execution_mode": "physical"}, {"execution_mode": "hardware"},
     {"diagnostic_cca_bypass": False}, {"diagnostic_cca_bypass": "true"},
