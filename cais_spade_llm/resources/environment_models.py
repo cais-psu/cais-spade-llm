@@ -930,9 +930,11 @@ def owners(models: dict, valuation: dict, products: dict, product_name: str, *,
             (values["resource_state"] in tasks.APPROACH_STATES) != (values["approached_part"] is not None)
         ):
             fail(rid, "KMR approach state disagrees with approached_part")
+        # A machine in a declared fault state stays in it whether or not its part has been taken out.
         if "staging_part" in values and (
             (values["resource_state"] == "idle") != (values["part_name"] is None)
-        ):
+        ) and not (values["resource_state"] in model.get("fault_states", ())
+                   or values["resource_state"] in declared_fault_states()):
             fail(rid, "Machine state disagrees with workholding")
         if rid == "3D Printing Station":
             try:
@@ -1254,7 +1256,9 @@ def product_state_from_custody(part_name: str, owner: str, values: dict, product
     location = owner
     if values.get("staging_part") == part_name:
         location = f"{owner} staging tray"
-    if part_name == product_name and owner == "Exit" and values["part_name"] is None:
+    # The Exit records the product at its assembly place by product_location; it holds the product only when its
+    # part_name is the product, not when it holds another part.
+    if part_name == product_name and owner == "Exit" and values["part_name"] != product_name:
         location = product_name
     return {"location": location}
 

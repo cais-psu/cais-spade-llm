@@ -31,6 +31,11 @@ integration, dual-robot execution, and a NiceGUI operator UI.
 - After diagnosing a finished failed attempt, record its identifier, concise
   failure reason, and next step in the recovery handoff. Then delete its
   disposable outputs before starting another attempt or ending the task.
+- Experiment records are the exception: never delete anything under
+  `cais_spade_llm/monitor/environment_runs/recovery/outline_experiments/`
+  (Experiments tab batches, their attempt drafts, audits, and manifests),
+  whether an attempt finished, failed, stopped, did not finish, or was
+  interrupted.
 - Protect active work and the current partial attempt still needed for debugging,
   including work owned by another chat or process. Remove abandoned attempts once
   their useful findings are recorded and their required dependencies are retained.
@@ -95,6 +100,25 @@ integration, dual-robot execution, and a NiceGUI operator UI.
 - Keep robot positions and capabilities configuration-driven through the JSON
   manifests under `initialization/` and `specification/`.
 - Never commit `.env` files or credentials.
+
+## No kinds or invented categories
+
+- Do not invent "kinds" or other categorical groupings: no taxonomies of
+  fields, lookups, refusal reasons or outcomes. Use the exact names that exist
+  (declared state variables, primitive effects, reference paths, check names,
+  the audit's outcome names) (user decision, 2026-10-30).
+- The user does not want derivation "kinds" (user decision, 2026-10-30):
+  labels such as `free`, `unchanged`, `place` or `bookkeeping` that sort
+  end-state fields into categories, and above all any category that lets a
+  field pass without being established. Do not add new kinds, and do not build
+  on the existing ones.
+- RA and CCA checks and primitive composition work from the declared state
+  variables and the declared primitive effects that exist.
+- Both existing uses are gone (2026-10-30): composition's `follows_from_event`,
+  and the derivation labels in `ra_feasibility._Check.condition`, removed with
+  the user's go. Every stated value is accepted only when it already holds, a
+  declared effect of the acting resource's primitives makes it, or one of the
+  event's capability checks finds it.
 
 ## Comments and docstrings
 

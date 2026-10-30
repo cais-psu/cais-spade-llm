@@ -339,6 +339,8 @@ def _apply_neighbor_end_state(task: dict, session: dict) -> list[dict]:
     """Apply the changes the event states for other resources its part's move affects.
 
     A recovery event's values are the LLM's; a nominal step's come from those resources' own copies of it.
+    A name that is no recorded resource, such as a part, has no state to change, so nothing is applied for
+    it; the event keeps what it states.
     """
     from . import multi_turn
 
@@ -346,6 +348,8 @@ def _apply_neighbor_end_state(task: dict, session: dict) -> list[dict]:
     changes, owner_unknown = [], session.setdefault("diagnostic_unknown_owner_fields", {})
     part = session.get("symbolic_parts", {}).get(task.get("part_name"), {})
     for jid, values in (task.get("neighbor_end_state") or {}).items():
+        if jid not in session.get("recovery_des_models", {}):
+            continue
         multi_turn._apply_task_effects_to_symbolic_state({"resource_jid": jid, "expected_end_state": values}, session)
         # A stated holding change on that resource is also the part's: who holds it must agree on both sides.
         if "held_part" in values and part:
@@ -812,12 +816,12 @@ def declare_derived_conditions(prepared: dict, primitive_catalogs: dict[str, lis
         if "pose" not in variables:
             effects = [(effect, rule) for row in primitive_catalogs.get(jid) or [] if isinstance(row, dict)
                        for effect, rule in (row.get("effects") or {}).items() if isinstance(rule, dict)]
-            fields, source, locates = None, "", False
+            fields, source, locates, followed = None, "", False, None
             for name, locating in (("base_pose", True), ("current_pose", False)):
                 fields = next((list(value) for effect, rule in effects if effect == name for value in rule.values()
                                if isinstance(value, list) and value and all(isinstance(field, str) for field in value)), None)
                 if fields:
-                    source, locates = f"the {name} effect of its primitives", locating
+                    source, locates, followed = f"the {name} effect of its primitives", locating, name
                     break
             if not fields:
                 fields, source = _coordinate_parameters(model), "the coordinate inputs of its declared events"
@@ -825,6 +829,9 @@ def declare_derived_conditions(prepared: dict, primitive_catalogs: dict[str, lis
             if fields:
                 variables["pose"] = {"scope": "resource", "type": "object", "fields": fields,
                                      "description": f"position ({', '.join(fields)}), from {source}"}
+                if followed:
+                    # Composition reads the condition from the field its primitives' effects write.
+                    variables["pose"]["effect"] = followed
                 if locates:
                     variables["pose"]["locates_resource"] = True
                 added.setdefault(jid, []).append("pose")

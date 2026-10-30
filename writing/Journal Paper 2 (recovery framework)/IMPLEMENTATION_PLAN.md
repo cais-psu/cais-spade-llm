@@ -1,5 +1,319 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Study 1 settings for the paper runs — October 29, 2026 — ready, not run (uncommitted)
+
+**Request (user).** Rules in the prompt for the informed settings, neutral names (single-pass may beat
+incremental, so neither is "our framework"), and everything ready up to the runs.
+
+- `outline_experiments.CONFIGURATIONS`, in Table 5 order: LLM, single-pass; LLM + rules, single-pass;
+  LLM, incremental; LLM + rules, incremental; Framework, single-pass; Framework, incremental. The "LLM + rules"
+  settings now send `safety_rules_to_llm="prompt"` (were `"knowledge_base"`); the other four stay `"hidden"`.
+  Old names map one to one (Single-pass LLM, Incremental LLM, Single-pass + validation, Full framework).
+- Batch study label and Experiments tab title: "Study 1: ablation".
+- `summarize` reads whether a configuration was validated from its rows, so batches recorded under the old names
+  keep their Table 6 rows; unknown names sort after the current ones, each kept together. Test added in
+  `test_outline_experiments.py`.
+- Planned runs (await the user's go): Claude Opus 4.7 effort medium (adaptive thinking) and gpt-5.4 medium only, all
+  four scenarios, 10–20 runs per setting and scenario (user's plan; the runner allows up to 20), 40 turns: one batch
+  per model, 240–480 attempts each. Results are rates (n/N), not single runs. Report tokens, not dollar cost.
+- Docs: EXPERIMENT_DESIGN_AND_PLAN.md settings section (six settings, names, H4 as an open comparison) and a
+  two-mode note in PAPER_FRAMEWORK.md.
+- Results page (2026-10-29): `figures/results_page/results_page.py` writes `results.html` from
+  `results_template.html` (the mock-up's layout: Figs. 11–13, Tables 6–7, coverage, every attempt). `--placeholder`
+  fills layout numbers; without it the page reads every Experiments batch of a study model at effort medium and 40
+  turns (or `--batch ID`), maps configurations by their flags (so old names count), and pools batches. Main model
+  Opus 4.7 (20 attempts per cell planned), second model gpt-5.4 (10). Composition rows wait for composition.
+
+## Primitive composition from checked outline drafts — October 28, 2026 — built offline (uncommitted); no composition run yet
+
+**Request (user).** Load the finished RA- and CCA-checked drafts in the Recovery outline panel for review, and
+compose primitives from them.
+
+- **Gate.** `composition_readiness` now requires `check_ra_feasibility`, `check_cca_safety` and `check_nonblocking`
+  on in the outline session. `outline_diagnostic_bypass` no longer blocks: it only selects the frozen outline prompt,
+  and every checked draft keeps it on. `check_physical_evidence` is gone (physical evidence is inside the RA check).
+- **Loading.** Offline, the Recovery outline card lists the capture's checked drafts (`outline_draft.checked_drafts`:
+  status `draft`, all three checks on, nominal handoff complete). Load (`SystemBridge.load_recovery_outline_draft`)
+  verifies the capture's hash, then `primitive_composition.replay_checked_draft` replays the saved events through
+  the draft's recorded checks on the current code (`check_outline`, no model call). It rebuilds the planning state
+  and restores each owner's recorded `execution_primitive_catalog`, which the outline input leaves out. A refusal or
+  a changed planning state keeps the draft for review only and names the event. Load times: Part slippage about 4 s,
+  Conveyor 7 s, ur5e-1 27 s, Machining 99 s.
+- **Composition.** `DraftComposition` runs the existing primitive stage offline with the draft's model and effort.
+  The capture's recorded resources (`SavedRecoveryResource`) check their own events' programs. Each Generate is a
+  separate attempt under `recovery/draft_compositions/composition_<id>/` (outline request, preview, turns under
+  `recovery_primitves/`, `proposal.json`, `composition.json`). The draft record is never written. Execution stays
+  disabled.
+- **Ready (loaded 2026-10-28, all replays reproduce the drafts):** Part slippage `fc27a784` (Opus 5.5 medium, rules
+  hidden) and `d0af11b3` (gpt-5.4 medium, rules as lookup); Conveyor `1457af1c`, ur5e-1 `fc6db689` and Machining
+  `af6f05b5` (gpt-5.4 medium, rules hidden).
+- **Not composable:** Part slippage `19874d8d` (gpt-5.4 medium, rules hidden). Its last event,
+  `normalize_exit_to_empty`, belongs to the Exit, which has no primitives, yet the RA check accepted it. Open question
+  for the user: should the RA refuse events of resources without primitives?
+- Tests: `test_outline_draft.py` (+3), `test_part_slippage_recovery.py` (+4 parametrized; the accepted-input fixture
+  now records the three checks).
+- **First gpt-5.4 medium composition runs (October 29, user request "once each").** None composed fully; every
+  blocker was a composition-stage code or model gap, not an LLM error (the LLM looked up the nominal capability
+  decompositions, as in the April legacy run, and wrote sensible programs).
+  - Fixed: the draft source lacked each owner's recorded `resource_evidence` and the capture's physical evidence
+    (runtime models, failure-time values and part tracker, rebuilt as the CCA nonblocking check does); the binding
+    check fingerprinted the unfiltered catalog while owners validate the recovery-visible one
+    (`recovery_composition.composition_program_error`); robot pick and assembly completion still required the
+    removed `part_state` (`robot/recovery_composition.py`). Regression tests in `test_recovery_composition.py`.
+  - Part slippage `d0af11b3`: events 1 (stow KET4 in Buffer zone 1) and 2 (pick the dropped small gear) re-checked
+    offline from the LLM's recorded programs: FEASIBLE and bound. Attempts `composition_76a45b1c…`, `…acbf1828…`,
+    `…967f354c…` deleted after diagnosis.
+  - Conveyor `1457af1c` (attempt `composition_bc32b0a0…`, kept for offline re-checks): event 1 places on the M1
+    staging tray. FIXED (fix 3, user OK October 29): a place that is not a resource is received by its recorded model
+    (`_receiving_geometry_source`), only on the surface its region declares (`_declared_support_collisions`; the tray's
+    pedestal top is also under the part), and custody goes to the slot whose custody locates the part there
+    (`_receiving_slot` via `product_state_from_custody`: M1 `staging_part`). The LLM's recorded program now fails only
+    on its own last step (`move_relative` instead of the calculated `retreat_pose`); with that step changed, offline
+    re-check: FEASIBLE and bound. Events 2–5 are KMR events: need fixes 1, 2 and 5 below.
+  - ur5e-1 `fc6db689` (attempt `composition_0ca5358f…`, kept): the LLM requested the KMR's whole
+    `/resources/<jid>/resource_evidence` (8.9 MB recorded, 18 MB as served) and the request exceeded OpenAI's 10 MB
+    message limit. FIXED (fix 4, user OK October 29): a served value over 100,000 characters is listed by field with
+    each field's size, and the LLM requests the fields it needs (`_SERVED_VALUE_LIMIT_CHARS`; applies to every model and
+    configuration). Remaining: its KMR, M2 and Conveyor events need fixes 1, 2 and 5 below.
+  - Machining `af6f05b5` (attempt `composition_1ea7da0b…`, kept): event 1's program (`pause_job` on the active job)
+    is right, but the recorded `pause_job` contract declares no effects, so no program establishes the paused state;
+    the LLM reported the gap itself. Cause: fix 1 below (the current code declares these effects; the capture's
+    recorded catalog does not).
+  - Part slippage `d0af11b3` live run (attempt `composition_4fc5bf2e…`, kept): events 1–2 composed and passed the owner
+    check; event 3 (`retract_ur5e4_to_3d_printing_station`) stalled: the event needs `resource_state=idle` and
+    `resource_location=3D Printing Station`, which the RA derives as "free" and "unchanged", but composition requires
+    primitive effects that set them, and primitives never set locations (October 24). Cause: fix 2 below. Event 4 not
+    reached.
+  - Each turn record embeds the full validation evidence (20–30 MB), so an attempt takes 60–480 MB.
+  - Physical scope of the owner check: target calculations from recorded geometry, endpoint joint solutions within
+    recorded limits, placement into declared zones; not motion paths or collisions. CCA check of the composed trace
+    (`cca_composition_status`) and Gazebo controller validation are not built; execution stays disabled.
+  - **Open problems to review with the user (October 29).** Each is a general change; none names a scenario.
+    - **October 30, fix 1 DONE offline (uncommitted).** Composition takes each primitive's recorded interface and the
+      contract `current_primitive_declarations` gives it (`primitive_composition._declared_catalog`, one row per
+      alternative; undeclared internal controls have no row; uncontrollable outcomes got rows later, item 3). The validator picks the first
+      alternative whose parameter domains, preconditions and part guards hold, applies resource and part effects, and
+      binds the event's part as `part_name`. The contract vocabulary gained `matches`/`not_matches` and `set_status`;
+      a domain declared incomplete (`domain_complete: false`) no longer refuses values. A derived `pose` records the
+      effect field it follows (`declare_derived_conditions` adds `effect`), and composition reads it through that
+      field on its declared fields; the outline prompt is byte-identical (checked by hash). Contract cards list
+      alternatives. Offline re-checks of gpt-5.4's recorded programs: Machining event 1 (`pause_job`) FEASIBLE and
+      bound; Part slippage events 1–2 and Conveyor event 1 (retreat corrected) still FEASIBLE.
+    - **Item 8 DONE (October 30, user go "fix everything").** A faulted resource whose own pre-failure report is the
+      running state of an activity whose finish sets `resource_location` (read from the capture's configured models,
+      `build_environment_models(inputs.scene)`: finish events with `start_event_id`) stopped between that start and
+      finish: it is grounded at location `None` with its measured pose (planar base pose for a mobile base, else the
+      measured tool pose), as the cancelled-work rule already did (`failure_grounding.ground_failure`,
+      `_located_at_finish`; `apply_grounding` shows it through the "shown as it stopped" path). Grounding reads only
+      raw facts and configuration. The outline facts print a null location as `null` (`multi_turn_outline_facts`).
+      Only Part slippage changes: ur5e-4 (mid `place_approach`) reads "resource_location null; pose (0.029, 0.145,
+      1.289), inside assembly_board-v1". Its stored grounding was refreshed (`failure_grounding --store`; old
+      `beliefs.json` archived in `/home/jongh/recovery_archives/2026-10-30_beliefs_before_item8/`);
+      `observations.json` is unchanged. Part slippage drafts made before this no longer replay. Test:
+      `test_failure_grounding.py` (arm, mobile base, not mid-activity).
+    - **Fix 2 REMOVED (user decision October 30, AGENTS.md "No derivation kinds").** `follows_from_event` (which let
+      fields the RA labels free, unchanged, place or bookkeeping pass unestablished) is gone from the composition
+      source, the validator and the composition prompt (the prompt sentence is back to its earlier wording). A field
+      passes only when its value after the program (declared effects plus the owner's completion) equals the
+      event's; an untouched field passes when it already has that value. Every program gpt-5.4 wrote still passes;
+      the diagnostic retract that asks `move_cartesian` to turn `failed` into `idle` is refused, as intended. The
+      RA's own derivation labels in `ra_feasibility._Check.condition` are unchanged and still undecided.
+    - **Item 3 DONE (October 30, user go "fix everything").** A resource's own uncommanded outcome (a contract with
+      `controllable: false`, e.g. a machine's `complete_job` after `after_sec`) is a program step that sends no
+      command: the validator applies its declared effects and records the step as awaited (`controllable`,
+      `after_sec`, no capability evidence). `_declared_catalog` keeps these alternatives and adds a row for a declared
+      outcome the recorded catalog lacks (parameters from the contract's own slots). The derivation applies list-form
+      record effects (append filled entries) and nested `{"set_from_param": ...}` slots. Contract cards show
+      `controllable`/`after_sec`; one composition prompt sentence says such a step sends no command and waits. No
+      declaration changed. Open: `complete_job`'s `result` parameter has no declared domain (declaration gap, user
+      decision); paper wording for awaited outcomes in Eq. 7.
+    - **Item 9 DONE (October 30).** A machine's job command is checked against the job record the earlier accepted
+      steps and events leave, not the failure-time record: the owner check returns the record its projected command
+      leaves (`projected_processing_observations`, `environment_recovery`), `validate_owner_composition` carries it to
+      the program's next step, and a machine owner's completion hands it to later events (`resource_evidence`),
+      finishing the active job at an awaited `complete_job` over its remaining processing time
+      (`machine_jobs.project_job_completion`, under the workholding observations the job last recorded). Machining
+      `af6f05b5` (hand probe): event 1 `pause_job` and event 5 `select_program` now pass (event 5 was "processing
+      observation differs from projected resource_state"). Event 8 `start_job` stops at "NEEDS_CONTEXT: part_name":
+      a new job needs the machine's workholding and access observation (part at the workholding, handling robot and
+      KMR clear), which `_machine_access_projection` calculates only from a projected physical state; composition
+      builds none (part poses and robot joint states after accepted programs). Same gap for `resume_job`, which
+      today reads the job's failure-time observations. Tests: `test_recovery_composition.py` (+2).
+    - **Item 2 DONE (October 30).** Composition judges `resource_state` as the RA does: a state that no primitive of
+      the acting resource declares (as `resource_state` or its alias `current_state`) is named by the event and
+      carried to later events; a state one of them declares must come from that primitive in the program
+      (`recovery_composition._declares`). KMR, Conveyor, Buffer, Storage and the printer declare no states; robots
+      declare `idle` and `picked`; machines their job states. Test: `test_recovery_composition.py` (+2).
+    - **Robot pick and place in one event DONE (October 30).** The RA accepts one event that takes a part and puts it
+      elsewhere (grasp plus release, October 27), and most robot events of the Machining, Conveyor and ur5e-1 drafts
+      have this form (Machining `af6f05b5`: events 2, 3, 4, 7, 10, 11); the robot completion refused it ("Multiple
+      custody transfers in one event require an owner intermediate completion model"). Now a grasp followed by a
+      release of the event's part is checked transfer by transfer: each needs its own calculation after the previous
+      transfer, the transfer at its calculated target, and a retreat to its calculated retreat pose (the grasp's
+      retreat ends where the release's calculation starts); the pick and then the place custody are applied in order,
+      and the receiving slot starts from the slot the pick emptied (`robot/recovery_composition.py`). The place
+      calculation and its capability check read the part as the event's own grasp holds it (grasp transform and pick
+      context from the event's pick calculation, `hold_picked_part`); the completion still checks the grasp. Any
+      other pair of transfers is refused. Machining `af6f05b5` event 2 (ur5e-1: KET4 from M1 to the M1 staging tray,
+      hand-written program): FEASIBLE; KET4 at "M1 staging tray", M1 `part_name` null and `staging_part` KET4, as
+      the event states. Test: `test_recovery_composition.py` (+2). No prompt change (its custody sentence holds per
+      transfer).
+    - **Composition follows the outline's stated values (October 30, found on the Opus 4.7 Part slippage draft
+      `d491e1fd`, batch `4db0aa`; hand-written programs, no model call).** All six events now compose. Changes:
+      - The motion right after a transfer is its retreat and must reach the calculated retreat pose; later motions may
+        take the robot elsewhere (an event may end at a stated pose). Before, the event had to end at the retreat pose.
+      - A robot event that states a pose but no location, or a location without a transfer, leaves the robot at the
+        place whose recorded area holds its final pose (`multi_turn_diagnostic._place_of`, the function the outline
+        projection's `_locate_by_pose` and the RA's `place_at` use); a named posture stays the move_home outcome.
+      - A place calculation targets the zone the event puts its part in (the destination's `zone_<n>_part` it states,
+        that zone's recorded pose; `robot/recovery_capability._stated_zone_origin`). Before, every Buffer place went to
+        the Buffer's single recorded `pickup_pose` (zone 4) while the event stated zone 1.
+      - Composition now checks the event's stated neighbour values against what the program leaves
+        (`neighbor_end_state`; before, only the acting resource's end state was compared, so the zone mismatch passed).
+      - The place destination is the part's stated location (else the robot's), in the place calculation and in
+        `release_part`'s assembly-slot check; an event may state only `part_location` (event 5, the board insert).
+      - Start states: the outline carries a resource's captured pose until one of its events states another. When an
+        accepted program has since moved the resource, a stated start pose equal to the captured one yields to where
+        that program left it (event 3 stated ur5e-3's capture pose after event 2 had moved it); any other stated
+        start pose must hold exactly. User to confirm this rule.
+      Tests: `test_recovery_composition.py` (+7).
+    - **Review of tonight's composition changes (October 30, 04:00; 4 lenses, 12 agents, findings verified
+      adversarially; patch `scratchpad/tonight_composition.patch`).** No R1/R2 or "kinds" violation found. Fixed,
+      each with a test that fails before (`test_recovery_composition.py` +9, 74 pass):
+      - After a transfer and its retreat, a robot that moves on is located from its final pose (the transfer's place
+        no longer stands); a last `move_to_named_pose` gives the declared move_home outcome after any transfer, and
+        its state and location now also reach their aliases (`current_state`, `current_location`).
+      - A stated location the robot already has holds without reading the pose (the RA's "already holds"); a changed
+        one is the stated place when one of that place's recorded areas holds the final pose (by area prefix or
+        surface body, as the RA names areas), else what `_place_of` finds (`recovery_composition_owner._locate`).
+      - A pick empties every value that records the part, as the RA's `source_variables` finds them (staging slots,
+        belt slot and order, storage flags; `robot/recovery_composition._source_records`), not only one machine slot.
+      - The neighbour check names a neighbour's `resource_state` that none of its own primitives declares, as the RA
+        does for every resource, and carries it to later events.
+      - A named `resource_state` never replaces one a step's declared effect wrote in the program.
+      - A destination receives into its own slot (a machine's workholding `part_name`), so machine loads compose.
+      - An awaited `complete_job` must bind the job's own result (refused otherwise).
+      Open from the review (not changed): the captured start-pose rule covers only the captured pose; the retreat
+      must be one motion; an awaited completion reaches the job record only at the end of its program; a neighbour
+      value naming a resource by name versus JID is compared exactly.
+    - **Round parts on a support (October 30).** The placement calculation (`robot/recovery_capability.
+      _support_place_pose`) now also rests an upright cylinder on its circular face, as the inscribed polygon the
+      support projection (`recovery_geometry.projected_part_support`) already uses; a cylinder that is not upright is
+      refused. Test: `test_recovery_outline_evidence.py` (+2; 234 pass).
+    - **Machining Opus 4.7 draft `5836a16f` (Framework, single-pass, 16 events), hand-written programs, no model
+      call:** events 1-3 compose (pause M2's job; ur5e-2 moves RGOCG4 to the M2 staging tray, M2 named `idle`; ur5e-1
+      takes KET4 from M1). Event 4 (ur5e-1 puts KET4 on Conveyor loading position 1) stops: the robot has no
+      placement geometry for the Conveyor, and the Conveyor's per-part slot has no receiver in the robot completion
+      (the live release rule, `slippage_execution._observed_release`, has one). Next gaps: event 5 (the Conveyor's
+      own transport: `compute_transport_targets` has no owner preview, `set_from_step` is not in the composition
+      vocabulary, and no Conveyor completion locates parts from their x), event 9 (`start_job` needs a projected
+      workholding/access observation), event 16 (KMR travel, fix 7).
+    - **Opus 4.7 composition runs, October 30 05:00–05:05 (user go: "run all settings with opus 4.7 for primitive
+      composition for all scenarios once"; queue item 27).** Source: Experiments batch `4db0aa` (24 outline attempts,
+      Claude Opus 4.7 medium). Only 2 of its 8 Framework drafts are complete outlines; the other 6 ended
+      `draft_incomplete` and cannot be composed: 3 at the 40-turn budget (Part slippage incremental, 8 events; ur5e-1
+      single-pass, 0; ur5e-1 incremental, 24) and 3 on errors (Machining incremental: RA crash "unhashable type: 'dict'"
+      on a nested belt slot, fixed afterwards by the other chat; Conveyor incremental and single-pass: network errors
+      with one attempt per call). Re-running the errored attempts is the user's call. Both composable drafts replayed
+      exactly on the main checkout (and again after the other chat's two crash fixes), then composed once with their
+      own model:
+
+      | Draft | Composed | Stop | Calls | Tokens |
+      | --- | --- | --- | --- | --- |
+      | Part slippage `d491e1fd` (6 events) | 1 of 6 | event 2: 3 same-cause failures | 8 | 276,541 |
+      | Machining `5836a16f` (16 events) | 0 of 16 | event 1: 3 same-cause failures | 7 | 38,970 |
+
+      Hand-written programs compose all 6 Part slippage events and Machining events 1-3 on the same code, so both
+      stops are the model's programs, not a code refusal of a valid program:
+      - Part slippage event 2 (ur5e-3 puts KET4 in Buffer zone 1): the model looked up the nominal place_approach,
+        place_insert and move_home decompositions and alternated between two programs, never combining their fixes:
+        (A) `release_part.assembly_slot` bound to `event_facts.place_targets.<part>.slot_x` and the other assembly
+        fields, which a support (Buffer) place target does not have ("Unresolved parameter reference"), with the
+        correct retreat; (B) no assembly slot, but a fixed `move_relative` dz 0.08 instead of the calculated
+        `retreat_pose` ("Finish the custody transfer at the calculated event_facts target retreat_pose").
+        Root cause (found October 30 morning): (B) is the served place_insert decomposition copied exactly. Its `lift`
+        step shows `public_params` dz 0.08 (`robot_task_definitions/place_insert.py`), but the nominal code lifts to
+        the travel height (dz = travel_z - z), which is where the calculated `retreat_pose` is. The legacy run (April,
+        `monitor/debug/recovery_primitves/1`, MCP parked on prusa-mk4-2) wrote the same program and passed because
+        legacy did not check the retreat. (A) follows the composition prompt's assembly-slot sentence, which legacy did
+        not have. Each retry shows only the latest finding, so each fix undid the other. Each call was about 50k input
+        tokens (legacy about 4k) because the model asked for the whole `recovery_des_model`.
+        Fixed October 30 (user: "fix all the errors"; uncommitted; display only, robot behavior and the scene file
+        unchanged, program revision still `39425952ca1b…`): the templates now show what the code runs. Both `lift`
+        steps (pick_grasp, place_insert) show their real params (dz = travel_z - current z) and say they end at
+        `event_facts.<pick|place>_targets.<PART>.retreat_pose`; `retreat_from_source` shows its pose
+        (`access_retreat_pose`, all seven coordinates) and says when it runs; the approach and descend moves of
+        pick_approach and place_approach show all seven coordinates; compute_pick_targets no longer shows
+        `product_geometry`, which the owner check refuses. `gazebo_programs._check_program` no longer pins a UR5e's
+        saved `public_params` to the code (display only, like `note`; KMR templates render from the saved scene and
+        stay pinned), so the saved scene still loads. `composition_grounding_context` drops, from the copy it serves,
+        the template fields a capture recorded inside its DES model (`recovery_visible_steps`, and `public_params` and
+        `note` of `composition_contract.steps`); the owner check reads the prepared model, which keeps them. The
+        assembly-slot sentence now applies only to a place into the part's `assembly_slot` (the location in
+        `/parts/<name>/target`). The non-v1 path that grounds `robot_task_program` events from templates
+        (`multi_turn._ground_modeled_step_value`) now reports `$state`/`$sub` values as unresolved, so it blocks
+        instead of emitting a lift the executor cannot run. An independent two-reviewer check found the DES-model copy
+        and the KMR scope; both fixed. Hand programs still compose all 6 Part slippage events; `d491e1fd` and
+        `5836a16f` still replay exactly. Tests: composition suites pass; 20 failures in test_recovery_delivery (13),
+        test_nominal_resource_des (6) and test_recovery_request_records (1) are the same on a copy without this change.
+        Re-run after the fix (user's go, once; queue item 29, `composition_a6df5828…`, Opus 4.7 medium, 08:24–08:29,
+        10 calls, 135,381 tokens): events 1–2 of 6 composed; event 2 passed on the first try (compute_place_targets,
+        approach, target, plain release_part, move_cartesian to retreat_pose). Event 3 (`pick_gear_small_from_floor`)
+        stopped after 3 same-cause failures: the outline states ur5e-3's end `pose` as the gear's own position
+        {x 0.25, y 0.45, z 1.025}, but the calculated pick grasps at z 1.288 and retreats to z 1.501. With the retreat
+        the end pose is wrong ("Postcondition 'pose' … required z 1.025"); without it, "Owner completion requires a
+        retreat after the custody transfer". The RA accepted the stated pose because it lies inside ur5e-3's envelope;
+        nothing establishes that the robot ends there. Correction: the hand program "composed" event 3 only by moving
+        the held gear back down to z 1.025, 26 cm below its grasp height (into the floor). The owner check accepts it
+        because it checks no collisions, so that hand program is not a valid program and event 3 as stated is not
+        composable. Open (user decision; RA side, the other chat's file): a stated robot `pose` in a pick or place end
+        state must equal the pose the event's geometry ends at (the calculated retreat_pose), or the outline should not
+        state it. The draft would then need a new outline.
+      - Machining event 1 (`pause_job` on M2): the model bound `job_id` to the part name; the job id
+        (`environment_23`) is only in `/resources/<M2>/resource_evidence/processing_observations/active_job`, which no
+        prompt text, contract card or snapshot points to (M2's snapshot shows `active_work` null). It asked for
+        `/resources/<M2>/snapshot`, then for fields that do not exist (`retained_job`, `current_job_id`).
+      Proposals for the user (each changes what every model sees, so not done tonight): the unresolved-reference
+      finding could list the calculated fields that exist; the composition prompt's assembly-slot sentence could say
+      it applies only to an `assembly_slot` place target; the `pause_job`/`resume_job`/`stop_job` card could name the
+      job record path for `job_id` (fix 6, curated lookups). Re-running needs the user's go (the go was "once").
+    - **Receiving geometry gaps (found October 30, not fixed).** Event 3 (ur5e-2: the round RGOCG4 onto the M2
+      staging tray) stops at "Supported placement requires recorded rigid box geometry" (the support calculation
+      needs a box; round parts are not boxes). Event 4 (ur5e-1: KET4 onto the Conveyor) stops at "The proposed
+      destination has no recorded placement geometry" (no Conveyor placement geometry for ur5e-1, and the Conveyor's
+      per-part slot is not a `_receiving_slot`).
+    1. Contracts (A.2): composition reads the captures' recorded catalogs, where machine, KMR, Conveyor and Buffer
+       primitives declare no effects; the RA reads `current_primitive_declarations`. Composition should read the same
+       declarations. Needs the composition validator to handle declaration variants and part-side
+       `product_effects`/`product_guards`.
+    2. Derivation rules: composition must establish every end-state field through declared effects, while Algorithm 1
+       derives fields as "producers", "free", "unchanged", "place" or "bookkeeping" (`ra_feasibility._Check`). Eq. 7
+       should be judged with the same derivations (composition adds ordering and bindings). Paper wording for Eq. 7
+       to check with the user.
+       **User decision, October 30: no derivation kinds anywhere** (AGENTS.md "No derivation kinds"). The
+       `follows_from_event` / `_DERIVED_WITHOUT_PRODUCERS` change made in composition on October 30 (00:06), which
+       lets free, unchanged, place and bookkeeping fields pass, conflicts with it and is to be removed; the RA's own
+       condition labels too. How to replace them is still to be designed with the user.
+    5. KMR event completion: `validate_owner_composition` gives target preview and custody completion only to
+       `resource_type == "robot"`, so KMR pick and place events cannot establish the part's new location. The KMR's
+       arm needs the same preview and completion. Its `move_base` check covers coordinates, custody and attachment;
+       route and clearance are left to the RA (Eq. 12).
+    6. Curated composition lookups: the prompt invites the raw `/resources/<jid>/resource_evidence` (264 KB for a
+       robot, 8.9 MB for the KMR); programs used computed targets, literals and one recorded fact (`active_job`).
+       Replace it with a contract-derived list (active event, contracts, decompositions, pose, held part, named
+       poses, recorded facts that primitive parameters bind to); keep fix 4's size limit as a guard. Changes what
+       every model sees, so land it before comparison runs; user to review the list first.
+    7. KMR travel target: the KMR has recorded routes and docks only for Storage–M1 and Storage–M2. A travel event
+       that names a place without a pose passes the RA's "navigate" check (a free, connected base pose exists), but
+       the pose is not handed on, so composition would invent `move_base` coordinates that its check does not verify.
+       The RA should record the base pose it finds and composition should bind and require it. Current drafts state
+       poses for the Conveyor, Buffer and standby events and name only M1 and M2.
+    - Exit event: the RA accepted draft `19874d8d`'s `normalize_exit_to_empty` for a resource with no primitives
+      (empty primitive set). Decide whether Algorithm 1 refuses an event that no primitive executes.
+    - Execution: the CCA check of the composed trace (Eq. 13), motion-path and collision checks, and Gazebo
+      controller validation are not built.
+    - Record size: each composition turn record embeds the full validation evidence (20–30 MB).
+
 ## Aligned part model — October 23, 2026 — DONE offline, verified (full suite = baseline), committed `d981a3f`; Gazebo/recapture pending after activity model B
 
 **Decision (user, October 23).** Align the part model with the semiconductor framework
@@ -870,6 +1184,566 @@ still look the details up. `connection_blockers` today names neither.
 `check_nonblocking`), compared with the unchecked baselines.
 
 ## RA feasibility validation — October 23, 2026 — plan approved by the user; checker built offline October 24–25 (`77af184`, `dcab31b`), awaiting the user's replay review
+
+**October 30: no derivation labels; one rule for every stated value (user: "fix everything but make sure you
+dont break my rules on state variables match primitives union. dont make it symbolically solvable"; uncommitted).**
+The labels `free`, `unchanged`, `place`, `bookkeeping`, `producers`, `undeclared`, `no_producer` are gone from
+`ra_feasibility._Check.condition`. Every value an event states (its own end state and each neighbour's) is
+accepted only when it already holds, when a declared effect of the acting resource's own primitives makes it
+(the union, a per-value lookup, never a search), or when one of the event's capability checks finds exactly that
+value; otherwise it is refused with the fact. No primitive declaration changed, so primitives stay unconnectable.
+- `resource_state` names the new state: a name no primitive of that resource declares needs nothing; a name one
+  of them declares (robots declare it as `current_state`, read through the transition derivation's alias table)
+  comes only from that primitive in the resource's own event. A neighbour's value that one of the neighbour's own
+  primitives would make is refused for every variable ("ur5e-3's grasp_part sets resource_state to picked, and
+  ur5e-3 does not act in this event").
+- Found by the checks: a pick empties every value that recorded the part where it rested (slot, per-part slot and
+  order, storage flag) and leaves the part with the acting resource; a place fills the neighbour slot the event
+  names, and the part's location is the model's own (`product_state_from_custody`, so "M1 staging tray" for a
+  staging slot), or the place or pose reached; a transport, the conveyor's own per-part slot; a move, navigation,
+  pick or place, the acting resource's location; a stated null location with a stated pose, the dock or recorded
+  area holding the pose, else null. Rows carry `producers`, `found_by` (the check's name) or neither.
+- An event of a resource that declares no primitives (Exit, Storage, 3D Printing Station) is refused.
+- Refused because nothing declared sets them: KMR `approached_part`, Conveyor `loading_reserved_by`, a part's
+  `part_order` when it is put on the belt, private `task_ctx.*` fields, and a non-product part's
+  `product_location` (the Exit model declares the product's location with scope `part`, so the knowledge base
+  lists it under every part; Part slippage outlines state gear_small's `product_location` at the final insert).
+  These are model questions for the user, not exceptions in the check.
+- After two independent reviews (the composition chat's and a three-lens workflow), also fixed: a place that
+  leaves `held_part` unstated (the release went unchecked) and one that puts a part at a resource without
+  stating which of its variables records it (capacity went unchecked) are refused with NEEDS_CONTEXT; navigation
+  candidates keep only docks within the search radius of the target (`kinematic_reach.free_base_poses`), so a
+  navigate check and its witness base pose are near the target; a stated pose decides a mobile base's location
+  (on a dock, else none); an arm's stated pose is located by the projection's own `_place_of`; a stated location
+  must be where the event leaves the resource (its move or navigation, else its place, else its pick), apart
+  from its own named postures; what a check finds overrides a restated old value; a found value takes its
+  check's status; a transport slot must name a recorded area (a null slot no longer crashes); a store's
+  `inventory.<part>` set true is a destination; refusal text names the resource that does not act.
+- Open after the reviews (not changed): an arm's stated location is not compared with its stated pose; belt
+  advances that move several parts, and the Buffer's own zone advance, are refused (only the event part's own
+  slot is found); a state name a primitive declares can pick that primitive although its other effects change
+  values the event keeps (per-value lookup); `refused_by` labels on producers predate this and feed
+  `outline_audit.ra_stages`.
+- Replay of all 48 saved finished drafts on the final code: no errors; 9 pass RA + CCA safety. Machining
+  `af6f05b5` still passes with its M2 `start_job` after M2 is stated `loaded` (item 5).
+- Run: `batch_20261030T065217Z_4db0aa`, Study 1, all six settings × four scenarios, one attempt each,
+  claude-opus-4-7 medium, 40 turns, from snapshot `fecd9ae` (scratch worktree, records in the main checkout).
+  Two aborted start attempts are kept as records and are not study data: `batch_20261030T064904Z_867092`
+  (no LLM call) and `batch_20261030T065004Z_8fe5b0` (9 attempts died on a connection error, no tokens).
+- Results of `4db0aa` (02:52–04:59; 301 calls, 3,137,654 tokens; Framework single-pass 1,276k, Framework
+  incremental 1,289k, the four LLM settings 49k–239k each). Outcome, calls, tokens:
+
+  | Setting | Part slippage | Machining | Conveyor | ur5e-1 |
+  |---|---|---|---|---|
+  | LLM, single-pass | infeasible (event 1); 2, 12k | infeasible (event 1); 1, 6k | infeasible (event 1); 3, 20k | infeasible (event 1); 2, 11k |
+  | LLM + rules, single-pass | unresolved (event 2); 2, 13k | infeasible (event 1); 1, 8k | infeasible (event 1); 3, 22k | unsafe (event 2); 2, 11k |
+  | LLM, incremental | error; 5, 27k | unsafe (event 1); 10, 47k | unresolved (event 1); 13, 119k | infeasible (event 2); 8, 46k |
+  | LLM + rules, incremental | error; 4, 27k | infeasible (event 1); 13, 70k | infeasible (event 3); 8, 67k | infeasible (event 1); 9, 66k |
+  | Framework, single-pass | passed (`d491e1fd`); 4, 33k | passed (`5836a16f`); 21, 296k | error; 23, 379k | 40-turn budget; 40, 569k |
+  | Framework, incremental | 40-turn budget; 40, 293k | error; 12, 69k | error; 35, 508k | 40-turn budget; 40, 419k |
+
+  - The five errors are not LLM outcomes. Three were code crashes, fixed on October 30 after the batch with
+    regression tests (uncommitted): (1) Machining, Framework incremental, turn 12: the LLM wrote the belt's
+    per-part slot nested (`"part_location": {"KET4_Square_4mm": "loading_position_1"}`) also as ur5e-1's own
+    `part_location`; `_Check.capability_rows` put the stated places in a set (`TypeError: unhashable type:
+    'dict'`). Places are now compared in a list; the event is refused ("{…} has no recorded geometry").
+    (2, 3) Part slippage, both LLM incremental settings: validation off, the LLM named `assembly_board-v1` (a
+    part) as a neighbour and as gear_small's location; `_apply_neighbor_end_state` created a resource row for it
+    and the next prompt's context selection served it (`NEEDS_CONTEXT: unknown resource assembly_board-v1`).
+    A neighbour that is no recorded resource now changes no state (the event keeps what it states; the audit
+    judges it). Two were network failures, both Conveyor Framework runs (03:54 `RemoteProtocolError` mid-stream,
+    04:10 `APIConnectionError`): experiment calls make one attempt with SDK retries off
+    (`multi_turn.py` `max_attempts: 1` under `outline_diagnostic_bypass`, since October 21), so one blip ends
+    the attempt. Whether to retry a call that received no answer is the user's decision.
+  - What used the Framework turns (refusal counts across turns): Part slippage incremental, `product_location`
+    of KET4 at the Exit (21) and "Exit declares no primitives" (8), then nonblocking (Exit holding KET4 is a
+    state nominal production does not have); ur5e-1 incremental, the KMR's release on M2's staging tray ("no
+    candidate base pose gave KMR a configuration at M2 staging_part (M2.staging)", 13; identical without the
+    dock radius filter, so not from that change), unstated `part_location` on a KMR release (12) and KMR
+    `approached_part` (8).
+  - First refusals of the LLM-only outlines (the audit): undeclared variables (`status`, `jobs` on M2; `location`
+    on a part), a grasp while holding KET4, `pose` stated as the string "pose", a release without its
+    `part_location`, KMR `approached_part` (3), and three safety violations (M1 mutex; KET4-before-RGOCG4
+    processing).
+  - Composition of the two complete Framework drafts: queue item 27 and the composition section above.
+  - Diagnosis of the Framework turn sinks (October 30, after the batch; offline re-checks, no code changed;
+    scripts in the session scratchpad `answers/`):
+    - Part slippage incremental (`draft_beb5cf7f…`): all 8 events were accepted by turn 18 (event 1 put KET4 down at
+      the Exit, accepted by the RA). Turns 19–40 were nonblocking refusals of `recovery_complete` with KET4 left at
+      the Exit, which normal production never picks from (it only receives `assembly_board-v1`), and the LLM's
+      attempts to set KET4's `product_location` (the finished board's location variable). The second sentence of
+      the nonblocking refusal is wrong: `product_state_from_custody` (`environment_models.py`) puts the product at
+      the Exit whenever the Exit's `part_name` is not null, so it reported "assembly_board-v1 … put at Exit". The
+      passing single-pass draft `d491e1fd` parked KET4 in the Buffer and picked it back up.
+    - KMR at M2's staging tray (both ur5e-1 Framework runs): the KMR can reach it; the refusal is the base search.
+      `free_base_poses` uses a 0.25 m grid centred on the target; between M2 and the ur5e-2 work area the nearest
+      grid poses leave the arm 0.85 m from the tray (reach 0.82 m). From (-2.7, 2.08, π/2), 12 cm in front of the
+      M2 dock, the turn-21 release (`draft_7b38e6db…` RECOVERY_SEQ12) is FEASIBLE; with `_GRID_STEP_M` 0.1 the
+      search finds (-3.3, 1.3, π/2) itself and the walk takes 5 s instead of 30 s (0.05 m: 14 s). With that base
+      the single-pass outline refused at event 5 on turns 6 and 9 (`draft_4174c51d…`) passes events 1–6 and is
+      refused at event 7, where the Conveyor slot is written nested
+      (`{"Conveyor": {"part_location": {"KET4_Square_4mm": "loading_position_2"}}}`).
+    - Unstated `part_location` on KMR releases: the LLM wrote the part as a neighbour,
+      `"neighbor_end_state": {"KET4_Square_4mm": {"part_location": "M2 staging tray"}}`; the RA reads the
+      destination from `expected_end_state` only. Where the LLM put it there (turns 21, 34) only the reach
+      refusal remained.
+    - KMR `approached_part`: set in normal production only by the KMR's `pick_approach` at Storage and cleared by
+      `pick_part`; none of the 15 KMR primitives declares it, and recovery does not need it (`grasp_part` needs
+      only `held_part = null`). The single-pass ur5e-1 run re-proposed it 23 times. Normal production uses it:
+      the nominal `pick_part` guard (`approached_part == part_name`, `at_pick`/`grasping` need it set) and
+      `environment_runtime._intake_parts` (reads it to know which Storage part the KMR is about to take).
+      Deleting it in code does not remove it from the four study captures: `outline_draft` derives the KMR's
+      declaration from each capture's recorded model (`environment_recovery_descriptor`), so it stays until
+      re-capture or a drop at load.
+  - Fixes after that diagnosis (October 30, user: "hide it and also fix the other errors"; uncommitted):
+    - `approached_part`: dropped from the outline stage's prepared declarations in `outline_draft`; the recorded
+      value stays, so the hand-off search still checks `pick_part`'s guard. It is not marked `private`, which is
+      the owner-bookkeeping mark and skips that guard. Removed from `cca_nonblocking._STATE_FIELDS`.
+    - `_GRID_STEP_M` 0.25 → 0.1. `reach_area` tries declared docks first, so a dock that reaches stays the witness.
+    - `product_state_from_custody`: the Exit holds the product only when its `part_name` is the product.
+    - RA: a `neighbor_end_state` name not in `recovery_des_models` refuses the event (INFEASIBLE, "neighbor_end_state
+      names X, which is not a resource, so its values there are not read"). Skipping it silently let an unchecked
+      value through and composition then stopped on it. Stricter than before for a correct part-keyed entry on a
+      grasp: `draft_beb5cf7f…` event 4 is now refused on replay.
+    - Verification: 726 pass across the 11 touched suites; the 6 `test_nominal_resource_des` failures also occur
+      without these changes. Replay of 64 drafts on the code before the review fixes: no errors, 12 pass RA + CCA
+      safety. The replay on the final code was cut off by a session restart and must be rerun before any batch.
+  - Open (October 30): outline `pose`. It is not calculated: the LLM copies recorded numbers and adds offsets, code
+    stores them (`_locate_by_pose`), and the RA checks reach only. `d491e1fd` events 3-5 state part heights as wrist
+    poses (fingertips 0.218 m below). Proposed, awaiting the composition chat and the user: `pose` is stated only
+    when nothing else says where (not on a pick, nor at a named place; kept for a release or a move at an unnamed
+    spot), plus a fingertip check on stated poses and the "last stated/measured pose" label after a pick or place.
+    `d491e1fd` without those three poses passes RA, CCA safety and nonblocking; composition not tried. Queue item 28
+    (Framework, incremental x 4 scenarios, Opus 4.7, once) is on hold for this.
+  - Known limit: the KMR cannot set a part down at an unnamed spot, because its `pose` is its base (`pose_place`
+    leaves it unresolved). No saved outline needs it: all 30 KMR releases name a place, and the 7 others that name
+    none are 4 gripper moves with no part and 3 named slots. Recommended to the user to leave it as is; handling it
+    would need an arm pose variable and declared effects on the KMR's arm primitives.
+
+**October 28: four fixes before the rerun (user: "do all of them 1-4"; uncommitted).**
+- RA, unavailable devices: an event is carried out by its resource's primitives, so it needs the preconditions all
+  of them share (today only `availability = available`), unless a primitive derived for a stated value already
+  checked them. A bare label on an unavailable device is now refused: M1 `resource_state` → `idle` gives "M1's
+  primitives need availability = available; projected availability is unavailable" (`refused_by` "preconditions").
+  This closes open item (a) of October 27 for unavailable devices. Robots that report a fault but stay available
+  (ur5e-4, ur5e-1) still change their own labels. All 12 resources record `availability` in all four v5
+  captures; only M1 (Machining) and the Conveyor (Conveyor breakdown) are unavailable. In the saved drafts, the
+  one accepted event this refuses is `draft_621fc1a0…` event 10 (`abort_interrupted_job_and_reset_control_state`).
+- RA, hand-off wording: a place that is a gripping resource is named as such instead of "has no recorded
+  geometry" (which also printed the KMR's JID): "KET4_Square_4mm is held by KMR's gripper, which is not a recorded
+  place" (taking) and "ur5e-3's gripper is not a recorded place to put KET4_Square_4mm" (putting). Still
+  NEEDS_CONTEXT, so still a rejection; built from the recorded `held_part`, with no scenario names.
+- Retrieval: the gpt-5 low stops were not unlisted paths. The model asked again for a listed ref the capture cannot
+  answer (KMR `pose_relations`, whose `current_pose` is not recorded), and the repeat rule ended the session. A
+  repeated request with no new information is now answered ("repeated context request produced no new
+  information", shown under Missing context) and the session goes on; the turn budget bounds repeats. Peer chat 88
+  (single-pass, Experiments) confirmed nothing of theirs depends on the stop.
+- `PAPER_FRAMEWORK.md`: lines added under "Unexpected faults" (availability, Eq. 6) and under the RA custody rules
+  (one-event pick-and-place; gripper-to-gripper hand-off rejected).
+- Tests: new RA tests for the bare label, an available faulted robot, the fact stated once, and both hand-off
+  wordings (the label and hand-off tests fail on the code before). Seven retrieval tests and one draft test now
+  expect the turn budget, not the repeat, to end a session. Related suites: 767 passed; the one failure
+  (`test_outline_schema_at_provider_boundary_accepts_explicit_candidate_markers`) also fails without these changes.
+- Rerun (user: "go"; 13:47–14:12; gpt-5.6 medium, RA + both CCA checks, UI settings, 40 turns; snapshot
+  `15f927e` of the working tree; all drafts kept as paper evidence):
+
+  | Scenario | Draft | Result |
+  | --- | --- | --- |
+  | Part slippage | `draft_4e6d9bdb…` | complete, 6 events, 11 turns |
+  | Machining | `draft_d66f7d76…` | 40-turn budget, 23 events. No M1 relabel. KET4 trimmed square on M2, but RGOCG4 was sent to the Conveyor with its circle trim unfinished; the nonblocking check refused 8 completions, each naming what was blocked |
+  | Conveyor | `draft_ae46694b…` | 40-turn budget, 33 events, no completion claimed. About 15 hand-off attempts between ur5e-1's and the KMR's grippers (yesterday: 29 turns of one); the KMR found no base pose reaching KET4 at loading_position_1 |
+  | ur5e-1 | `draft_60687eb9…` | "complete" after 1 event, a false pass: ur5e-1 `failed` → `idle` ("replace_gripper_and_clear_fault"; allowed, ur5e-1 is available), then Eq. 6 accepted the nominal `pick_grasp` of ur5e-1 with its gripper still failed |
+
+- Gaps the rerun found (not built; for the user):
+  - Eq. 6 runs the nominal models, which do not know a device's reported component fault: the nominal
+    `pick_grasp` of ur5e-1 is accepted although its grasp primitive needs `gripper_state ≠ failed`. A general fix
+    would disable, in the composition, nominal events whose supporting primitives' preconditions fail on the
+    recorded fault state. That is a new Eq. 6 mechanism, so it needs the user's decision and paper text.
+  - Putting a part into a gripping resource that has body geometry (the KMR) is checked as reaching its mobile
+    platform's collision surface: "KMR held_part (KMR::…mobile_platform_collision) lies beyond ur5e-1's kinematic
+    chain". The October 28 gripper wording covers only resources without geometry; a `held_part` (or
+    `approached_part`) slot of a gripping resource should give the same "not a recorded place" fact.
+- Both gaps fixed (user: "fix gap1 and gap2", 2026-10-28, uncommitted):
+  - Gap 1, `cca_nonblocking`: a nominal event runs its program's primitives (`resource_programs` functions,
+    by the event's `program_key`). A primitive precondition on a condition the nominal model does not have
+    (today `gripper_state`, `availability`, `current_pose`) is evaluated on the recovery's end state; when it
+    fails for every alternative of a primitive, events whose every variant runs that primitive get no
+    executor. Unrecorded conditions decide nothing. Evidence lists `unrunnable_events` with the reason;
+    refusal reasons are unchanged (still what is blocked). Paper line added under "Nonblocking validation".
+  - Gap 2, RA: a slot that is a part-holding variable of a gripping resource (`held_part`, `approached_part`),
+    or no slot while it holds the event's part, is its gripper, so its body geometry is not checked: "KMR's
+    gripper is not a recorded place to put KET4_Square_4mm".
+  - Replays of the recorded replies (no provider calls): `draft_60687eb9…` (ur5e-1) completion now BLOCKING,
+    "KET4_Square_4mm cannot reach its remaining requirement … from M1", with ur5e-1 `pick_grasp` and
+    `place_release` unrunnable ("grasp_part needs gripper_state ≠ failed"). `draft_ae46694b…` (Conveyor): only
+    turns 12, 14, 18 and 29 changed, each to the gripper fact; same applied events.
+  - Tests: new nonblocking test (gripper open accepted, failed refused with `pick_grasp` unrunnable and
+    `move_home` kept) and RA test (`held_part` and `approached_part` into a gripper with body geometry); both
+    fail on the code before. Related suites 1059 passed; the one failure is the pre-existing
+    `test_outline_schema_at_provider_boundary_accepts_explicit_candidate_markers`.
+- Outline prompt layout for provider prefix caching (user: "sure i want to apply these fixes", 2026-10-28,
+  uncommitted; no wording or fact change, so the prompt freeze holds):
+  - Order: the sections that stay the same within a run come first (Task and Role, Failure, Recovery Goal, Safety
+    Rules, event rules, Knowledge Base, then "Retrieved context" with the declared and saved facts). The changing
+    sections follow (Recovery Events So Far, refused outline, Validation Feedback, Resources, Parts,
+    "Retrieved current values", missing context).
+  - Retrieved facts are grouped by resource, then part, then the rest. Bookkeeping is left out
+    (`accepted_trace_length`, `revision` and `field_sources` at the top of a fact, `captured_at`/`source_run_id`
+    equal to the observation source). The shared `values_rule` and each `held_part` interpretation are stated once
+    under "Notes on the facts above:" with the resources they apply to. `state_variables` current values move
+    to "Retrieved current values".
+  - Replays of `draft_d66f7d76…` (Machining) and `draft_ae46694b…` (Conveyor), compared turn by turn with
+    the recorded prompts: every line and every fact value is kept (Conveyor's two differing lines are the gap 2
+    gripper wording). The share of each prompt that the previous turn's prompt shares from its first character
+    rose from 19% to 68% (Machining) and from 15% to 65% (Conveyor). Prompts are about 11% shorter.
+  - Tests: `test_multi_turn_diagnostic` header order and retrieved-section parsing updated. Related suites pass,
+    apart from the pre-existing request-records failure and 13 pre-existing `test_recovery_delivery` failures
+    (`kmr_gazebo.py:1619` NameError, `Request is not set`). `poetry check` gives warnings only, and compileall passes.
+- gpt-5.4 medium rerun on the fixed code and new layout (user: "after the fixes can you all 4 failure scenarios
+  with 5.4 medium"). RA and both CCA checks were on, with 40 turns. The runs used snapshot `8c16b70`, ran
+  17:23–18:08, and were two at a time. All four were accepted (completion NONBLOCKING); the drafts are kept as evidence:
+
+  | Scenario | Draft | Turns / events | Refused completion claims | RA turns with nothing applied | Input (cached) / output tokens |
+  |---|---|---|---|---|---|
+  | Part slippage | `draft_d109e73c…` | 9 / 5 | 0 | 1 | 60k (32%) / 31k |
+  | Conveyor | `draft_527ed872…` | 13 / 5 | 2 | 2 | 87k (39%) / 33k |
+  | ur5e-1 | `draft_cedee86c…` | 26 / 14 | 2 | 5 | 255k (51%) / 94k |
+  | Machining | `draft_ccf4b54c…` | 38 / 21 | 12 | 1 | 281k (57%) / 119k |
+
+  - Conveyor: ur5e-1 puts KET4 on the M1 staging tray, and the KMR carries it to Buffer zone 1. There were no
+    gripper hand-off loops (the gpt-5.6 run spent about 15 turns on them before the gap 2 fix).
+  - ur5e-1: the KMR carries KET4 from M1 to Conveyor loading_position_2. Eleven alternatives were refused because no
+    KMR base pose reaches M2's staging tray. Completion evidence lists ur5e-1 `pick_grasp`/`place_release` as
+    unrunnable (gap 1), and normal production finishes without them. The Conveyor reserved loading_position_2 for ur5e-2,
+    but the KMR placed there; nothing checks who holds a reservation.
+  - Machining: M2's circle job is paused, KET4 goes M1 → Conveyor → M2 for its square trim, then RGOCG4 is reloaded
+    and its circle job resumed. The square job again started on M2 while the circle job was paused, as in every
+    Machining run; no rule covers it.
+  - CCA safety refused nothing in any run. Across all 17 checked drafts with the rules in the prompt, it has
+    refused 0 events. The nonblocking check has refused 44 completion claims, all on RA-passed outlines.
+- Safety rules withheld from the LLM (user: "yes lets hide it", 2026-10-28, uncommitted). This lets the CCA show it
+  catches unsafe decisions the LLM actually makes. `OutlineDraft(safety_rules_to_llm=...)` takes three values:
+  - `"prompt"`, today's default: the Safety Rules section.
+  - `"knowledge_base"`: no section; `/safety_rules` is listed as a lookup.
+  - `"hidden"`: no section, and a `/safety_rules` lookup is refused as "Unsupported context reference".
+
+  The CCA checks every selected rule in all three; the draft records the setting. With `"hidden"` the LLM meets a
+  rule only in a CCA refusal, which names the rule, its requirement and the facts. The Candidate Rules never
+  mentioned the safety rules. A rendered Machining prompt with `"hidden"` has no rule text (7,634 vs 8,642 chars),
+  and the CCA still checks 7 rules. The new parametrized test is in `test_multi_turn_diagnostic`; related suites
+  show 870 passed and the same 14 pre-existing failures. `"hidden"` became the default the same day (user: "ok lets
+  hide it"), so the Recovery UI and the Experiments runner hide the rules too. The two diagnostic tests that assumed
+  the rules in the prompt now expect them withheld, and the setting test covers all three values.
+  A "/safety_rules lookup" switch on the Recovery page's outline card (Offline, beside the RA and CCA checks; off
+  by default) sets `"knowledge_base"` (on) or `"hidden"` (off) for the next attempt; the prompt never lists the rules
+  (user). It goes through the new `SystemBridge.set_recovery_safety_rules_lookup` and
+  `PartSlippageExample.set_safety_rules_lookup`, and is tested in `test_outline_draft`. `"prompt"` stays code-only.
+  - Hidden-rules run: gpt-5.4 medium, RA + both CCA checks, 40 turns, snapshot `0e369b9`, 18:27–19:23. All four
+    were accepted; the model never asked for `/safety_rules`. Rules-in-prompt results (`draft_d109e73c…` etc.) are
+    in brackets:
+
+    | Scenario | Draft | Turns / events | Unsafe proposals refused (CCA) | Refused completion claims |
+    |---|---|---|---|---|
+    | Part slippage | `draft_19874d8d…` | 15 / 7 (9 / 5) | 6 (0) | 2 (0) |
+    | Machining | `draft_af6f05b5…` | 25 / 14 (38 / 21) | 3 (0) | 6 (12) |
+    | Conveyor | `draft_1457af1c…` | 21 / 6 (13 / 5) | 0 (0) | 2 (2) |
+    | ur5e-1 | `draft_fc6db689…` | 32 / 11 (26 / 14) | 9 (0) | 3 (2) |
+
+    - Part slippage: ur5e-3 entering assembly_board-v1 while the failed ur5e-4 was still inside
+      (`SAFE_shared_area_mutex`). After a turn with all alternatives refused, ur5e-4 retracted first.
+    - Machining: taking KET4 out of M1 while M2's running circle trim of RGOCG4 would complete first
+      (`SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing`, through the uncontrollable job completion).
+      M2 was paused first.
+    - ur5e-1: the KMR grasping KET4 at M1 while the failed ur5e-1 was still in M1 (4, `SAFE_M1_mutex`; ur5e-1
+      then went home first), and ur5e-2 entering M2's front access while the KMR was at its side access (5,
+      `SAFE_M2_mutex`).
+    - Conveyor: the plan never shared an area, so nothing was refused; the extra turns were RA refusals (20 KMR
+      base poses at Buffer zone 1, 7 gripper hand-offs).
+    - With the rules on request (`"knowledge_base"`, Part slippage `draft_d0af11b3…`, 7 turns), the model requested
+      `/safety_rules` on turn 1 and proposed nothing unsafe.
+  - gpt-5.4 low with the `/safety_rules` lookup on (user), same snapshot, 19:23–19:30, stopped by the user. Part
+    slippage (`draft_c82d7666…`) was accepted in 6 turns: it requested `/safety_rules` on turn 1, retracted ur5e-4
+    first, and proposed nothing unsafe (27k input / 5k output tokens). Machining and Conveyor were interrupted, and
+    ur5e-1 never started. Decision (user, 19:30): keep the safety rules hidden.
+  - Fairness (user): with the rules hidden, the unvalidated configurations can never learn them, so the 2 × 2 would
+    measure missing information. Proposed split, not yet decided: the ablation gives every configuration the rules
+    (prompt or lookup), and a separate full-framework test compares hidden vs shown.
+  - Model screen (user: find a model that skips or misreads the `/safety_rules` lookup). Part slippage, lookup on,
+    RA + both CCA checks, snapshot `0e369b9`, 19:38–19:51:
+
+    | Model | Looked up | Unsafe refused (CCA) | Result |
+    |---|---|---|---|
+    | gpt-5.4-mini low (`draft_d7b5654c…`) | turn 10 | 0 | 40-turn budget, 16 events; kept moving the failed ur5e-4 |
+    | gpt-5.4-nano low (`draft_1e525b8f…`) | turn 5 | 0 | 40-turn budget, 1 event |
+    | gpt-5-mini low (`draft_0147aa4e…`) | never | 0 | crashed turn 24 (KeyError `selected_candidate_index`); RA refused 20 of 21 turns (resource names used as variables) |
+    | gpt-5.2 low (`draft_e5b59327…`) | turn 1 | 0 | accepted, 12 turns |
+    | gpt-5.4 none (`draft_af9cf64b…`) | turn 1 | 3 (`SAFE_shared_area_mutex`) | crashed turn 19 ("unknown resource assembly_board-v1") |
+
+    - gpt-5.4 none misapplied the rule it had read. Its "retreat" of ur5e-4 changed only `resource_location` (to
+      3D Printing Station) and kept the arm's pose inside assembly_board-v1. The RA accepted that, and the CCA
+      refused ur5e-3 entering the board, because it judges the geometry, not the label.
+    - Both early ends follow the user's rule (October 22 and 27): a reply code cannot read ends the attempt as
+      did-not-finish in every configuration, with no format feedback.
+      - gpt-5-mini: several candidates and no `selected_candidate_index`, the rule's own example.
+      - gpt-5.4 none: an event whose resource is the product `assembly_board-v1` changed nothing, so the RA and
+        the CCA passed it. The draft ended one turn later, when the next prompt could not list that resource.
+
+      A change to feed these back was written and reverted the same day, because it reversed the rule.
+  - gpt-5.4 none, `/safety_rules` lookup on, all four scenarios (user), same snapshot, 20:03–20:10, stopped by the
+    user:
+    - Part slippage (`draft_cf885a03…`): requested `/safety_rules` on turn 1, then "retreated" ur5e-4 13 times by
+      changing only `resource_location` (to 3D Printing Station) while its pose stayed inside assembly_board-v1.
+      The CCA refused 37 proposals for ur5e-3 to enter the board (`SAFE_shared_area_mutex`); 11 turns applied
+      nothing. The run hit the 40-turn budget after 25 events, with nothing unsafe admitted. The CCA guarantees
+      safety, not progress.
+    - Machining (`draft_ce7f3c61…`, 9 events): 11 refusals for
+      `SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing` before it was stopped.
+    - Conveyor (`draft_c0c49416…`, 4 events): stopped. ur5e-1 never started.
+    - Open (user decision): should the RA refuse a `resource_location` change that the stated pose contradicts?
+      Accepting it is what kept this model looping.
+  - gpt-5.4 low, `/safety_rules` lookup on, rerun (user), same snapshot, 20:11–20:25, stopped by the user while ur5e-1
+    ran. CCA safety refused nothing in any of the three finished runs; the model looked the rules up each time.
+    - Part slippage (`draft_63d69a60…`): rules looked up on turn 1; accepted in 11 turns. Its first two "retreats"
+      of ur5e-4 only relabeled the arm, but it moved the arm out before ur5e-3 entered the board.
+    - Conveyor (`draft_34ba9801…`): rules looked up on turn 3; accepted in 12 turns. RA refused 5 (3 unreachable,
+      2 KMR base poses).
+    - Machining (`draft_c92de9ac…`): rules looked up on turn 2; ran out of the 40-turn budget after 18 events,
+      one step short (RGOCG4 reloaded and circle selected, but the paused job never resumed). The completion
+      check refused 10 claims. RA refused 29, mostly job-control preconditions (17).
+  - Model decision (user, 2026-10-28): gpt-5.4 medium is the main model. The comparison is OpenAI and Anthropic, each
+    with a larger and a smaller model: gpt-5.4 medium vs gpt-5.4-mini medium, and Claude Opus 5.5 vs Claude Sonnet 5.5.
+    All use the safety rules hidden and otherwise identical settings. The Claude runs need an Anthropic-SDK adapter in
+    `llm_agent.py`, the user's approval and an `ANTHROPIC_API_KEY`.
+    - gpt-5.4-mini medium, rules hidden, all four scenarios: started 20:27, stopped by the user before any finished
+      ("dont do experiments yet"); the model set is being reconsidered for cost.
+    - The set was revised to gpt-5.4 medium vs gpt-5.4-mini medium and Claude Sonnet 5.5 vs Claude Haiku 5.5, all
+      at effort medium. Opus was dropped for cost (Opus 5 costs more than Opus 5.5; Sonnet 5 costs the same as
+      Sonnet 5.5).
+    - Claude path built (uncommitted). `anthropic` ^1 added to pyproject (1.17.0; only new packages in the lock).
+      A model id starting with `claude-` routes `LlmAgent.ask_llm_structured` to `_ask_claude_structured`:
+      - The prompt is sent unchanged as the user message. The reply schema goes in the system text as an
+        instruction, because OpenAI also gets it only as a hint (`strict: False`), and Claude's enforced JSON
+        outputs cannot express free-form objects such as `expected_end_state`.
+      - `output_config.effort` = the run's reasoning effort, adaptive thinking, streamed, `max_tokens` 32000.
+      - A `refusal` or `max_tokens` stop ends the call after recording.
+      - No prompt caching yet: the prompt is one block that changes every turn.
+      - Supporting changes: `outline_draft._token_usage` maps Claude usage into the OpenAI fields the reports sum,
+        and the UI turn view (`recovery_turns._response_choices`) shows Claude replies.
+      - Tests: 3 in `test_recovery_request_records`, 1 in `test_outline_draft`. Related suites: 985 passed, 16
+        known failures.
+      - Claude runs need the user's `ANTHROPIC_API_KEY` in `.env`, and a new snapshot, because `0e369b9` predates
+        the adapter.
+    - gpt-5.4-mini medium, Part slippage, rules hidden (user): started 20:3x (`draft_57911268…`).
+    - First Claude attempt (Sonnet 5.5 `draft_36640e1c…`, Haiku 5.5 `draft_a37d2910…`, snapshot `8949756`) failed in 2 s
+      before any LLM call: `SavedRecoveryProduct` borrows `LlmAgent.ask_llm_structured` without inheriting, so
+      `self._ask_claude_structured` did not exist. Fixed by calling `LlmAgent._ask_claude_structured(self, …)`; the
+      test now calls through a borrowing object. Both empty drafts (no responses, 12 KB each) were deleted. Rerun from
+      snapshot `0fa33a7` at 20:53: Sonnet `draft_314f9806…`, Haiku `draft_79598181…`.
+    - Part slippage results, rules hidden, effort medium:
+      - gpt-5.4-mini (`draft_57911268…`): 40-turn budget, 7 events, all spent on the failed ur5e-4; RA refused 22,
+        17 of them unreachable. Same pattern as at low effort.
+      - Claude Haiku 5.5 (`draft_79598181…`): ended on turn 6 when a reply had 3 candidates and no
+        `selected_candidate_index` (the reply rule). Under 1 cent.
+      - Claude Sonnet 5.5 (`draft_314f9806…`): 40-turn budget, 14 events. The CCA refused 57 placements of gear_small
+        under `SAFE_gear_small_before_KET4_Square_4mm` ("KET4_Square_4mm enters assembly_board-v1"). Cost $0.65
+        (228k in, 20k out, no caching).
+    - Gap found by the Sonnet run: its first event put KET4 down at Exit by stating only ur5e-3 `held_part` → null,
+      `resource_location` Exit, and `neighbor_end_state` Exit.`part_name` = KET4. It never stated KET4's
+      `part_location`. The RA checks only the stated conditions, and "the event does not state where … goes"
+      covers only pose places, so the event passed. The planned state kept KET4 "at ur5e-3", so every later board
+      entry by ur5e-3 carried KET4 in the CCA's view. Not a physical violation: the refusals follow the inconsistent
+      planned state. Proposed fix, awaiting the user: the RA refuses a release that does not state where the
+      released part goes.
+    - Claude Opus 5.5, effort medium, rules hidden (user; `draft_fc27a784…`): accepted in 7 turns and 5 events, on its
+      first completion claim. Cost $0.32 (43k in, 7k out). The CCA refused 2 real violations:
+      - turn 2: ur5e-3 placing its held KET4 on the board before gear_small (`SAFE_gear_small_before_KET4_Square_4mm`).
+      - turn 3: ur5e-3 picking gear_small while ur5e-4 was still in the board (`SAFE_shared_area_mutex`).
+
+      It then put KET4 in the buffer (stating its `part_location`), sent ur5e-4 home, inserted gear_small and
+      picked KET4 back up.
+    - Claude Sonnet 5.5, second run (`draft_221e9b2d…`): this time it stated KET4's `part_location` (Exit), so the
+      check gap did not occur. The recovery was done by event 5 (KET4 at Exit, ur5e-4 home, gear_small inserted).
+      - CCA safety refused 9: 8 real `SAFE_shared_area_mutex` (gear_small pick or insert while ur5e-4 was in the
+        board), and 1 ur5e-4 retreat stating only the label "3D Printing Station", which no pose places.
+      - The completion check then refused 15 claims, 11 of them only "assembly_board-v1 is recorded at
+        assembly_board-v1 while Exit holds it". The verdict is right: KET4 left at the Exit station is a state
+        normal production cannot continue from. The wording is wrong, though: Exit holds KET4, not the board.
+        Sonnet spent its last 15 events "confirming idle" and hit the 40-turn budget. Cost $0.85 (354k in, 14k
+        out). gpt-5.4 low got the same refusal and fixed it by taking KET4 back from Exit.
+      - Open item 3 (refusal wording; may be a wrong fact in a refusal): find why the nonblocking refusal names the
+        product as what Exit holds.
+    - Three fixes (user: "fix all 3", 2026-10-28, uncommitted):
+      1. RA `_Check.unstated_part_location`. When an event changes its resource's `held_part` away from its part
+         without stating `part_location`, which the resource's model also declares (scope part), the check returns
+         NEEDS_CONTEXT: "the event changes ur5e-3's held_part from KET4_Square_4mm but does not state its
+         part_location". This is general, for any resource declaring both, and enforces the Candidate Rule "for its
+         resource and its part". Replays:
+         - Sonnet run 1 `draft_314f9806…`: the first event (turn 2) is now refused.
+         - gpt-5.4 Part slippage `draft_19874d8d…`, gpt-5.4 Machining `draft_af6f05b5…`, Opus `draft_fc27a784…`:
+           no RA result changed.
+
+         Test: `test_a_release_that_states_held_part_but_not_part_location_is_refused`.
+      2. Candidates most preferred first. The prompt says "Propose 2–5 different ways to do the next step of that
+         plan, most preferred first." (prompt change approved by the user). `selected_candidate_index` is no longer
+         in the reply format, the first listed candidate is the LLM's choice (`llm_selected_candidate_index` is
+         always 0), and the checks try candidates in the LLM's order. The UI check text reads "preferred". Earlier
+         runs used the index, so the main set must be rerun to compare. Five diagnostic and outline-draft tests now
+         state the new rule.
+      3. Custody refusal wording (`cca_nonblocking._custody_values`). The refusal now states the owner's own
+         part-holding values, e.g. "assembly_board-v1 is recorded at assembly_board-v1, but Exit's values (part_name
+         KET4_Square_4mm; product_location assembly_board-v1) put it at Exit". Verdicts are unchanged. Test:
+         `test_a_part_left_where_normal_production_reads_the_product_names_the_values_that_say_so`.
+
+      Related suites: 1014 passed, 16 known failures. Snapshot `da41475`.
+    - Sonnet 5.5 on the fixed code (`draft_fb5e2d78…`): 40-turn budget, 9 events, $0.62 (212k in, 19k out).
+      - The fixes held: KET4's release stated `part_location`, no index was needed, and the completion check was
+        never reached.
+      - Sonnet could not get the failed ur5e-4 out of the board. 25 retreats stated only `resource_location` "3D
+        Printing Station", the location ur5e-4 recorded while still moving at the failure, so the CCA refused each:
+        "ur5e-4's position after this event is not known … no reach configuration, named posture or declared pose
+        places ur5e-4 there".
+      - The CCA refused 38 board entries by ur5e-3 under `SAFE_shared_area_mutex`.
+      - Opus solved the same step by sending ur5e-4 `home` (a named pose), and gpt-5.4 by stating a pose outside
+        the board.
+      - Across three runs, Sonnet failed on our gap, then on our wording, then on its own reading of this refusal.
+        Suggested: keep it out of the main comparison.
+    - Decision (user, 2026-10-28): Sonnet dropped. The main comparison is gpt-5.4 medium vs Claude Opus 5.5 medium,
+      rules hidden, on the fixed code, 3 repeats per scenario (not started). gpt-5.4-mini medium is an optional
+      small-model reference.
+    - Decision (user, 2026-10-29): Claude Opus 4.7 at effort medium is the main model; gpt-5.4 medium is the
+      comparison. Opus 4.7 does not think unless asked, so `_ask_claude_structured` now always sends
+      `thinking: {"type": "adaptive"}` (newer Claude models treat it as their default); the test checks it.
+    - Opus 5.5 ablation batch `batch_20261029T014438Z_b0f676` stopped after 7 of 16 attempts, at 22:07 on
+      2026-10-28, when another chat edited `outline_draft.py` (an additive helper for composition from checked
+      drafts; no outline-generation line changed).
+      - Results: Part slippage Full framework and Single-pass + validation passed; Incremental LLM and
+        Single-pass LLM were audited unsafe; Machining Full framework and Single-pass + validation passed;
+        Machining Single-pass LLM ended on a code error ("unhashable type: 'dict'"), to investigate.
+    - Opus 4.7 Part slippage, Full framework, rules hidden: started 2026-10-29, snapshot `55f420d`.
+    - Harder safety rules considered and dropped (user, 2026-10-29): the specification set stays at the 7 rules.
+      - A paused-job rule (no new job on a machine while another is paused) contradicts the machine model, which
+        resumes paused jobs after unload and reload. It would also leave Machining with no valid recovery: resuming
+        breaks KET4-before-RGOCG4 processing, and a stopped job can never restart ("Restarting this unfinished part
+        has no declared support").
+      - A lockout (no robot in a running machine's working envelope) is already enforced by the machine model's
+        load and unload preconditions. The KMR parking at M2's access area is not a violation.
+      - Program-before-start ordering is a machine precondition: the RA refused 8 such Machining proposals.
+    - State on 2026-10-29, stopped mid-work at the user's request (uncommitted, nothing running):
+      - Decided: main models are Opus 4.7 medium and gpt-5.4 medium. The informed-LLM settings get the safety
+        rules as the `/safety_rules` lookup, not in the prompt. The Full framework keeps the rules hidden.
+      - Done:
+        - Claude prompt caching: `llm_agent._cached_user_content` splits the prompt before its first changing
+          section and marks the fixed part with `cache_control`.
+        - Experiments settings "Single-pass LLM + rules lookup" and "Incremental LLM + rules lookup", now six in
+          all; the UI describes the rules setting.
+        - Tests updated in `test_outline_experiments` and `test_recovery_request_records`.
+      - Open:
+        - `test_project_pages::test_experiments_tab_sets_up_study_1_without_reaching_the_runtime` still expects
+          12 planned attempts (now 18 = 3 × 6). The study title "Study 1: 2 × 2 ablation" (UI and batch.json)
+          no longer fits six settings.
+        - Resolved: the Opus 5.5 Machining single-pass error "unhashable type: 'dict'" (attempt_005,
+          `draft_a1125deb…`). Event 6 of its outline, a Conveyor event, wrote `part_location` as an object
+          (`{"KET4_Square_4mm": "loading_position_2"}`) instead of the Conveyor's flat
+          `part_location.KET4_Square_4mm`. Unchecked, the outline is applied as written and the projection
+          (`multi_turn_diagnostic._place_records`) fails: a reply code cannot read ends the attempt as
+          did-not-finish, per the rule. Replayed with checks on, the RA refuses that outline at event 5 with a fact
+          ("no ur5e-1 primitive sets Conveyor.part_location to {KET4_Square_4mm: loading_position_1}") for a
+          rewrite. Not a checker bug. Only the unchecked error text is unhelpful; an optional clearer message waits
+          until the other chat's composition run (queue item 25) ends.
+        - Fixed: the UI test now counts planned attempts from `CONFIGURATIONS` (3 × 6 = 18). The study title
+          "Study 1: 2 × 2 ablation" still needs a name from the user.
+        - Then run Opus 4.7 and gpt-5.4 on all six settings, on the user's go.
+    - To look at: after `move_to_named_pose` home, the projected `pose` kept the old point inside the board. The
+      CCA placed the robot at home from the move.
+
+**October 27: Machining with the checks on, three fixes, the review follow-ups, and eight checked runs (uncommitted;
+read this first).**
+- Runs before the fixes (gpt-5.4 medium, Machining `capture_37e090a5…`): `draft_1311ab39…` (RA only): every applied
+  step was feasible, but the LLM declared the recovery complete early, which only the CCA nonblocking check refuses.
+  `draft_c38f3d59…` (RA + both CCA checks, on `b04cdcf`): nothing infeasible, unsafe or prematurely complete was
+  accepted, but it ran out of its 40 turns after 23 events. It paused M2 first, keeping RGOCG4's circle trim from
+  finishing before KET4's square trim; moved KET4 to M2 over the Conveyor; selected square; and completed the trim.
+  It then moved RGOCG4 back and forth without returning it to M2. Turns went to pausing the faulted M1 (then
+  grounded `running`), bare labels (`idle`, `loaded`) and a refusal that cited the circle program. Both drafts are
+  kept as evidence for the paper.
+- Fixes (user: "ok fix them"): (1) a refusal leaves out an alternative's domain refusal when a sibling takes the
+  values; (2) the own-state rule for `resource_state`; (3) a faulted machine is grounded from its own job record:
+  M1 `interrupted`, KET4's job `interrupted`. The Machining `beliefs.json` was re-stored (backup
+  `/home/jongh/recovery_archives/beliefs_backup_20261027/capture_37e090a54d0242f4948ae80c95d3cd76/beliefs.json`;
+  `observations.json` unchanged); the other three captures' grounding is unchanged.
+- An independent review (two lenses, each finding checked by a skeptic) confirmed the fixes and found follow-ups,
+  now built:
+  - Fix 2 as first built (per variable: every own label derived once any own primitive sets `resource_state`)
+    refused a machine's own `loaded` after a robot load or unload left a stale label: a dead end. It is now per
+    label, matching `PAPER_FRAMEWORK.md`'s sentence: in its own events a resource reaches a label its own primitives
+    produce (M1/M2: running, paused, stopped, completed) only through them. A label none produces (loaded, idle)
+    and a neighbour's label stay free.
+  - Refusals:
+    - All conditions of an event are derived first. An alternative that refuses a value the event states, while
+      a sibling takes it, is left out of every refusal of that event.
+    - The sibling must take every stated value, not only the first one refused.
+    - Alternatives are named by their declared values, e.g. "start_job (result square) needs …".
+    - A job command that names no part is refused with "the event names no part" instead of a false "not
+      recorded".
+    - An effect the checker cannot interpret keeps the label derived.
+  - Grounding records a job the faulted machine's record shows completed as `complete_job` declares it (current
+    process cleared, result recorded).
+- Shadow replays (before vs after, on recorded LLM replies):
+  - The first fixes on 22 drafts: 502 candidates, 30 reason changes, 11 verdict changes.
+  - The final code on 4 affected drafts: 133 candidates, 21 reason changes, 9 verdict changes, each on a true fact:
+    part-less pause or stop refused as naming no part; pause or stop of the interrupted M1 refused; label-only
+    starts refused while M2 reads paused or completed.
+- Open for the user (not built):
+  - (a) A faulted machine can leave its fault state by a free label (its own `loaded` or a neighbour label) and
+    then start a job. No rule keeps a declared fault state; HEAD had the same gap.
+  - (b) A robot's load or unload leaves the machine's label stale unless the LLM states it in
+    `neighbor_end_state`. Deriving it from the model's shared events would be a new RA mechanism.
+  - (c) Robot labels stay free, because their primitives declare `current_state` (the alias), not
+    `resource_state`.
+  - (d) A job command must name its part. The alternative is for the RA to bind the machine's recorded part.
+- Tests: `test_ra_feasibility.py` + `test_failure_grounding.py` 98 passed. Related suites 1250 passed; 15
+  pre-existing unrelated failures (`test_recovery_delivery` KMR/UI, `test_recovery_case_safety` missing files).
+- Eight checked runs (user request; 17:27–18:19). All four scenarios with RA + both CCA checks, gpt-5.6 medium
+  and then gpt-5 low. Settings are the UI switches': `default_safety_files`, `default_cca_assumptions`, the 40-turn
+  budget. Code is the frozen snapshot `eea9a3e` (the working tree at 17:27, including other chats' uncommitted
+  single-pass, experiment and gripper-filter changes). All drafts are kept as paper evidence.
+
+  | Scenario | gpt-5.6 medium | gpt-5 low |
+  | --- | --- | --- |
+  | Part slippage | `draft_be11fd64…`: complete, 6 events, 11 turns | `draft_1f53d52e…`: 40-turn budget (nested per-resource end states) |
+  | Machining | `draft_621fc1a0…`: complete, 19 events, 35 turns; event 10 relabels the broken M1 `idle` | `draft_06a3d680…`: crashed in the RA (`part_order` taken as a slot; fixed) |
+  | Conveyor | `draft_86130b46…`: 40-turn budget; turns 12–40 retry a KMR→ur5e-3 gripper-to-gripper hand-off the RA cannot check (NEEDS_CONTEXT) | `draft_198e512d…`: stopped at turn 16 on a `need_context` request for an unlisted path |
+  | ur5e-1 | `draft_b08294fd…`: complete, 10 events, but event 6 moves KET4 with the failed gripper in one pick-and-place event | `draft_85753a16…`: stopped at turn 2 on a `need_context` request for an unlisted path |
+
+  In the Machining run, the nonblocking check refused 9 early completions, each naming what blocked normal
+  production. The last refusal ("M1 is in a state normal production does not have") is what led to the M1 relabel.
+- Fixes after the runs (user: "build this", 2026-10-27, uncommitted). Device availability works like the ur5e-1
+  gripper fault, from each device's own recorded report (`availability`: M1 and the Conveyor unavailable; ur5e-4
+  and ur5e-1 available):
+  - `resource_primitives.current_primitive_declarations` (used only by the RA): every primitive needs
+    `availability = available`.
+  - RA capability checks inherit the preconditions all of the acting resource's primitives share. A broken
+    Conveyor therefore cannot move a part: "Conveyor's primitives need availability = available …".
+  - A gripping resource that takes and puts down a part in one event gets a `handling` check: its grasp, then its
+    release on the state the grasp leaves. ur5e-1's event 6 is now refused with "grasp_part needs gripper_state ≠
+    failed".
+  - `cca_nonblocking`: a resource the capture lists unavailable owes normal production no state.
+  - `environment_models.owners`: a machine in a declared fault state is coherent with or without its part. This
+    was what really blocked Eq. 6: every transition of the composition raised on the empty `interrupted` M1. The
+    gpt-5.6 Machining plan without event 10 now passes Eq. 6.
+  - RA: the transport slot is the per-part condition whose declared values name slots (fixes the gpt-5 low crash).
+  - A bare label on an unavailable device (M1 `idle`) is still accepted as a free label. It gains nothing now.
+  - Shadow replay of the eight drafts: 320 candidates, no change in the replayed calls. No candidate there commanded
+    a broken device, and the ur5e-1 gripper event lies beyond the replayed calls; a checked replay shows it refused.
+  - Tests: RA, nonblocking, grounding and contract tests updated or added. The failing-test set of the related suites
+    is identical before and after (128, all pre-existing).
+- Still open for the user:
+  - The Conveyor hand-off: model gripper-to-gripper hand-offs, or give a clearer fact.
+  - A `need_context` request for an unlisted path ends the session instead of answering that the path does not
+    exist.
+  - The models write `none` strings in `neighbor_end_state` (found by the experiments chat).
+  - Paper-note lines for the availability and handling rules: sent to the chat editing `PAPER_FRAMEWORK.md`.
+  - Rerun the affected scenarios on the fixed code.
 
 **October 26: the user's review of the morning decisions (read this first; uncommitted).**
 - Decision 1, undeclared names: the RA refuses them, as built. Alg. 1 has nothing to derive from a name the model

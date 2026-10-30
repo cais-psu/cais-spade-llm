@@ -32,7 +32,9 @@ def _accepted_composition_inputs():
         "recovery_des_model": {"state_variables": {"mode": {"scope": "resource"}}},
         "execution_primitive_catalog": [{"name": "move_to_named_pose", "params": {},
                                            "effects": {"mode": {"set": "idle"}}}]}},
-        "multi_turn_session_state": {"current_phase": "primitive_generation", "accepted_outline_prefix": [event]}}
+        "multi_turn_session_state": {"current_phase": "primitive_generation", "accepted_outline_prefix": [event],
+                                     "check_ra_feasibility": True, "check_cca_safety": True,
+                                     "check_nonblocking": True}}
 
 
 @pytest.fixture
@@ -2010,3 +2012,17 @@ def test_offline_primitive_generate_keeps_partial_outline_gate(recovery, monkeyp
     assert recovery.snapshot()["status"] == "blocked"
     assert "full validation is required" in recovery.snapshot()["message"]
     generate.assert_not_called()
+
+
+@pytest.mark.parametrize("unchecked", [None, "check_ra_feasibility", "check_cca_safety", "check_nonblocking"])
+def test_composition_gate_reads_the_outline_checks_not_the_prompt_selector(unchecked):
+    from cais_spade_llm.recovery_framework.primitive_composition import composition_readiness
+
+    # Checked drafts keep outline_diagnostic_bypass on: it selects the frozen outline prompt.
+    prepared = _accepted_composition_inputs()
+    prepared["multi_turn_session_state"]["outline_diagnostic_bypass"] = True
+    if unchecked:
+        prepared["multi_turn_session_state"][unchecked] = False
+    readiness = composition_readiness(prepared)
+    assert readiness["ready"] is (unchecked is None)
+    assert any("full validation is required" in reason for reason in readiness["reasons"]) is (unchecked is not None)

@@ -476,7 +476,8 @@ def check_environment_primitive_capability(*, primitive: str, params: dict, task
                     'status': 'NEEDS_CONTEXT' if missing else 'INFEASIBLE', 'reasons': [str(exc)]})
                 continue
             return answer('FEASIBLE', 'Independent job command capability; no processing completion established',
-                          projected_command=reply, model_fingerprint=record['model_fingerprint'])
+                          projected_command=reply, model_fingerprint=record['model_fingerprint'],
+                          projected_processing_observations=record)
         part = bindings.get('part_name')
         geometry = evidence.get('geometry', {}).get(part, {})
         if rid == 'Conveyor' and part is None:

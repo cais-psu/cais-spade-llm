@@ -26,6 +26,7 @@ from cais_spade_llm.recovery_framework.part_slippage_recovery import _prompt_saf
 from cais_spade_llm.recovery_framework.recovery_observations import RECORDS
 from cais_spade_llm.resources.environment_recovery import environment_recovery_descriptor
 from cais_spade_llm.resources.machine.machine_jobs import machine_public_state, public_processing_observations
+from cais_spade_llm.resources.resource_primitives import filter_recovery_primitive_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,9 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
         variables = row["recovery_des_model"].get("state_variables", {})
         if "active_job" in variables:
             variables["active_job"]["private"] = True
+        # Only the KMR's nominal Storage pick sets approached_part and no recovery primitive does, so the outline
+        # stage does not declare it (user decision, 2026-10-30). Its recorded value stays for the checks.
+        variables.pop("approached_part", None)
         for declaration in variables.values():
             if "active_job" in declaration.get("description", ""):
                 declaration.pop("description")
@@ -162,7 +166,8 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
         if isinstance((entry.get("static_capabilities") or {}).get("gripper_reach"), dict)}
     prepared["diagnostic_scene_geometry"] = scene_geometry(observations)
     prepared["diagnostic_primitives"] = {
-        jid: _slim_primitive_catalog_for_prompt(entry.get("execution_primitive_catalog") or [])
+        jid: _slim_primitive_catalog_for_prompt(filter_recovery_primitive_catalog(
+            entry.get("execution_primitive_catalog") or [], resource_type=entry.get("resource_type", "")))
         for jid, entry in original["recovery_resources"].items() if entry.get("execution_primitive_catalog")}
     prepared["validation_contract_version"] = 2
     prepared["public_safety_context_version"] = 1
@@ -174,13 +179,26 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
     return prepared, {}
 
 
+def _token_usage(usage: dict) -> dict:
+    """Return a provider's token usage with the OpenAI fields the reports sum; Claude's own fields are kept."""
+    if "input_tokens" not in usage:
+        return usage
+    cached = int(usage.get("cache_read_input_tokens") or 0)
+    prompt = int(usage.get("input_tokens") or 0) + int(usage.get("cache_creation_input_tokens") or 0) + cached
+    completion = int(usage.get("output_tokens") or 0)
+    return {**usage, "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion,
+            "prompt_tokens_details": {"cached_tokens": cached}}
+
+
 class OutlineDraft:
     """Adapt saved-observation UI actions to execute_multi_turn_recovery."""
 
     def __init__(self, observations: dict, safety_files: list[str], *, root: Path = DRAFTS,
                  model: str | None = None, reasoning_effort: str | None = None,
                  check_ra_feasibility: bool = False, check_nonblocking: bool = False,
-                 check_cca_safety: bool = False, cca_assumptions: list[dict] | None = None) -> None:
+                 check_cca_safety: bool = False, cca_assumptions: list[dict] | None = None,
+                 single_pass_outline: bool = False, max_turns: int = DRAFT_MAX_TURNS,
+                 safety_rules_to_llm: str = "hidden") -> None:
         """Prepare a detached framework session; only the checks turned on check the outline.
 
         Args:
@@ -200,7 +218,17 @@ class OutlineDraft:
             cca_assumptions: Declared facts about the failure state the capture could not show, each
                 ``{"resource", "clear_of", "reason"}``: the resource counts as outside those regions until
                 an event moves it (captures are taken with the CCA bypassed).
+            single_pass_outline: Have the LLM write the whole outline in one reply (single-pass
+                generation); the checks turned on check it event by event, and a refused outline returns
+                with its findings for a complete rewrite.
+            max_turns: Provider requests the draft may make, lookups and rewrites included.
+            safety_rules_to_llm: How the LLM learns the selected safety rules: ``"hidden"`` (the default,
+                user decision 2026-10-28) gives them to the CCA alone, so the LLM meets a rule only in a CCA
+                refusal; ``"prompt"`` lists them in the outline prompt, and ``"knowledge_base"`` only offers
+                ``/safety_rules`` as a lookup.
         """
+        if safety_rules_to_llm not in ("prompt", "knowledge_base", "hidden"):
+            raise ValueError(f"safety_rules_to_llm must be prompt, knowledge_base or hidden, not {safety_rules_to_llm!r}")
         from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 
         self.prepared, self.session = _inputs(observations)
@@ -216,7 +244,8 @@ class OutlineDraft:
         self.prepared["prompt_safety_rules"] = deepcopy(self.rules)
         # A resource's conditions are the variables its model and its primitives declare (assumption A.2).
         multi_turn_diagnostic.declare_derived_conditions(self.prepared, {
-            jid: entry.get("execution_primitive_catalog") or []
+            jid: filter_recovery_primitive_catalog(
+                entry.get("execution_primitive_catalog") or [], resource_type=entry.get("resource_type", ""))
             for jid, entry in observations["prepared_recovery_request"]["recovery_resources"].items()})
         self.provider = SavedRecoveryProduct(observations, [], model=model, reasoning_effort=reasoning_effort)
         if check_ra_feasibility:
@@ -237,6 +266,11 @@ class OutlineDraft:
 
             self.prepared["recovery_session"]["check_cca_safety"] = True
             self.provider.cca_safety_capture = safety_inputs(observations, safety_files, cca_assumptions)
+        self.prepared["recovery_session"]["max_turns"] = max_turns
+        if single_pass_outline:
+            self.prepared["recovery_session"]["single_pass_outline"] = True
+        self.prepared["recovery_session"]["safety_rules_to_llm"] = safety_rules_to_llm
+        self._kind = "single-pass" if single_pass_outline else "multi_turn"
         self.planner = ProcessPlanner(self.provider, [])
         self.planner.nodes = deepcopy(observations.get("pending_nodes", []))
         self.provider.part_tracker = deepcopy(observations.get("part_tracker", {}))
@@ -245,12 +279,13 @@ class OutlineDraft:
         self.prepared["recovery_debug"] = {"artifact_directory": str(self.directory), "per_turn_debug_dir": str(self.directory)}
         self.prepared["_stop_after_multi_turn_phase"] = "outline"
         self._task: asyncio.Task | None = None
-        self._generating_message = "Generating multi_turn outline; validation is bypassed."
+        self._generating_message = f"Generating {self._kind} outline; validation is bypassed."
         self._stopped = False
         self.record = {"version": 2, "kind": "outline_draft", "pipeline": "execute_multi_turn_recovery",
             "outline_diagnostic_bypass": True, "ra_feasibility_check": check_ra_feasibility,
             "nonblocking_check": check_nonblocking, "cca_safety_check": check_cca_safety,
-            "cca_assumptions": deepcopy(cca_assumptions or []), "run_id": self.directory.name,
+            "cca_assumptions": deepcopy(cca_assumptions or []), "single_pass_outline": single_pass_outline,
+            "safety_rules_to_llm": safety_rules_to_llm, "max_turns": max_turns, "run_id": self.directory.name,
             "status": "draft_ready", "scenario": observations["scenario"],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "source_path": observations["source_path"], "source_sha256": observations["source_sha256"],
@@ -258,7 +293,7 @@ class OutlineDraft:
             "selected_safety_files": list(safety_files), "safety_rules": deepcopy(self.rules),
             "llm_settings": deepcopy(self.provider.llm_settings),
             "execution_authorized": False, "transition_trace": [], "provider_calls": 0,
-            "llm_turns": [], "retrievals": [], "message": "Ready for an unvalidated multi_turn outline."}
+            "llm_turns": [], "retrievals": [], "message": f"Ready for an unvalidated {self._kind} outline."}
         if grounded is not None:
             self.record["fault_grounding"] = deepcopy(grounded["fault_event"])
         if moved:
@@ -331,8 +366,8 @@ class OutlineDraft:
         if handoff.get("complete"):
             assumed = "; ".join(row["reason"] for row in handoff.get("assumptions") or [] if row.get("reason"))
             if not assumed:
-                return f"{kind} multi_turn outline with proposed nominal handoff."
-            return with_resource_names(f"{kind} multi_turn outline with proposed nominal handoff; assumed, not "
+                return f"{kind} {self._kind} outline with proposed nominal handoff."
+            return with_resource_names(f"{kind} {self._kind} outline with proposed nominal handoff; assumed, not "
                                        f"checked: {assumed}.", resource_names(self.prepared))
         reasons = "; ".join(handoff.get("not_connected_reasons") or ["its recorded handoff conditions do not hold"])
         return with_resource_names(f"The LLM declared the recovery complete; nominal work cannot take over: {reasons}.",
@@ -354,7 +389,7 @@ class OutlineDraft:
                                         ("the CCA nonblocking check", self.record["nonblocking_check"]),
                                         ("the CCA safety check", self.record.get("cca_safety_check"))) if on]
         checked = f"{' and '.join(checks)} {'is' if len(checks) == 1 else 'are'} on" if checks else "validation is bypassed"
-        self._generating_message = f"Generating multi_turn outline; {checked}."
+        self._generating_message = f"Generating {self._kind} outline; {checked}."
         self.record.update(status="generating_draft", message=self._generating_message)
         self._save()
         try:
@@ -362,37 +397,39 @@ class OutlineDraft:
                 await multi_turn.execute_multi_turn_recovery(self.planner, self.prepared,
                     session_state=self.prepared.get("multi_turn_session_state"))
                 self.session = self.prepared.get("multi_turn_session_state", {})
-                self.record["transition_trace"] = deepcopy(self.session.get("accepted_outline_prefix", []))
-                self.record["nominal_handoff"] = deepcopy(self.session.get("diagnostic_nominal_handoff", {}))
-                if self.record["ra_feasibility_check"]:
-                    self.record["ra_feasibility_checks"] = deepcopy(self.session.get("ra_feasibility_checks", []))
-                if self.record["nonblocking_check"]:
-                    self.record["cca_nonblocking_checks"] = deepcopy(self.session.get("cca_nonblocking_checks", []))
-                if self.record.get("cca_safety_check"):
-                    self.record["cca_safety_checks"] = deepcopy(self.session.get("cca_safety_checks", []))
+                self._record_session()
                 status = self.session.get("status")
                 if status == "ready_for_primitive_generation":
-                    self.record.update(status="draft", message=self._finished_message())
+                    self.record.update(status="draft", message=self._finished_message(),
+                                       stop_cause={"cause": "declared_complete", "session_status": status})
                     break
                 if status not in {"paused_after_outline_turn", "running"}:
                     self.record.update(status="draft_incomplete",
                         message="; ".join(row.get("reason", "") for row in self.session.get("outline_validation_findings", []))
-                        or f"multi_turn stopped at {status}.")
+                        or f"multi_turn stopped at {status}.",
+                        stop_cause={"cause": "turn_budget" if status == "des_turn_limit" else "session_status",
+                                    "session_status": status})
                     break
                 budget = self.session.get("max_turns", DRAFT_MAX_TURNS)
                 if self.session.get("turn_index", 0) >= budget:
-                    self.record.update(status="draft_incomplete", message=f"multi_turn reached its {budget}-turn budget.")
+                    self.record.update(status="draft_incomplete", message=f"multi_turn reached its {budget}-turn budget.",
+                                       stop_cause={"cause": "turn_budget", "session_status": status})
                     break
                 self._save()
             if self._stopped:
-                self.record.update(status="stopped", message="Draft generation stopped; captured responses retained.")
+                self.record.update(status="stopped", message="Draft generation stopped; captured responses retained.",
+                                   stop_cause={"cause": "stopped", "session_status": self.session.get("status")})
         except (RuntimeError, OSError, TypeError, LookupError, AttributeError, ValueError) as exc:
             logger.warning("Multi_turn outline draft failed: %s", exc)
-            self.record.update(status="draft_incomplete", message=str(exc))
+            self.record.update(status="draft_incomplete", message=str(exc),
+                               stop_cause={"cause": "error", "exception": type(exc).__name__})
         finally:
+            # A turn that raised left its lookups and checks in the copy the loop keeps current, not in self.session.
+            self.session = self.prepared.get("multi_turn_session_state") or self.session
+            self._record_session()
             self.record["elapsed_seconds"] = time.monotonic() - started
             self.record["request_summary"] = {key: deepcopy(value) for key, value in self.provider._last_structured_request.items()
-                if key not in {"messages", "response_format", "tools"}}
+                if key not in {"messages", "system", "response_format", "tools"}}
             self.record["usage"] = []
             requests = sorted(self.directory.glob("recovery_outline/requests/*/*_request.json"))
             self.record["llm_turns"] = [{"turn": r["turn"], "stage": r["stage"],
@@ -401,9 +438,30 @@ class OutlineDraft:
             for path in sorted(self.directory.glob("recovery_outline/requests/*/*_response.json")):
                 payload = json.loads(path.read_text(encoding="utf-8")).get("raw_response", {})
                 if isinstance(payload, dict) and payload.get("usage"):
-                    self.record["usage"].append({"source": str(path.relative_to(self.directory)), "usage": payload["usage"]})
+                    self.record["usage"].append({"source": str(path.relative_to(self.directory)),
+                                                 "usage": _token_usage(payload["usage"])})
             self.record["retrievals"] = deepcopy(self.session.get("outline_requested_refs", []))
+            # One decision per provider request: lookups, accepted and refused proposals, the completion.
+            decisions = [json.loads(path.read_text(encoding="utf-8")).get("decision")
+                         for path in sorted(self.directory.glob("recovery_outline/turns/turn_*_outline.json"))]
+            self.record["turn_decisions"] = {decision: decisions.count(decision) for decision in dict.fromkeys(decisions)}
+            self.record["turn_decision_order"] = decisions
+            self.record.setdefault("stop_cause", {"cause": "not_recorded"}).update(
+                turn_index=self.session.get("turn_index"), max_turns=self.record["max_turns"])
             self._save()
+
+    def _record_session(self) -> None:
+        """Copy the planning state's outline, handoff and check records into the draft record."""
+        self.record["transition_trace"] = deepcopy(self.session.get("accepted_outline_prefix", []))
+        self.record["nominal_handoff"] = deepcopy(self.session.get("diagnostic_nominal_handoff", {}))
+        if self.record["ra_feasibility_check"]:
+            self.record["ra_feasibility_checks"] = deepcopy(self.session.get("ra_feasibility_checks", []))
+        if self.record["nonblocking_check"]:
+            self.record["cca_nonblocking_checks"] = deepcopy(self.session.get("cca_nonblocking_checks", []))
+        if self.record.get("cca_safety_check"):
+            self.record["cca_safety_checks"] = deepcopy(self.session.get("cca_safety_checks", []))
+        if self.record["single_pass_outline"]:
+            self.record["single_pass_checks"] = deepcopy(self.session.get("single_pass_checks", []))
 
     def stop(self) -> None:
         """Stop after the in-flight provider request is retained."""
@@ -439,3 +497,52 @@ def latest_draft(observations: dict, *, root: Path = DRAFTS) -> Path | None:
             continue
         return path
     return None
+
+
+# Summaries of finished drafts by path, refreshed when a draft's record changes.
+_CHECKED_SUMMARIES: dict[Path, tuple[int, dict | None]] = {}
+
+
+def _checked_summary(path: Path) -> dict | None:
+    """Summarize a finished draft that the RA and both CCA checks accepted, or return None."""
+    record = json.loads(path.read_text(encoding="utf-8"))
+    checks = ("ra_feasibility_check", "cca_safety_check", "nonblocking_check")
+    if (record.get("kind") != "outline_draft" or record.get("status") != "draft"
+            or record.get("execution_authorized") is not False or any(record.get(key) is not True for key in checks)
+            or not (record.get("nominal_handoff") or {}).get("complete")):
+        return None
+    settings = record.get("llm_settings") or {}
+    return {"path": str(path), "run_id": record.get("run_id"), "created_at": record.get("created_at"),
+            "source_path": record.get("source_path"), "model": settings.get("model"),
+            "reasoning_effort": settings.get("reasoning_effort"),
+            "safety_rules_to_llm": record.get("safety_rules_to_llm"),
+            "single_pass_outline": bool(record.get("single_pass_outline")),
+            "events": len(record.get("transition_trace") or [])}
+
+
+def checked_drafts(source_path: str, *, root: Path = DRAFTS) -> list[dict]:
+    """List one capture's finished drafts that the RA and both CCA checks accepted, newest first.
+
+    Args:
+        source_path: The capture's saved observations file.
+        root: Directory holding the drafts.
+
+    Returns:
+        One summary per draft; ``load_draft`` still verifies the capture before a draft is used.
+    """
+    source = Path(source_path).resolve()
+    rows = []
+    for path in root.glob("draft_*/draft.json"):
+        try:
+            mtime = path.stat().st_mtime_ns
+            cached = _CHECKED_SUMMARIES.get(path)
+            if cached is None or cached[0] != mtime:
+                cached = (mtime, _checked_summary(path))
+                _CHECKED_SUMMARIES[path] = cached
+        except (OSError, ValueError):
+            # A draft being written reads as unfinished until its next change.
+            continue
+        summary = cached[1]
+        if summary is not None and Path(str(summary["source_path"])).resolve() == source:
+            rows.append(summary)
+    return sorted(rows, key=lambda row: str(row["created_at"]), reverse=True)

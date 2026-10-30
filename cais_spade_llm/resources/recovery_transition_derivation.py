@@ -7,8 +7,10 @@ from math import cos, isfinite, sin
 from typing import Any
 
 _MISSING = object()
-_CONDITIONS = {"equals", "not_equals", "in", "not_in", "exists", "equals_from_param", "not_equals_from_param"}
-_EFFECTS = {"set", "set_unknown", "set_from_param", "set_from_param_any_of", "pose_absolute_from_params", "pose_relative_from_params"}
+_CONDITIONS = {"equals", "not_equals", "in", "not_in", "exists", "equals_from_param", "not_equals_from_param",
+               "matches", "not_matches"}
+_EFFECTS = {"set", "set_unknown", "set_from_param", "set_from_param_any_of", "pose_absolute_from_params",
+            "pose_relative_from_params", "set_status"}
 _ARRAY_POSE_PREFIX = "pose_absolute_from_"
 _RESOURCE_NAMES = {"resource_state": ("current_state",), "resource_location": ("current_location",)}
 _PART_NAMES = {
@@ -139,7 +141,14 @@ def _conditions(conditions: dict, state: dict, params: dict, declarations: dict)
                 return False, f"Malformed primitive condition {operator!r} for {field!r}"
             if operator == "exists" and type(expected) is not bool:
                 return False, f"Malformed primitive exists condition for {field!r}"
-            if operator in {"equals", "equals_from_param"}:
+            if operator in {"matches", "not_matches"} and not isinstance(expected, dict):
+                return False, f"Malformed primitive condition {operator!r} for {field!r}"
+            if operator in {"matches", "not_matches"}:
+                # A record matches when it has every stated field value, as the RA reads a part's job record.
+                passed = isinstance(value, dict) and all(_equal(value.get(name), item) for name, item in expected.items())
+                if operator == "not_matches":
+                    passed = not passed
+            elif operator in {"equals", "equals_from_param"}:
                 passed = _equal(value, expected)
             elif operator in {"not_equals", "not_equals_from_param"}:
                 passed = not _equal(value, expected)
@@ -154,6 +163,24 @@ def _conditions(conditions: dict, state: dict, params: dict, declarations: dict)
     return True, None
 
 
+def _filled(template: Any, params: dict) -> tuple[Any, str | None]:
+    """Fill a declared value's parameter slots, written ``{"set_from_param": name}``, from the bound parameters."""
+    if isinstance(template, dict) and set(template) == {"set_from_param"}:
+        name = template["set_from_param"]
+        if not isinstance(name, str) or name not in params:
+            return None, f"Missing primitive effect parameter {name!r}"
+        return deepcopy(params[name]), None
+    if isinstance(template, (dict, list)):
+        items = template.items() if isinstance(template, dict) else enumerate(template)
+        filled = {} if isinstance(template, dict) else [None] * len(template)
+        for key, item in items:
+            filled[key], error = _filled(item, params)
+            if error:
+                return None, error
+        return filled, None
+    return deepcopy(template), None
+
+
 def _apply(effects: dict, state: dict, params: dict, declarations: dict) -> tuple[dict | None, str | None]:  # noqa: C901, PLR0912, PLR0915 - explicit fail-closed effect operators
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_primitives import (
         apply_effects_to_snapshot,
@@ -161,9 +188,18 @@ def _apply(effects: dict, state: dict, params: dict, declarations: dict) -> tupl
 
     result = deepcopy(state)
     for field, effect in effects.items():
+        scope, key = _field(field, declarations)
+        if isinstance(effect, list):
+            # A record effect appends its entries to the record, such as a part's completed processes.
+            entries, error = _filled(effect, params)
+            if error:
+                return None, error
+            if not isinstance(result[scope].get(key), list):
+                return None, f"Missing record for effect {field!r}"
+            result[scope][key] = [*deepcopy(result[scope][key]), *entries]
+            continue
         if not isinstance(effect, dict) or len(effect) != 1:
             return None, f"Unsupported primitive effect for {field!r}"
-        scope, key = _field(field, declarations)
         operator, binding = next(iter(effect.items()))
         array_parameter = _array_pose_parameter(operator)
         if operator not in _EFFECTS and array_parameter is None:
@@ -198,12 +234,24 @@ def _apply(effects: dict, state: dict, params: dict, declarations: dict) -> tupl
                 pose = result[scope].get(key)
                 if not isinstance(pose, dict) or any(type(pose.get(axis)) not in (int, float) or not isfinite(pose[axis]) for axis in ("x", "y", "z")):
                     return None, f"Missing starting pose for relative effect {field!r}"
-        # Reuse the primitive engine only after checking its permissive defaults.
-        source = {"resource_type": "resource"}
-        if key in result[scope]:
-            source["value"] = deepcopy(result[scope][key])
-        projected = apply_effects_to_snapshot({"params": params}, {"effects": {"value": effect}}, source)
-        value = projected.get("resource_core", {}).get("value", _MISSING)
+        if operator == "set_status":
+            # A status effect keeps the record, such as a part's job, and changes only its status.
+            if not isinstance(result[scope].get(key), dict):
+                return None, f"Missing record for status effect {field!r}"
+            value = {**deepcopy(result[scope][key]), "status": binding}
+        else:
+            if operator == "set":
+                # A declared value may hold parameter slots, such as the job record a command starts.
+                filled, error = _filled(binding, params)
+                if error:
+                    return None, error
+                effect = {"set": filled}
+            # Reuse the primitive engine only after checking its permissive defaults.
+            source = {"resource_type": "resource"}
+            if key in result[scope]:
+                source["value"] = deepcopy(result[scope][key])
+            projected = apply_effects_to_snapshot({"params": params}, {"effects": {"value": effect}}, source)
+            value = projected.get("resource_core", {}).get("value", _MISSING)
         if value is _MISSING:
             return None, f"Primitive effect did not establish {field!r}"
         declaration = declarations.get(key, {})
@@ -213,7 +261,9 @@ def _apply(effects: dict, state: dict, params: dict, declarations: dict) -> tupl
             and (effect.get("set_from_param") == "part_name"
                  or "part_name" in effect.get("set_from_param_any_of", []))
         )
-        if isinstance(domain, list) and not grounded_held_part and not any(_equal(value, item) for item in domain):
+        # A domain declared incomplete lists only the values normal production uses, so it refuses none.
+        if (isinstance(domain, list) and declaration.get("domain_complete") is not False and not grounded_held_part
+                and not any(_equal(value, item) for item in domain)):
             return None, f"Primitive effect {field!r} is outside its declared state domain"
         result[scope][key] = deepcopy(value)
         if key in result["unknown"][scope]:

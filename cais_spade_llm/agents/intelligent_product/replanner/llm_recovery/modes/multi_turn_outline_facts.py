@@ -77,6 +77,29 @@ def schema_without_params(schema: Any) -> Any:
     return result
 
 
+def schema_with_outline_events(schema: dict) -> dict:
+    """Return a candidate response schema as a single-pass one: the whole outline in ``events``.
+
+    Args:
+        schema: Outline response schema offering ``candidate_events`` and, optionally,
+            ``selected_candidate_index``.
+
+    Returns:
+        A copy whose ordered ``events`` array, with the same event form, takes the place of both.
+    """
+    result = deepcopy(schema)
+    body = result["schema"]
+    candidates = body["properties"]["candidate_events"]
+    events = {"type": "array", "minItems": 1, "items": deepcopy(candidates["items"]),
+              "description": "The whole recovery outline: every recovery event, in the order they happen."}
+    body["properties"] = {("events" if name == "candidate_events" else name): (events if name == "candidate_events" else value)
+                          for name, value in body["properties"].items() if name != "selected_candidate_index"}
+    if isinstance(body["properties"].get("context_requests"), dict):
+        body["properties"]["context_requests"]["description"] = (
+            "Use [] for proposed events; need_context requires 1 to 8 references and no events.")
+    return result
+
+
 _NEIGHBOR_END_STATE_SCHEMA = {
     "type": "object", "additionalProperties": {"type": "object"},
     "description": ("Changes to other resources' variables caused by moving the event's part, by resource name: "
@@ -145,7 +168,8 @@ def response_with_jids(response: dict, prepared: dict) -> dict:
     """Map resource names in an outline response back to the JIDs the runtime validates.
 
     Args:
-        response: LLM response with ``candidate_events`` or ``context_requests``.
+        response: LLM response with ``candidate_events``, a single-pass ``events`` list or
+            ``context_requests``.
         prepared: Recorded failure context holding ``observation_jids``.
 
     Returns:
@@ -155,26 +179,27 @@ def response_with_jids(response: dict, prepared: dict) -> dict:
         exactly.
     """
     mapped = dict(response)
-    events = []
-    for event in response.get("candidate_events") or []:
-        if not isinstance(event, dict):
-            events.append(event)
-            continue
-        row = dict(event)
-        name = row.pop("resource", None) or row.get("resource_jid")
-        row["resource_jid"] = _jid(name, prepared)
-        end = row.get("expected_end_state")
-        if (isinstance(end, dict) and name is not None and end.get("part_location") == name
-                and row.get("part_name") and end.get("held_part") == row["part_name"]):
-            row["expected_end_state"] = {**end, "part_location": row["resource_jid"]}
-        if isinstance(row.get("neighbor_end_state"), dict):
-            row["neighbor_end_state"] = {_jid(place, prepared): values for place, values in row["neighbor_end_state"].items()}
-        events.append(row)
-    if "candidate_events" in response:
-        mapped["candidate_events"] = events
+    for key in ("candidate_events", "events"):
+        if key in response:
+            mapped[key] = [_event_with_jids(event, prepared) for event in response[key] or []]
     if isinstance(response.get("context_requests"), list):
         mapped["context_requests"] = [_ref_with_jid(ref, prepared) for ref in response["context_requests"]]
     return mapped
+
+
+def _event_with_jids(event: Any, prepared: dict) -> Any:
+    if not isinstance(event, dict):
+        return event
+    row = dict(event)
+    name = row.pop("resource", None) or row.get("resource_jid")
+    row["resource_jid"] = _jid(name, prepared)
+    end = row.get("expected_end_state")
+    if (isinstance(end, dict) and name is not None and end.get("part_location") == name
+            and row.get("part_name") and end.get("held_part") == row["part_name"]):
+        row["expected_end_state"] = {**end, "part_location": row["resource_jid"]}
+    if isinstance(row.get("neighbor_end_state"), dict):
+        row["neighbor_end_state"] = {_jid(place, prepared): values for place, values in row["neighbor_end_state"].items()}
+    return row
 
 
 def _ref_with_jid(ref: Any, prepared: dict) -> Any:
@@ -348,7 +373,8 @@ def _value_text(value: Any) -> str:
     if isinstance(value, list):
         return "(" + ", ".join(_value_text(item) for item in value) + ")"
     if isinstance(value, bool) or value is None:
-        return {True: "true", False: "false", None: "none"}[value]
+        # Written as the JSON value an event states, so an empty value is not copied back as the text "none".
+        return {True: "true", False: "false", None: "null"}[value]
     if isinstance(value, float):
         return f"{round(value, 3):g}"
     return str(value)
@@ -788,9 +814,9 @@ def _resource_row(jid: str, prepared: dict, session: dict, names: dict[str, str]
     for field, value in _displayed_fields(jid, session).items():
         # Every field is shown under its variable name, the name an event states it by.
         if field == "held_part":
-            items.append(f"held_part {names.get(value, value) if value else 'none'}")
+            items.append(f"held_part {names.get(value, value) if value else 'null'}")
         elif field == "resource_location":
-            items.append(f"resource_location {names.get(value, value)}")
+            items.append(f"resource_location {_value_text(names.get(value, value))}")
         elif "." in field:
             prefix, key = field.split(".", 1)
             # A per-part family shows only its set entries, or none.
@@ -856,7 +882,7 @@ def part_rows(prepared: dict, session: dict, names: dict[str, str]) -> list[str]
     return [f"{', '.join(members)}  {text}" for text, members in groups.items()]
 
 
-def _ref_lines(prepared: dict) -> list[str]:
+def _ref_lines(prepared: dict, session: dict) -> list[str]:
     """List the fact references, each described by what it returns."""
     from .multi_turn_context import diagnostic_refs
 
@@ -874,7 +900,9 @@ def _ref_lines(prepared: dict) -> list[str]:
             ("/parts/<name>/target", "where the part belongs in the finished product (its assembly location and slot pose)"),
             *([("/parts/<name>/pose_relations", relation)] if "/parts/<name>/pose_relations" in recorded else []),
             *([("/regions", "area bounds in world coordinates")] if "/regions/<name>" in recorded else []),
-            *([("/geometry", "station poses and sizes, robot bases and floor extent")] if "/geometry/<key>" in recorded else [])]
+            *([("/geometry", "station poses and sizes, robot bases and floor extent")] if "/geometry/<key>" in recorded else []),
+            *([("/safety_rules", "the safety rules your events, and normal production after them, must keep")]
+              if session.get("safety_rules_to_llm") == "knowledge_base" else [])]
     return [f"- {ref}: {text}" for ref, text in rows]
 
 
@@ -894,6 +922,6 @@ def outline_template(prepared: dict, session: dict) -> dict[str, Any]:
     part_names = sorted(session.get("symbolic_parts", {}))
     return {"failure": failure_lines(prepared, session), "goal": goal_lines(prepared, session),
             "resources": [_resource_row(jid, prepared, session, names) for jid in resource_jids],
-            "parts": part_rows(prepared, session, names), "refs": _ref_lines(prepared),
+            "parts": part_rows(prepared, session, names), "refs": _ref_lines(prepared, session),
             "resource_jids": resource_jids, "part_names": part_names, "resource_names": names,
             "shown": _shown_values(resource_jids, part_names, session)}

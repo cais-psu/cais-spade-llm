@@ -68,6 +68,11 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
             if "controller_goal_id" in failure else {})
     jobs = {rid: [{key: deepcopy(job.get(key)) for key in _JOB_FIELDS} for job in (record.get("jobs") or {}).values()]
             for rid, record in (observations.get("processing_observations") or {}).items()}
+    # Each machine's own job record, as the machine reports its state from it.
+    machine_records = {rid: {"active_job": record.get("active_job"), "selected_program": record.get("selected_program"),
+                             "jobs": {key: {field: deepcopy(job.get(field)) for field in _JOB_FIELDS}
+                                      for key, job in (record.get("jobs") or {}).items()}}
+                       for rid, record in (observations.get("processing_observations") or {}).items()}
     unavailable = list(observations.get("unavailable_resources") or [])
     if observations.get("schema_version") == RAW_SCHEMA_VERSION:
         reports = {rid: row for rid, row in (observations.get("fault_reports") or {}).items() if isinstance(row, dict)}
@@ -111,6 +116,7 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
                           for node in nodes],
         "controller_goal": goal,
         "machine_jobs": jobs,
+        "machine_records": machine_records,
         "unavailable_resources": unavailable,
         "reported_fault_states": reported,
         "fault_report_sources": report_sources,
@@ -135,6 +141,9 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
                            for rid, result in cancelled.items()},
         "base_poses": {rid: deepcopy(row["base_pose"]) for rid, row in resources.items()
                        if isinstance(row.get("base_pose"), list)},
+        "resource_poses": {rid: deepcopy(row["current_pose"]) for rid, row in resources.items()
+                           if isinstance(row.get("current_pose"), list)},
+        "located_at_finish": _located_at_finish(observations),
         "jids": deepcopy(observations.get("jids") or {}),
         "sources": {
             "transitions": "/transitions/*/{kind,acknowledgement,before,after,product_after}",
@@ -143,6 +152,7 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
             "pending_nodes": sources["pending_nodes"],
             "controller_goal": "/failure (controller goal report)",
             "machine_jobs": "/processing_observations/*/jobs",
+            "machine_records": "/processing_observations/*/{active_job,selected_program,jobs}",
             "unavailable_resources": "/unavailable_resources",
             "reported_fault_states": sources["reported_fault_states"],
             "fault_report_sources": "/fault_reports/*/source",
@@ -155,8 +165,23 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
             "regions": "/physical_evidence/geometry/regions/*/bounds",
             "cancelled_work": "/checkpoint_motion_cancellation/resources/*/worker_result",
             "base_poses": "/physical_evidence/resources/*/base_pose",
+            "resource_poses": "/physical_evidence/resources/*/current_pose",
+            "located_at_finish": "/inputs/scene (configured activity models: finishes that set resource_location)",
         },
     }
+
+
+def _located_at_finish(observations: dict) -> dict:
+    """Return each resource's running states whose activity finish, in its configured model, sets its location."""
+    scene = (observations.get("inputs") or {}).get("scene")
+    if not isinstance(scene, dict):
+        return {}
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    return {rid: sorted({event["guards"]["resource_state"]["equals"] for event in model.get("events") or []
+                         if "start_event_id" in event and "resource_location" in (event.get("updates") or {})
+                         and "equals" in ((event.get("guards") or {}).get("resource_state") or {})})
+            for rid, model in build_environment_models(scene).items()}
 
 
 def expected_state(raw: dict) -> dict:
@@ -297,6 +322,41 @@ def detect_cancelled_work(raw: dict, settings: dict) -> list[dict]:
     return signals
 
 
+def _apply_machine_record(raw: dict, rid: str, values: dict, parts: dict, updates: list[dict],
+                          faulted: list[str]) -> None:
+    """After a fault, ground a machine and the jobs of its parts as the machine's own job record reports them.
+
+    The DES bookkeeping stopped at the fault. The machine's state is the state of the job of the part it
+    holds, as ``machine_public_state`` reads it (an interrupted job is the machine's observed fault state),
+    and a part whose current process names this machine carries its job's state, or is recorded as completed
+    when the job is. A fault state the device reports itself takes precedence.
+    """
+    from cais_spade_llm.resources.machine.machine_jobs import machine_public_state, part_job_states
+
+    record = raw["machine_records"].get(rid)
+    if rid not in faulted or not record:
+        return
+    state = machine_public_state(record, values).get("resource_state")
+    if rid not in raw["reported_fault_states"] and state is not None and state != values.get("resource_state"):
+        values["resource_state"] = state
+        updates.append({"resource_id": rid, "field": "resource_state", "value": state})
+    for part, job_state in part_job_states(record).items():
+        row = parts.get(part) or {}
+        process = row.get("current_process")
+        if not isinstance(process, dict) or process.get("machine") != rid:
+            continue
+        if job_state == "completed":
+            # A completed job is no current process: as complete_job declares, it is cleared and its result recorded.
+            row["current_process"] = None
+            row["processCompleted"] = [*(row.get("processCompleted") or []),
+                                       {"process": process.get("process"), "result": process.get("result")}]
+            updates.append({"part_name": part, "current_process": None,
+                            "processCompleted": deepcopy(row["processCompleted"])})
+        elif process.get("status") != job_state:
+            process["status"] = job_state
+            updates.append({"part_name": part, "current_process": deepcopy(process)})
+
+
 def _reported_by(raw: dict, rid: str) -> dict:
     # The device's own words are passed through: the conditions it reports and its name. No
     # component or condition is inferred from them.
@@ -388,11 +448,25 @@ def ground_failure(observations: dict, *, settings: dict | None = None) -> dict:
         if rid in raw["reported_fault_states"]:
             values["resource_state"] = raw["reported_fault_states"][rid]
             updates.append({"resource_id": rid, "field": "resource_state", "value": values["resource_state"]})
+        _apply_machine_record(raw, rid, values, parts, updates, faulted)
         # A reported condition in configured words is the model condition those words name. It is not a
         # belief update: the live valuation has no such field, so it reaches only the projected state.
         for name, words in raw["fault_report_conditions"].get(rid, {}).items():
             values.update(deepcopy(settings.get("fault_report_conditions", {}).get(name, {}).get(words, {})))
         values["faults"] = [row["rule"] for row in signals if row.get("resource_id") == rid]
+    # A faulted resource that reports the running state of an activity whose finish sets its location stopped
+    # between the start and that finish: as for stopped work below, it is not at the named location it set out
+    # from but at its measured pose (a mobile base on the floor, an arm by its measured tool pose).
+    for rid in faulted:
+        values = resources.get(rid)
+        running = (expected["resources"].get(rid) or {}).get("resource_state")
+        pose = (_planar_record(raw["base_poses"][rid]) if rid in raw["base_poses"]
+                else _pose_record(raw["resource_poses"].get(rid)))
+        if values is None or running not in raw["located_at_finish"].get(rid, []) or pose is None:
+            continue
+        if values.get("resource_location") is not None:
+            updates.append({"resource_id": rid, "field": "resource_location", "value": None})
+        values.update(resource_location=None, current_pose=pose)
     # The stop cancelled other resources' work. Each is left as it stopped: its activity's start is
     # undone, custody is as measured, and a base the work moved is at its measured pose rather than
     # at a named location, which only the activity's finish would have set.
@@ -639,8 +713,10 @@ def apply_grounding(prepared: dict, observations: dict) -> dict | None:
             if "held_part" in row and "held_part" in values:
                 row["held_part"] = values["held_part"]
             row.update({field: deepcopy(values[field]) for field in reported_fields & set(values)})
-    # A resource whose work the stop cancelled is shown as it stopped (rule A3 in ground_failure).
-    stopped = {row["resource_id"] for row in event["signals"] if row.get("rule") == "A3"}
+    # A resource whose work the stop cancelled is shown as it stopped (rule A3 in ground_failure), and so is a
+    # faulted resource that stopped between an activity's start and the finish that would set its location.
+    stopped = {row["resource_id"] for row in event["signals"] if row.get("rule") == "A3"} | {
+        rid for rid in event["faulted_resources"] if "current_pose" in (grounded["resources"].get(rid) or {})}
     for row in (prepared["llm_input"].get("observed_runtime_state") or {}).get("resources") or []:
         rid = next((rid for rid, jid in jids.items() if jid == row.get("resource_jid")), None)
         values = grounded["resources"].get(rid) if rid in stopped else None

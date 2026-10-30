@@ -380,6 +380,89 @@ def test_malformed_response_is_recorded_before_parsing(tmp_path, monkeypatch):
     assert list(tmp_path.glob("requests/*/*_parse_error.json"))
 
 
+def _claude_message(text, stop_reason="end_turn"):
+    return SimpleNamespace(type="message", role="assistant", stop_reason=stop_reason,
+                           content=[SimpleNamespace(type="thinking", thinking=""), SimpleNamespace(type="text", text=text)],
+                           usage=SimpleNamespace(input_tokens=120, output_tokens=30, cache_read_input_tokens=0,
+                                                 cache_creation_input_tokens=0))
+
+
+def _claude_client(message, calls):
+    class Stream:
+        def __enter__(self):
+            return SimpleNamespace(get_final_message=lambda: message)
+
+        def __exit__(self, *exc):
+            return False
+
+    def stream(**kwargs):
+        calls.append(kwargs)
+        return Stream()
+
+    client = SimpleNamespace(messages=SimpleNamespace(stream=stream))
+    client.with_options = Mock(return_value=client)
+    return client
+
+
+def test_claude_model_gets_the_same_prompt_and_schema_as_a_hint_and_is_recorded(tmp_path, monkeypatch):
+    from cais_spade_llm.ui.components.recovery_turns import _response_choices
+
+    calls = []
+    reply = {"thought": "Need facts", "decision": "need_context", "context_requests": ["/resources"]}
+    client = _claude_client(_claude_message(json.dumps(reply)), calls)
+    monkeypatch.setattr(llm_agent, "_claude_client", lambda: client)
+    # Drafts borrow the method on an object that is not an LlmAgent (SavedRecoveryProduct).
+    borrower = SimpleNamespace(model="claude-sonnet-5-5", reasoning_effort="medium", instructions="")
+    schema = {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}
+    with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
+        response = asyncio.run(llm_agent.LlmAgent.ask_llm_structured(borrower, "Read recorded facts",
+            include_agent_instructions=False, response_format={"name": "outline", "schema": schema, "strict": False},
+            max_attempts=1))
+    assert response == reply
+    client.with_options.assert_called_once_with(max_retries=0)
+    sent = calls[0]
+    # The prompt is unchanged; the schema is stated in the system text, not enforced.
+    assert sent["messages"] == [{"role": "user", "content": "Read recorded facts"}]
+    assert sent["system"] == [{"type": "text", "text": "Reply with only one JSON object that follows this JSON schema:\n"
+                                                       + json.dumps(schema)}]
+    assert sent["output_config"] == {"effort": "medium"} and "response_format" not in sent
+    # Thinking is asked for explicitly: Opus 4.7 and 4.8 would otherwise answer without thinking.
+    assert sent["thinking"] == {"type": "adaptive"}
+    request = json.loads(next(tmp_path.glob("requests/*/*_request.json")).read_text())
+    raw = json.loads(next(tmp_path.glob("requests/*/*_response.json")).read_text())["raw_response"]
+    assert request["payload"] == sent
+    assert raw["usage"]["input_tokens"] == 120
+    assert json.loads(_response_choices(raw)[0]["message"]["content"]) == reply
+
+
+def test_claude_prompt_is_split_before_its_first_changing_section_for_the_cache(monkeypatch, tmp_path):
+    calls = []
+    client = _claude_client(_claude_message(json.dumps({"thought": "t"})), calls)
+    monkeypatch.setattr(llm_agent, "_claude_client", lambda: client)
+    borrower = SimpleNamespace(model="claude-opus-4-7", reasoning_effort="medium", instructions="")
+    prompt = "Task and Role\nPlan.\n\nKnowledge Base\n- /parts\n\nValidation Feedback\n- refused\n\nResources\nM2 idle"
+    with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
+        asyncio.run(llm_agent.LlmAgent.ask_llm_structured(borrower, prompt, include_agent_instructions=False,
+            response_format={"name": "outline", "schema": {}}, max_attempts=1))
+    content = calls[0]["messages"][0]["content"]
+    # The same text, in two blocks: what stays the same is marked for reuse, the changing sections follow.
+    assert "".join(block["text"] for block in content) == prompt
+    assert content[0] == {"type": "text", "text": "Task and Role\nPlan.\n\nKnowledge Base\n- /parts",
+                          "cache_control": {"type": "ephemeral"}}
+    assert content[1]["text"].startswith("\n\nValidation Feedback\n") and "cache_control" not in content[1]
+
+
+@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
+def test_claude_reply_cut_short_is_recorded_and_ends_the_call(tmp_path, monkeypatch, stop_reason):
+    monkeypatch.setattr(llm_agent, "_claude_client", lambda: _claude_client(_claude_message("{", stop_reason), []))
+    agent = _agent()
+    agent.model = "claude-haiku-5-5"
+    with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
+        with pytest.raises(RuntimeError, match=stop_reason):
+            asyncio.run(agent.ask_llm_structured("prompt", response_format={"name": "outline", "schema": {}}))
+    assert len(list(tmp_path.glob("requests/*/*_response.json"))) == 1
+
+
 def test_ui_cannot_promote_guessed_or_missing_request_to_exact_capture(tmp_path):
     record = tmp_path / "multi_turn_turn01_outline_result_20260101T010101.json"
     record.write_text(json.dumps({"request_record_paths": [str(tmp_path / "missing.json")]}))

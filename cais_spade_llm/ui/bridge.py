@@ -39211,6 +39211,19 @@ class SystemBridge:
 
         return example_for_bridge(self).set_cca_check(enabled)
 
+    def set_recovery_safety_rules_lookup(self, enabled: bool) -> dict[str, Any]:
+        """Offer or withhold the selected safety rules as the /safety_rules lookup in the next Offline outline.
+
+        Args:
+            enabled: Let the LLM request the rules from the Knowledge Base; withheld, the CCA alone holds them.
+
+        Returns:
+            The bridge-owned workflow state.
+        """
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).set_safety_rules_lookup(enabled)
+
     def get_default_recovery_observations(self) -> dict[str, str]:
         """Return the four retained failure inputs available for fresh attempts."""
         from cais_spade_llm.recovery_framework.part_slippage_example import default_observation_paths
@@ -39232,6 +39245,19 @@ class SystemBridge:
         from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
 
         return example_for_bridge(self).prepare_offline()
+
+    def load_recovery_outline_draft(self, draft_path: str) -> dict[str, Any]:
+        """Load a finished checked outline draft for review and primitive composition.
+
+        Args:
+            draft_path: One of the selected saved observations' listed checked drafts.
+
+        Returns:
+            The bridge-owned workflow state.
+        """
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).load_checked_draft(draft_path)
 
     async def part_slippage_action(self, action: str, *, feedback: str = "") -> dict[str, Any]:
         """Continue, regenerate, execute, stop or reset the current example."""

@@ -38,6 +38,11 @@ def _implementation_files(root: Path) -> set[Path]:
     return files
 
 
+def implementation_inventory(root: Path = ROOT) -> list[str]:
+    """List the implementation files a frozen manifest checks for additions and removals."""
+    return sorted(str(path.relative_to(root)) for path in _implementation_files(root))
+
+
 def frozen_files(captures: list[dict], *, root: Path = ROOT) -> dict[str, str]:
     """Freeze implementation, declarations, specifications, and saved model files."""
     files = _implementation_files(root)

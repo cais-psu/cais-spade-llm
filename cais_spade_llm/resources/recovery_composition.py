@@ -11,6 +11,7 @@ from jsonschema.exceptions import SchemaError
 
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
 from cais_spade_llm.resources import recovery_transition_derivation as contracts
+from cais_spade_llm.resources.resource_primitives import filter_recovery_primitive_catalog
 
 COMPOSITION_VALIDATION_VERSION = 1
 
@@ -81,6 +82,14 @@ def composition_grounding_context(*, session: dict, prepared: dict, task: dict) 
         resource, _ = composition_start_views(session=session, prepared=prepared,
                                              task={"resource_jid": jid})
         resources[jid] = {**deepcopy(entry), **resource, "snapshot": deepcopy(resource)}
+        # Step templates are served from code under /capability_decompositions. The template fields a
+        # capture recorded inside its DES model can be stale, so this served copy drops them; the owner
+        # check reads the prepared model, which keeps them.
+        for event in (resources[jid].get("recovery_des_model") or {}).get("events") or []:
+            event.pop("recovery_visible_steps", None)
+            for step in (event.get("composition_contract") or {}).get("steps") or []:
+                step.pop("public_params", None)
+                step.pop("note", None)
     part_names = set(parts) | set(session.get("base_symbolic_parts", {}))
     for row in [*session.get("composition_prefix", []), *session.get("accepted_primitive_program", [])]:
         part_names.update(row.get("composition_validation", {}).get("projected_parts", {}))
@@ -121,9 +130,11 @@ def composition_program_error(events: list, program: list, *, prepared: dict, se
             return f"{task['outline_id']}: RA evidence content differs from its recorded fingerprint"
         entry = prepared.get("recovery_resources", {}).get(task["resource_jid"], {})
         resource, part = composition_start_views(session=prefix, prepared=prepared, task=task)
+        # The owner validated against its recovery-visible catalog, without internal gripper controls.
+        catalog = filter_recovery_primitive_catalog(entry.get("execution_primitive_catalog", []),
+                                                    resource_type=entry.get("resource_type", ""))
         bindings = {"task": task, "program": row.get("primitive_steps"),
-                    "model": entry.get("recovery_des_model", {}),
-                    "catalog": entry.get("execution_primitive_catalog", []), "start": [resource, part]}
+                    "model": entry.get("recovery_des_model", {}), "catalog": catalog, "start": [resource, part]}
         if any(evidence.get(key + "_fingerprint") != recovery_validation_fingerprint(value)
                for key, value in bindings.items()):
             return f"{task['outline_id']}: composition evidence does not bind the current contracts and prefix"
@@ -133,12 +144,63 @@ def composition_program_error(events: list, program: list, *, prepared: dict, se
     return None
 
 
+def _declared_value(field: str, declaration: dict, resource: dict, part: dict) -> Any:
+    """Read a declared condition; a derived one, such as pose, is the effect field it follows, on its fields."""
+    if "effect" not in declaration:
+        return contracts._read_initial(field, declaration.get("scope", "resource"), resource, part)
+    source = contracts._read_initial(declaration["effect"], "resource", resource, part)
+    fields = declaration.get("fields") or []
+    if not isinstance(source, dict) or not fields or any(name not in source for name in fields):
+        return contracts._MISSING
+    return {name: deepcopy(source[name]) for name in fields}
+
+
+def _on_declared_fields(declaration: dict, value: Any) -> Any:
+    """Restrict a stated value of a derived condition to the fields the condition declares."""
+    if "effect" in declaration and isinstance(value, dict):
+        return {name: value[name] for name in declaration.get("fields") or [] if name in value}
+    return value
+
+
+def _declares(catalog: list, field: str, value: Any) -> bool:
+    """Return whether a primitive of the resource declares an effect that may set ``field``, or its alias, to value."""
+    names = (field, *contracts._RESOURCE_NAMES.get(field, ()))
+    for row in catalog:
+        for name in names:
+            effect = (row.get("effects") or {}).get(name) if isinstance(row, dict) else None
+            if isinstance(effect, dict) and (("set" in effect and contracts._equal(effect["set"], value)) or (
+                    value is not None and bool(set(effect) & {"set_from_param", "set_from_param_any_of"}))):
+                return True
+    return False
+
+
+def _contract_refusal(name: str, contract: dict, state: dict, params: dict, declarations: dict) -> tuple[str, str] | None:
+    """Return why one declared contract of a primitive does not apply at a step, or None when it applies."""
+    for parameter, schema in (contract.get("parameters") or {}).items():
+        if parameter not in params:
+            continue
+        value = params[parameter]
+        if "enum" in schema and not any(contracts._equal(value, item) for item in schema["enum"]):
+            return "INFEASIBLE", f"{name}: {parameter} {value!r} is outside its declared values {schema['enum']}"
+        numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if "minimum" in schema and not (numeric and value >= schema["minimum"]):
+            return "INFEASIBLE", f"{name}: {parameter} {value!r} is below its declared minimum {schema['minimum']}"
+        if "maximum" in schema and not (numeric and value <= schema["maximum"]):
+            return "INFEASIBLE", f"{name}: {parameter} {value!r} is above its declared maximum {schema['maximum']}"
+    for group in ("preconditions", "capability_constraints", "product_guards"):
+        passed, error = contracts._conditions(contract.get(group, {}), state, params, declarations)
+        if not passed:
+            return ("NEEDS_CONTEXT", error) if error else ("INFEASIBLE", f"{name}: {group} are not satisfied")
+    return None
+
+
 def validate_recovery_primitive_composition(
     *, task: dict, primitive_steps: list, recovery_des_model: dict, recovery_snapshot: dict,
     part_context: dict, grounding_context: dict, primitive_catalog: list,
     validate_primitive: Callable[..., dict] | None,
     preview_primitive: Callable[..., dict] | None = None,
     project_completion: Callable[..., dict] | None = None,
+    captured_snapshot: dict | None = None,
 ) -> dict:
     """Check the exact authored order without execution or goal-state substitution.
 
@@ -153,6 +215,7 @@ def validate_recovery_primitive_composition(
         validate_primitive: Nonexecuting capability evaluator at each step's state.
         preview_primitive: Owner calculation of required data-producing outputs.
         project_completion: Owner proof of additional complete-program effects.
+        captured_snapshot: The owner's state in the capture, before any recovery program.
 
     Returns:
         FEASIBLE, INFEASIBLE, or NEEDS_CONTEXT with a bound step trace. Passing
@@ -191,12 +254,15 @@ def validate_recovery_primitive_composition(
         return finish("INFEASIBLE", "A nonempty ordered primitive program is required")
     if not callable(validate_primitive):
         return finish("NEEDS_CONTEXT", "The responsible RA has no composition capability evaluator")
-    catalog = {row["name"]: row for row in primitive_catalog if isinstance(row, dict) and isinstance(row.get("name"), str)}
-    if len(catalog) != len(primitive_catalog):
-        return finish("NEEDS_CONTEXT", "Owner primitive identities are missing or duplicated")
+    # A primitive may declare alternative contracts, such as a machine's job start for each program.
+    catalog: dict[str, list[dict]] = {}
+    for row in primitive_catalog:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+            return finish("NEEDS_CONTEXT", "Owner primitive identities are missing")
+        catalog.setdefault(row["name"], []).append(row)
     fields = set(declarations)
-    for row in catalog.values():
-        for key in ("preconditions", "capability_constraints", "effects"):
+    for row in (variant for variants in catalog.values() for variant in variants):
+        for key in ("preconditions", "capability_constraints", "effects", "product_guards", "product_effects"):
             if not isinstance(row.get(key, {}), dict):
                 return finish("NEEDS_CONTEXT", f"Malformed owner {key} for {row['name']!r}")
             fields.update(row.get(key, {}))
@@ -213,22 +279,33 @@ def validate_recovery_primitive_composition(
         if not isinstance(declaration, dict):
             return finish("NEEDS_CONTEXT", f"Starting field {field!r} is not declared")
         scope = declaration.get("scope", "resource")
-        if field not in state[scope]:
+        actual = (_declared_value(field, declaration, recovery_snapshot, part_context) if "effect" in declaration
+                  else state[scope].get(field, contracts._MISSING))
+        if actual is contracts._MISSING:
             return finish("NEEDS_CONTEXT", f"Starting fact {field!r} is missing")
-        if not contracts._equal(state[scope][field], expected):
+        stated = _on_declared_fields(declaration, expected)
+        if not contracts._equal(actual, stated):
+            captured = (_declared_value(field, declaration, captured_snapshot, part_context)
+                        if "effect" in declaration and isinstance(captured_snapshot, dict) else contracts._MISSING)
+            # The outline carries a resource's captured pose until one of its events states another, while a
+            # program accepted earlier has moved it; the program then starts where that program left it.
+            if captured is not contracts._MISSING and contracts._equal(captured, stated) and not contracts._equal(captured, actual):
+                continue
             return finish("INFEASIBLE", f"Starting fact {field!r} conflicts with the validated composition prefix")
 
     context = deepcopy(grounding_context)
     context["event_facts"] = {}
     facts: set[tuple] = set()
+    written: set[str] = set()
     for index, step in enumerate(primitive_steps):
         if (not isinstance(step, dict) or set(step) - {"primitive", "params"}
                 or not isinstance(step.get("primitive"), str) or not isinstance(step.get("params"), dict)):
             return finish("INFEASIBLE", "Each step requires an exact primitive name and params object", index=index)
         name = step["primitive"]
-        entry = catalog.get(name)
-        if entry is None:
+        variants = catalog.get(name)
+        if variants is None:
             return finish("INFEASIBLE", f"Primitive {name!r} is absent from this owner's catalog", index=index)
+        entry = variants[0]
         resource, part = contracts._runtime_views(state, recovery_snapshot, part_context)
         owner_context = context.setdefault("resources", {}).setdefault(task["resource_jid"], {})
         owner_context, _ = contracts._runtime_views(state, owner_context, part_context)
@@ -254,20 +331,29 @@ def validate_recovery_primitive_composition(
         errors = list(Draft202012Validator(schema).iter_errors(params))
         if errors:
             return finish("INFEASIBLE", errors[0].message, index=index)
-        for group in ("preconditions", "capability_constraints"):
-            passed, error = contracts._conditions(entry.get(group, {}), state, params, declarations)
-            if not passed:
-                return finish("NEEDS_CONTEXT" if error else "INFEASIBLE",
-                              error or f"{name}: {group} are not satisfied", index=index)
-        capability = validate_primitive(primitive=name, params=deepcopy(params),
-                                       recovery_snapshot=resource, part_context=part)
-        if not isinstance(capability, dict) or capability.get("feasibility_status") != "FEASIBLE" or capability.get("allowed") is not True:
-            capability = capability if isinstance(capability, dict) else {}
-            return finish("INFEASIBLE" if capability.get("feasibility_status") == "INFEASIBLE" else "NEEDS_CONTEXT",
-                          capability.get("reason") or f"{name}: capability evidence is unavailable", index=index)
+        # A contract's part_name is the event's part unless the program binds it, as Algorithm 1 binds it.
+        bound = {**({"part_name": task["part_name"]} if task.get("part_name") is not None else {}), **params}
+        refusals = [_contract_refusal(name, variant, state, bound, declarations) for variant in variants]
+        if all(refusals):
+            status = "INFEASIBLE" if all(kind == "INFEASIBLE" for kind, _ in refusals) else "NEEDS_CONTEXT"
+            reasons = [reason for _, reason in refusals]
+            return finish(status, reasons[0] if len(reasons) == 1 else
+                          f"{name}: no declared alternative applies: " + "; ".join(reasons), index=index)
+        entry = variants[refusals.index(None)]
         row = {"step_index": index, "primitive": name, "params": deepcopy(step["params"]),
-               "resolved_params": deepcopy(params), "start_snapshot": resource,
-               "capability_evidence": deepcopy(capability)}
+               "resolved_params": deepcopy(params), "start_snapshot": resource}
+        if entry.get("controllable") is False:
+            # The resource's own outcome is waited for, never commanded, so no command capability is checked; its
+            # declared preconditions and guards above are the conditions under which it happens.
+            row.update(controllable=False, after_sec=deepcopy(entry.get("after_sec")))
+        else:
+            capability = validate_primitive(primitive=name, params=deepcopy(params),
+                                           recovery_snapshot=resource, part_context=part)
+            if not isinstance(capability, dict) or capability.get("feasibility_status") != "FEASIBLE" or capability.get("allowed") is not True:
+                capability = capability if isinstance(capability, dict) else {}
+                return finish("INFEASIBLE" if capability.get("feasibility_status") == "INFEASIBLE" else "NEEDS_CONTEXT",
+                              capability.get("reason") or f"{name}: capability evidence is unavailable", index=index)
+            row["capability_evidence"] = deepcopy(capability)
         def references(value):
             if isinstance(value, dict):
                 if "context_ref" in value:
@@ -312,11 +398,13 @@ def validate_recovery_primitive_composition(
         if "effects" not in entry:
             return finish("NEEDS_CONTEXT", f"{name}: declared effects are missing", index=index)
         previous = deepcopy(state)
-        state, error = contracts._apply(entry["effects"], state, params, declarations)
+        effects = {**entry["effects"], **(entry.get("product_effects") or {})}
+        state, error = contracts._apply(effects, state, bound, declarations)
         if error:
             return finish("NEEDS_CONTEXT", error, index=index)
-        for field, effect in entry["effects"].items():
-            if set(effect) & {"pose_absolute_from_params", "pose_relative_from_params"}:
+        written.update(contracts._field(key, declarations)[1] for key in effects)
+        for field, effect in effects.items():
+            if isinstance(effect, dict) and set(effect) & {"pose_absolute_from_params", "pose_relative_from_params"}:
                 scope, key = contracts._field(field, declarations)
                 old_pose = previous[scope].get(key, {})
                 pose = state[scope][key]
@@ -345,10 +433,37 @@ def validate_recovery_primitive_composition(
         declaration = declarations.get(field)
         if not isinstance(declaration, dict):
             return finish("NEEDS_CONTEXT", f"Postcondition {field!r} is not declared")
-        value = contracts._read_initial(field, declaration.get("scope", "resource"), resource, part)
+        stated = _on_declared_fields(declaration, expected)
+        value = _declared_value(field, declaration, resource, part)
+        if field == "resource_state" and field not in written and not contracts._equal(value, stated) and not _declares(
+                primitive_catalog, field, stated):
+            # As Algorithm 1 has it, a state that no primitive of the resource declares is named by the event
+            # itself, unless a step's declared effect set another; a state one of them declares comes only from
+            # that primitive.
+            named = {"resource": {field: deepcopy(stated)}, "part": {}, "unknown": {"resource": [], "part": []}}
+            resource, _ = contracts._runtime_views(named, resource, part)
+            result["projected_snapshot"] = deepcopy(resource)
+            value = stated
         if value is contracts._MISSING:
             return finish("NEEDS_CONTEXT", f"The composition has no supported effect for {field!r}")
-        result["derived_end_state"][field] = deepcopy(value)
-        if not contracts._equal(value, expected):
-            return finish("INFEASIBLE", f"Postcondition {field!r}: achieved {value!r}, required {expected!r}")
+        if not contracts._equal(value, stated):
+            result["derived_end_state"][field] = deepcopy(value)
+            return finish("INFEASIBLE", f"Postcondition {field!r}: achieved {value!r}, required {stated!r}")
+        result["derived_end_state"][field] = deepcopy(expected)
+    # The event's stated values for other resources must be what the program leaves them, as for its own.
+    for jid, values in (task.get("neighbor_end_state") or {}).items():
+        neighbor = grounding_context.get("resources", {}).get(jid) or {}
+        current = {**neighbor, **(result.get("projected_resources", {}).get(jid) or {})}
+        for field, stated in (values or {}).items():
+            achieved = contracts._get(current, field)
+            if field == "resource_state" and not contracts._equal(achieved, stated) and not _declares(
+                    neighbor.get("execution_primitive_catalog") or [], field, stated):
+                # As for the acting resource, and as the RA has it for every resource: a state none of the
+                # neighbour's own primitives declares is named by the event, and later events start from it.
+                result.setdefault("projected_resources", {}).setdefault(jid, {})[field] = deepcopy(stated)
+                continue
+            if achieved is contracts._MISSING:
+                return finish("NEEDS_CONTEXT", f"The composition has no value for {jid}'s {field}")
+            if not contracts._equal(achieved, stated):
+                return finish("INFEASIBLE", f"{jid}'s {field}: achieved {achieved!r}, required {stated!r}")
     return finish("FEASIBLE", "The authored sequence satisfies the declared resource and product postconditions")

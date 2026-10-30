@@ -86,6 +86,41 @@ def test_interrupted_job_is_a_task_outcome_and_running_job_is_not():
     assert event["faulted_resources"] == ["cell"] and event["failed_task_id"] == "t9"
 
 
+@pytest.mark.parametrize("reported, state", [(None, "interrupted"), ("failed", "failed")])
+def test_a_faulted_machine_is_grounded_as_its_own_job_record_reports_it(reported, state):
+    # The machine's job of the part it holds ended interrupted: its observed fault state, unless the device
+    # reports a fault state itself. The part's unfinished job on that machine carries the same state.
+    record = capture(**{
+        "failure/resource_values_before/cell": {"resource_state": "running", "part_name": "gear"},
+        "failure/part_tracker_before/gear": {"location": "cell", "current_process": {
+            "process": "trim", "result": "square", "status": "running", "machine": "cell"}},
+        "processing_observations": {"cell": {"active_job": None, "selected_program": "square", "jobs": {
+            "j1": {"task_id": "t9", "job_state": "interrupted", "process_completed": False, "part_name": "gear"}}}}})
+    if reported:
+        record["resource_states"]["cell"] = {"resource_state": reported}
+    grounded = grounding.ground_failure(record, settings=SETTINGS)
+    assert grounded["resources"]["cell"]["resource_state"] == state
+    assert grounded["parts"]["gear"]["current_process"]["status"] == "interrupted"
+    assert {"resource_id": "cell", "field": "resource_state", "value": state} in grounded["belief_updates"]
+
+
+def test_a_faulted_machine_whose_record_shows_the_job_completed_grounds_the_completion():
+    # The device reports a fault after the job completed but before the DES saw it: the part is grounded as
+    # complete_job leaves it, its current process cleared and its result recorded.
+    record = capture(**{
+        "failure/resource_values_before/cell": {"resource_state": "running", "part_name": "gear"},
+        "failure/part_tracker_before/gear": {"location": "cell", "processCompleted": [], "current_process": {
+            "process": "trim", "result": "square", "status": "running", "machine": "cell"}},
+        "processing_observations": {"cell": {"active_job": None, "selected_program": "square", "jobs": {
+            "j1": {"task_id": "t9", "job_state": "completed", "process_completed": True, "part_name": "gear"}}}}})
+    record["resource_states"]["cell"] = {"resource_state": "failed"}
+    grounded = grounding.ground_failure(record, settings=SETTINGS)
+    gear = grounded["parts"]["gear"]
+    assert (gear["current_process"], gear["processCompleted"]) == (None, [{"process": "trim", "result": "square"}])
+    assert {"part_name": "gear", "current_process": None,
+            "processCompleted": [{"process": "trim", "result": "square"}]} in grounded["belief_updates"]
+
+
 @pytest.mark.parametrize("change,rule", [
     ({"unavailable_resources": ["arm_b"]}, "B2"),
     ({"resource_states/arm_b": {"resource_state": "failed"}}, "B2"),
@@ -222,6 +257,44 @@ def test_transition_log_disagreement_is_reported():
     conflicts = grounding.ground_failure(record, settings=SETTINGS)["expected_state_conflicts"]
     assert {(row["field"], row["reported"], row["transition_log"]) for row in conflicts} == {
         ("resource_state", "picked", "failed"), ("held_part", "peg", None)}
+
+
+@pytest.mark.parametrize("case", ["arm", "mobile base", "not mid-activity"])
+def test_a_resource_faulted_before_its_activity_finish_set_its_location_is_at_its_measured_pose(case, monkeypatch):
+    from cais_spade_llm.resources import environment_models
+
+    record = capture_v2(fault_reports={"arm_a": {"reported_state": "failed"}})
+    running = "at_pick" if case == "not mid-activity" else "approaching_place"
+    record["failure"]["resource_values_before"]["arm_a"].update(resource_state=running, resource_location="home")
+    record["inputs"] = {"scene": {}}
+    # The configured activity model: only the finish that leaves approaching_place sets the location.
+    finish = {"event_name": "place_approach_done", "start_event_id": "place_approach",
+              "guards": {"resource_state": {"equals": "approaching_place"}},
+              "updates": {"resource_state": {"set": "positioned"}, "resource_location": {"set": "board"}}}
+    monkeypatch.setattr(environment_models, "build_environment_models", lambda scene: {"arm_a": {"events": [finish]}})
+    measured = record["physical_evidence"]["resources"]["arm_a"]
+    measured["current_pose"] = [0.6, 0.1, 1.3, 0.0, 1.0, 0.0, 0.0]
+    if case == "mobile base":
+        measured["base_pose"] = [2.0, 1.0, 0.0, 0.0, 0.0, 0.7071068, 0.7071068]
+    grounded = grounding.ground_failure(record, settings=SETTINGS)
+    arm_a = grounded["resources"]["arm_a"]
+    if case == "not mid-activity":
+        assert arm_a["resource_location"] == "home" and "current_pose" not in arm_a
+        return
+    assert arm_a["resource_location"] is None
+    if case == "mobile base":
+        assert arm_a["current_pose"] == pytest.approx({"x": 2.0, "y": 1.0, "yaw": 1.5707963}, abs=1e-6)
+    else:
+        assert arm_a["current_pose"] == {"x": 0.6, "y": 0.1, "z": 1.3, "qx": 0.0, "qy": 1.0, "qz": 0.0, "qw": 0.0}
+    assert {"resource_id": "arm_a", "field": "resource_location", "value": None} in grounded["belief_updates"]
+    # The prompt and the planning session start from the measured pose, not the place it set out from.
+    prepared = {"llm_input": {"observed_runtime_state": {"resources": [
+        {"resource_jid": "jid-a", "current_state": running, "held_part": "peg",
+         "resource_location": "home", "current_location": "home"}]}}}
+    grounding.apply_grounding(prepared, record)
+    row, = prepared["llm_input"]["observed_runtime_state"]["resources"]
+    assert (row["resource_location"], row["current_location"]) == (None, None)
+    assert row["current_pose"] == arm_a["current_pose"]
 
 
 def test_work_the_stop_cancelled_leaves_its_resource_where_it_stopped():

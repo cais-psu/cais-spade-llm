@@ -72,10 +72,56 @@ def _destination_geometry(evidence: dict, destination: str, part: str) -> dict |
             "target_reference": {"target_point": "part_origin", "surface_role": "support"}}
 
 
+def _stated_zone_origin(task: dict, destination: str, resource_evidence: dict, physical_evidence: dict) -> dict | None:
+    """Return the recorded pose of the destination zone the event puts its part in, if it names exactly one.
+
+    The event names the zone through the destination's own ``zone_<n>_part`` slot, the slot that receives a
+    part placed on that zone; the zone's recorded pose is the place target's origin.
+    """
+    part = task.get("part_name")
+    scene = (resource_evidence.get("inputs") or {}).get("scene") or {}
+    zones = {row.get("zone"): row.get("pose") for row in (scene.get(destination) or {}).get("zones") or []
+             if isinstance(row, dict)}
+    jid = (physical_evidence.get("jids") or {}).get(destination)
+    stated = (task.get("neighbor_end_state") or {}).get(jid) or {}
+    named = [number for number, pose in zones.items() if stated.get(f"zone_{number}_part") == part
+             and isinstance(pose, list) and len(pose) >= 3 and all(_number(value) for value in pose[:3])]
+    return dict(zip(("x", "y", "z"), zones[named[0]][:3])) if part is not None and len(named) == 1 else None
+
+
+def _receiving_geometry_source(destination: str, physical_evidence: dict) -> dict:
+    """Name the recorded body that receives a part placed at a destination.
+
+    A recorded resource names its own geometry source. A place that is not a resource, such as a machine's
+    staging tray, is the recorded model of that name, as the RA reads a place's surfaces.
+
+    Raises:
+        KeyError: The capture records no body for the destination.
+    """
+    recorded = physical_evidence["resources"].get(destination)
+    if recorded is not None:
+        return recorded["geometry_source"]
+    if destination in physical_evidence["physics_evidence"]["models"]:
+        return {"model": destination}
+    raise KeyError(destination)
+
+
+def _declared_support_collisions(model: str, physical_evidence: dict) -> set[str]:
+    """Return the collisions of a recorded body that its declared regions name as support surfaces.
+
+    A place that declares its support surface holds parts only there; a face below it, such as a pedestal top
+    under a tray, is not where a placed part rests. A body without such a declaration returns an empty set.
+    """
+    regions = physical_evidence.get("geometry", {}).get("regions", {})
+    return {row["source"]["surface_collision"] for row in regions.values()
+            if str((row.get("source") or {}).get("surface_collision", "")).split("::")[0] == model}
+
+
 def _support_place_pose(*, part: str, destination: str, target: dict, physical_evidence: dict) -> dict:
     """Calculate face contact from recorded rigid geometry, without predicting settling.
 
-    Align the uniquely nearest box face to the recorded horizontal support.
+    Align the uniquely nearest box face, or an upright cylinder's circular face, to the recorded horizontal
+    support; the cylinder's face is the inscribed polygon the support projection uses.
     The movement to this calculated target still requires an owner preview;
     neither the captured pose nor its attachment is changed here.
     """
@@ -102,9 +148,14 @@ def _support_place_pose(*, part: str, destination: str, target: dict, physical_e
         raise ValueError("Supported placement requires one exact recorded part collision")
     collision = link["collisions"][0]
     shape = collision["geometry"]
-    if (shape.get("type") != "box" or not isinstance(shape.get("size"), list) or len(shape["size"]) != 3
-            or any(not _number(value) or value <= 0 for value in shape["size"])):
-        raise ValueError("Supported placement requires recorded rigid box geometry")
+    if (shape.get("type") == "box" and isinstance(shape.get("size"), list) and len(shape["size"]) == 3
+            and all(_number(value) and value > 0 for value in shape["size"])):
+        corners = list(product(*[(-size / 2, size / 2) for size in shape["size"]]))
+    elif shape.get("type") == "cylinder" and all(_number(shape.get(key)) and shape[key] > 0 for key in ("radius", "length")):
+        corners = [(shape["radius"] * math.cos(index * math.pi / 8), shape["radius"] * math.sin(index * math.pi / 8),
+                    end * shape["length"] / 2) for index in range(16) for end in (-1., 1.)]
+    else:
+        raise ValueError("Supported placement requires recorded rigid box or cylinder geometry")
     original = pose(body["pose"], "recorded part model pose")
     inverse_q = [-original[3], -original[4], -original[5], original[6]]
     inverse = [*rotate(inverse_q, [-value for value in original[:3]]), *inverse_q]
@@ -116,27 +167,31 @@ def _support_place_pose(*, part: str, destination: str, target: dict, physical_e
     if abs(abs(axes[ranked[0]][2]) - abs(axes[ranked[1]][2])) <= 1e-12:
         raise ValueError("The closest part support face is ambiguous")
     axis = ranked[0]
+    if shape["type"] == "cylinder" and axis != 2:
+        raise ValueError("A cylinder is placed only upright, on its circular face")
     direction = 1. if axes[axis][2] > 0 else -1.
     normal = [direction * value for value in axes[axis]]
     correction = [normal[1], -normal[0], 0., 1. + normal[2]]
     length = math.sqrt(sum(value * value for value in correction))
     correction = [value / length for value in correction]
     target_q = multiply(correction, current[3:])
-    vertices = [compose(local, [*corner, 0., 0., 0., 1.])[:3]
-                for corner in product(*[(-size / 2, size / 2) for size in shape["size"]])]
+    vertices = [compose(local, [*corner, 0., 0., 0., 1.])[:3] for corner in corners]
     rotated = [rotate(target_q, vertex) for vertex in vertices]
     origin = target["target_origin_pose"]
     height = target.get("support_surface_height")
     declared_height = "support_surface_height" in target
     if declared_height and not _number(height):
         raise ValueError("The destination has no declared support surface height")
-    source = physical_evidence["resources"][destination]["geometry_source"]
+    source = _receiving_geometry_source(destination, physical_evidence)
     receiver = physics["models"][source["model"]]
     if receiver.get("static") is not True:
         raise ValueError("Supported placement requires recorded static destination geometry")
+    declared = _declared_support_collisions(source["model"], physical_evidence)
     supports = []
     for receiver_link in receiver["links"].values():
         for surface in receiver_link["collisions"]:
+            if declared and surface.get("id") not in declared:
+                continue
             geometry = surface.get("geometry", {})
             if geometry.get("type") != "box":
                 if not declared_height:
@@ -199,10 +254,15 @@ def calculate_recovery_place_target(*, task: dict, recovery_snapshot: dict, reso
     """
     jid = task.get("resource_jid", "")
     root = f"/resources/{jid}/resource_evidence"
-    destination = (task.get("expected_end_state") or {}).get("resource_location")
+    end = task.get("expected_end_state") or {}
+    # The part's stated location is where it is put; an event may state only the robot's location instead.
+    destination = end["part_location"] if isinstance(end.get("part_location"), str) else end.get("resource_location")
     part = task.get("part_name")
     context = (resource_evidence.get("state") or {}).get("_task_ctx") or {}
     target = _destination_geometry(resource_evidence, destination, part)
+    zone = _stated_zone_origin(task, destination, resource_evidence, physical_evidence or {})
+    if target is not None and zone is not None:
+        target["target_origin_pose"] = zone
     missing = []
     if target is None:
         missing.append({"ref": root + "/inputs", "reason": "The proposed destination has no recorded placement geometry"})
@@ -911,9 +971,11 @@ def check_robot_primitive_capability(
                          and isinstance(attachment.get("records"), list) and len(attachment["records"]) == 1)):
             return result("NEEDS_CONTEXT", "Recorded attachment completion is unavailable", refs=[root + "/attachment"])
         slot = params.get("assembly_slot")
+        end = task.get("expected_end_state") or {}
+        destination = end["part_location"] if isinstance(end.get("part_location"), str) else end.get("resource_location")
         if slot is not None:
             if (not isinstance(slot, dict) or slot.get("destination_location") != "assembly_board-v1"
-                    or (task.get("expected_end_state") or {}).get("resource_location") != "assembly_board-v1"
+                    or destination != "assembly_board-v1"
                     or any(not _number(slot.get(key)) for key in ("slot_x", "slot_y", "part_height", "board_top_z", "part_origin_z"))):
                 return result("INFEASIBLE", "release_part assembly_slot is incompatible with its declared destination")
             if resource_evidence.get("execution_mode") != "simulation":

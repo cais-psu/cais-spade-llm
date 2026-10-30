@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RCIM Recovery Results</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+<style>
+/* Layout: one reading column of figure plates, Section 6 subsections then optional; each plate = figure, journal-style caption, short reading note */
+:root {
+  --bg: #f1f3f5;
+  --plate: #ffffff;
+  --band: #f6f7f9;
+  --ink: #15181d;
+  --ink-2: #4b515b;
+  --muted: #7c838d;
+  --hair: #e1e4e8;
+  --axis: #c3c7cd;
+  --accent: #2a78d6;
+  --accent-soft: #e4eefb;
+  --fault: #d03b3b;
+  --good: #0ca30c;
+  --warn: #fab219;
+  --nominal-fill: #eceef1;
+  --nominal-stroke: #b1b6be;
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+  --s4: #eda100;
+  --s5: #e87ba4;
+  --dnf: #c4c7cc;
+  --on-seg: #15181d;
+  --v-openai: #008300;
+  --v-claude: #6250d6;
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-cap: "Source Serif 4", Georgia, "Times New Roman", serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1114; --plate: #181a1e; --band: #1d2024; --ink: #eceef1; --ink-2: #b8bec7;
+    --muted: #858b95; --hair: #2a2e34; --axis: #3d424a; --accent: #3987e5; --accent-soft: #1b2a3f;
+    --nominal-fill: #262a30; --nominal-stroke: #4c525b;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --dnf: #70757d;
+    --v-openai: #1f9a1f; --v-claude: #9085e9;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1114; --plate: #181a1e; --band: #1d2024; --ink: #eceef1; --ink-2: #b8bec7;
+  --muted: #858b95; --hair: #2a2e34; --axis: #3d424a; --accent: #3987e5; --accent-soft: #1b2a3f;
+  --nominal-fill: #262a30; --nominal-stroke: #4c525b;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --dnf: #70757d;
+  --v-openai: #1f9a1f; --v-claude: #9085e9;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 72px;
+}
+.wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 28px; }
+a { color: inherit; }
+a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.mast { display: grid; gap: 10px; max-width: 760px; }
+.eyebrow { margin: 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+h1 { margin: 0; font-family: var(--font-cap); font-weight: 600; font-size: clamp(28px, 4vw, 38px); line-height: 1.15; text-wrap: balance; }
+.lede { margin: 0; color: var(--ink-2); max-width: 66ch; }
+.prov { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; padding: 3px 10px; border: 1px solid var(--hair); border-radius: 999px; background: var(--plate); color: var(--ink-2); }
+.chip i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.chip .real { background: var(--accent); }
+.chip .fake { border: 1.5px dashed var(--muted); }
+
+.guide { background: var(--plate); border: 1px solid var(--hair); border-radius: 10px; padding: 18px 20px; display: grid; gap: 18px; }
+.guide h2 { margin: 0 0 -8px; font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.guide-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.guide-table td { padding: 7px 10px 7px 0; border-top: 1px solid var(--hair); vertical-align: top; }
+.guide-table td:first-child { white-space: nowrap; font-weight: 600; }
+.guide-table td:first-child a { text-decoration: none; }
+.guide-table td:first-child a:hover { text-decoration: underline; }
+.guide-table td:nth-child(2) { white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-2); }
+.guide-table td:last-child { color: var(--ink-2); }
+.guide-table tr.sec td { border-top: none; padding: 12px 0 4px; font-size: 11.5px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); font-weight: 600; font-family: var(--font-ui); }
+.cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 10px 14px; }
+.cfg { border: 1px solid var(--hair); border-radius: 8px; padding: 10px 12px; display: grid; gap: 2px; min-width: 0; }
+.cfg b { font-size: 14px; }
+.cfg span { font-size: 13.5px; color: var(--ink-2); }
+.cfg-axis { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+
+.group { margin: 14px 0 -12px; display: flex; align-items: baseline; gap: 12px; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.group::after { content: ""; flex: 1; border-top: 1px solid var(--axis); transform: translateY(-4px); }
+
+.plate { margin: 0; background: var(--plate); border: 1px solid var(--hair); border-radius: 10px; padding: 22px 22px 20px; display: grid; gap: 16px; min-width: 0; }
+.plate-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; }
+.plate-head h3 { margin: 0; font-size: 18px; font-weight: 600; }
+.tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.tag { font-size: 11.5px; padding: 2px 8px; border-radius: 4px; background: var(--band); color: var(--ink-2); border: 1px solid var(--hair); }
+.tag.real { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+figcaption { font-family: var(--font-cap); font-size: 14.5px; line-height: 1.5; color: var(--ink); max-width: 88ch; }
+figcaption b { font-weight: 600; }
+figcaption code { font-family: var(--font-mono); font-size: 12.5px; }
+.note { font-size: 13.5px; color: var(--ink-2); border-top: 1px solid var(--hair); padding-top: 12px; display: grid; gap: 4px; max-width: 88ch; }
+.note strong { color: var(--ink); font-weight: 600; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend .cost { color: var(--muted); font-variant-numeric: tabular-nums; }
+.sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.sw.box { border: 1.4px solid var(--accent); background: var(--accent-soft); }
+.sw.nom { border: 1.4px solid var(--nominal-stroke); background: var(--nominal-fill); }
+.sw.flt { border-radius: 50%; background: var(--fault); }
+.sw.flag { width: 0; height: 0; border-radius: 0; border-left: 7px solid transparent; border-right: 7px solid transparent; border-bottom: 12px solid var(--warn); }
+
+.panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); gap: 18px 26px; }
+.panels.three { grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+.panel { min-width: 0; display: grid; gap: 4px; align-content: start; }
+.panel h4 { margin: 0; font-size: 13.5px; font-weight: 600; }
+.panel .sub { font-size: 12px; color: var(--muted); margin-top: -2px; }
+.panel svg { width: 100%; height: auto; display: block; overflow: visible; }
+.wide-svg { max-width: 720px; }
+.wide-svg svg { width: 100%; height: auto; display: block; overflow: visible; }
+.wide-svg.narrow { max-width: 600px; }
+.aside-line { font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+.dia-list { display: grid; gap: 22px; }
+.dia-card { display: grid; gap: 8px; min-width: 0; }
+.dia-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+.dia-top h4 { margin: 0; font-size: 15px; font-weight: 600; }
+.meta { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.meta code { font-family: var(--font-mono); font-size: 11.5px; }
+.status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--hair); }
+.status svg { width: 12px; height: 12px; }
+.dia-scroll { overflow-x: auto; border: 1px solid var(--hair); border-radius: 8px; background: var(--plate); }
+.dia-scroll svg { display: block; }
+.flags { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; font-size: 13px; color: var(--ink-2); }
+.flags li { display: grid; grid-template-columns: 16px auto 1fr; gap: 8px; align-items: baseline; }
+.flags .tri { width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid var(--warn); transform: translateY(1px); }
+.flags .x { color: var(--fault); font-weight: 600; font-size: 13px; line-height: 1; }
+.flags b { font-weight: 600; color: var(--ink); white-space: nowrap; }
+
+/* SVG text and fills */
+.f-ink { fill: var(--ink); } .f-ink2 { fill: var(--ink-2); } .f-muted { fill: var(--muted); } .f-fault { fill: var(--fault); }
+.f-band { fill: var(--band); } .f-plate { fill: var(--plate); }
+.lane { font: 500 12.5px var(--font-ui); }
+.lane-sub { font: 400 10.5px var(--font-ui); }
+.hdr { font: 500 10.5px var(--font-ui); fill: var(--muted); letter-spacing: 0.04em; }
+.bx1 { font: 500 11.5px var(--font-ui); fill: var(--ink); }
+.bx2 { font: 400 10px var(--font-mono); fill: var(--ink-2); }
+.nb { font: 500 10.5px var(--font-ui); fill: var(--accent); }
+.ax { font: 400 10.5px var(--font-ui); fill: var(--muted); font-variant-numeric: tabular-nums; }
+.lbl { font: 500 11.5px var(--font-ui); fill: var(--ink); }
+.lbl2 { font: 400 10.5px var(--font-ui); fill: var(--muted); }
+.val { font: 500 11px var(--font-ui); fill: var(--ink); font-variant-numeric: tabular-nums; }
+.seg { font: 600 10.5px var(--font-ui); fill: var(--on-seg); font-variant-numeric: tabular-nums; }
+.grid-line { stroke: var(--hair); stroke-width: 1; }
+.base-line { stroke: var(--axis); stroke-width: 1; }
+.conn { stroke: var(--muted); stroke-width: 1.2; fill: none; }
+.nb-conn { stroke: var(--accent); stroke-width: 1.1; stroke-dasharray: 3 3; fill: none; opacity: 0.8; }
+.ev rect.b { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+.ev.nom rect.b { fill: var(--nominal-fill); stroke: var(--nominal-stroke); }
+.ev.nom .bx1 { fill: var(--ink-2); }
+.ev:hover rect.b, .ev:focus rect.b { stroke-width: 2.4; }
+.ev:focus { outline: none; }
+[data-t] { cursor: default; }
+.hit:hover { opacity: 0.85; }
+
+.table-wrap { overflow-x: auto; }
+table.results { border-collapse: collapse; width: 100%; font-size: 13.5px; font-variant-numeric: tabular-nums; min-width: 760px; }
+table.results th, table.results td { padding: 9px 12px; text-align: right; border-bottom: 1px solid var(--hair); white-space: nowrap; }
+table.results th:first-child, table.results td:first-child { text-align: left; white-space: normal; }
+table.results thead th { font-size: 12px; font-weight: 600; color: var(--ink-2); vertical-align: bottom; border-bottom: 1.5px solid var(--ink); }
+table.results thead tr.grp th { text-align: center; border-bottom: 1px solid var(--axis); color: var(--ink); font-size: 12.5px; }
+table.results thead th small { display: block; font-weight: 400; color: var(--muted); }
+table.results td small { display: block; font-size: 11.5px; color: var(--muted); white-space: normal; }
+table.results tbody tr:last-child td { border-bottom: 1.5px solid var(--ink); }
+table.results td.na { color: var(--muted); font-style: italic; }
+table.results tr.ref td { font-weight: 600; }
+table.results .sep { border-left: 1px solid var(--axis); }
+table.results.plan td { white-space: normal; vertical-align: top; }
+table.results.wide { min-width: 960px; }
+table.results.text th, table.results.text td { text-align: left; }
+table.results.text td { white-space: normal; vertical-align: top; }
+table.results.text td:first-child { font-weight: 600; min-width: 130px; }
+table.results.kv { min-width: 0; }
+table.results.kv td:first-child { width: 26%; }
+table.results td code { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+table.results .todo { color: var(--muted); font-style: italic; }
+table.results tr.model td { text-align: left; font-weight: 600; color: var(--ink); background: var(--band); }
+table.results tr.total td { font-weight: 600; }
+.mk { display: inline-block; vertical-align: -1px; margin-right: 6px; }
+.points { margin: 0; padding-left: 18px; display: grid; gap: 7px; max-width: 88ch; font-size: 14px; color: var(--ink-2); }
+.points b { color: var(--ink); font-weight: 600; }
+
+#tip { position: fixed; z-index: 20; max-width: 320px; pointer-events: none; background: var(--plate); color: var(--ink); border: 1px solid var(--hair); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.45; box-shadow: 0 6px 24px rgb(0 0 0 / 0.14); }
+#tip code { font-family: var(--font-mono); font-size: 11.5px; word-break: break-all; }
+#tip .tw { color: var(--ink-2); }
+
+@media (max-width: 560px) {
+  .plate { padding: 16px 14px; }
+  .guide-table td:nth-child(2) { display: none; }
+  .guide-table td:first-child { white-space: normal; width: 42%; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header class="mast">
+    <p class="eyebrow">Journal Paper 2 · Section 6.3 · results</p>
+    <h1>RCIM Recovery Results</h1>
+    <p class="lede" id="lede"></p>
+    <div class="prov" id="prov"></div>
+  </header>
+
+  <section class="guide" aria-labelledby="data-h">
+    <h2 id="data-h">Data</h2>
+    <div class="table-wrap"><table class="results plan text" id="sources-table"></table></div>
+    <h2>Attempts collected</h2>
+    <div class="table-wrap"><table class="results" id="coverage-table"></table></div>
+    <p class="aside-line" id="coverage-note" style="margin:0"></p>
+  </section>
+
+  <h2 class="group">6.3.1 · Performance results · main model</h2>
+
+  <figure class="plate" id="fig11">
+    <div class="plate-head">
+      <h3>Fig. 11 · Audited outcome by setting</h3>
+      <div class="tags" data-tags="RC2 · ablation"></div>
+    </div>
+    <div class="legend" id="fig11-legend"></div>
+    <div class="panels" id="fig11-panels"></div>
+    <figcaption id="fig11-caption"></figcaption>
+  </figure>
+
+  <figure class="plate" id="tab6">
+    <div class="plate-head">
+      <h3>Table 6 · What validation rejected</h3>
+      <div class="tags" data-tags="RC2 · H2"></div>
+    </div>
+    <div class="table-wrap"><table class="results wide" id="tab6-table"></table></div>
+    <figcaption id="tab6-caption"></figcaption>
+  </figure>
+
+  <figure class="plate" id="fig12">
+    <div class="plate-head">
+      <h3>Fig. 12 · Context retrieval in the outline stage</h3>
+      <div class="tags" data-tags="Sec. 5 · 𝒦"></div>
+    </div>
+    <div class="wide-svg" id="fig12-svg"></div>
+    <figcaption id="fig12-caption"></figcaption>
+  </figure>
+
+  <figure class="plate" id="tab7">
+    <div class="plate-head">
+      <h3>Table 7 · Framework, incremental, through primitive composition</h3>
+      <div class="tags" data-tags="RC1 + RC2"></div>
+    </div>
+    <div class="table-wrap"><table class="results wide" id="tab7-table"></table></div>
+    <figcaption id="tab7-caption"></figcaption>
+  </figure>
+
+  <h2 class="group">6.3.2 · Model comparison</h2>
+
+  <figure class="plate" id="fig13">
+    <div class="plate-head">
+      <h3>Fig. 13 · Main and second model</h3>
+      <div class="tags" data-tags="model comparison"></div>
+    </div>
+    <div class="legend" id="fig13-legend" aria-hidden="true"></div>
+    <div class="wide-svg narrow" id="fig13-chart"></div>
+    <figcaption id="fig13-caption"></figcaption>
+  </figure>
+
+  <h2 class="group">Every attempt</h2>
+
+  <figure class="plate" id="attempts">
+    <div class="plate-head">
+      <h3>All started attempts</h3>
+      <div class="tags" data-tags="audit record"></div>
+    </div>
+    <div id="attempts-body"></div>
+  </figure>
+</main>
+<div id="tip" role="tooltip" hidden></div>
+
+<script>
+const DATA = {"mode": "placeholder", "generated_at": "2026-10-30 04:21 UTC", "settings": [{"n": "LLM, single-pass", "d": "one answer"}, {"n": "LLM + rules, single-pass", "d": "one answer"}, {"n": "LLM, incremental", "d": "one event per turn"}, {"n": "LLM + rules, incremental", "d": "one event per turn"}, {"n": "Framework, single-pass", "d": "whole-outline rewrites"}, {"n": "Framework, incremental", "d": "one-event revisions"}], "scenarios": ["Conveyor breakdown", "ur5e-1 breakdown", "Machining breakdown during part processing", "Part slippage"], "scenario_short": ["Conveyor", "ur5e-1", "Machining", "Part slippage"], "models": [{"id": "opus", "model": "claude-opus-4-7", "name": "Claude Opus 4.7 medium", "role": "main model", "vendor": "Claude", "color": "var(--s3)", "planned": 20}, {"id": "gpt54", "model": "gpt-5.4", "name": "gpt-5.4 medium", "role": "second model", "vendor": "OpenAI", "color": "var(--s1)", "planned": 10}], "classes": ["passed", "infeasible", "physically_unsupported", "unsafe", "no_nominal_continuation", "unresolved", "did_not_finish", "not audited"], "references": ["/resources/<name>/state_variables", "/resources/<name>/snapshot", "/resources/<name>/static_capabilities", "/resources/<name>/pose_relations", "/resources/<name>/pending_tasks", "/parts/<name>/state_variables", "/parts/<name>/pose_relations", "/parts/<name>/target", "/geometry", "/regions"], "cells": {"opus": [{"Conveyor breakdown": {"n": 20, "classes": [8, 7, 0, 2, 2, 0, 1, 0], "tokens_k": 21, "minutes": 0.8, "lookups": 8, "completed": 19, "rejections": null, "redo": null, "proposals": null, "references": null}, "ur5e-1 breakdown": {"n": 20, "classes": [4, 10, 0, 3, 2, 0, 1, 0], "tokens_k": 25, "minutes": 0.9, "lookups": 7, "completed": 19, "rejections": null, "redo": null, "proposals": null, "references": null}, "Machining breakdown during part processing": {"n": 20, "classes": [0, 9, 0, 4, 6, 0, 1, 0], "tokens_k": 30, "minutes": 1.1, "lookups": 7, "completed": 19, "rejections": null, "redo": null, "proposals": null, "references": null}, "Part slippage": {"n": 20, "classes": [6, 6, 0, 5, 2, 0, 1, 0], "tokens_k": 15, "minutes": 0.5, "lookups": 6, "completed": 19, "rejections": null, "redo": null, "proposals": null, "references": null}}, {"Conveyor breakdown": {"n": 20, "classes": [9, 7, 0, 1, 2, 0, 1, 0], "tokens_k": 23, "minutes": 0.9, "lookups": 8, "completed": 19, "rejections": null, "redo": null, "proposals": null, "references": null}, "ur5e-1 breakdown": {"n": 20, "classes": [5, 11, 0, 1, 2, 0, 1, 0], "tokens_k": 27, "minutes": 1.0, "lookups": 7, "completed": 19, "rejections": null, "redo": null, "proposals": null, "references": null}, "Machining breakdown during part processing": {"n": 20, "classes": [1, 10, 0, 2, 6, 0, 1, 0], "tokens_k": 33, "minutes": 1.3, "lookups": 7, "completed": 19, "rejections": null, "redo": null, "proposals": null, "references": null}, "Part slippage": {"n": 20, "classes": [9, 6, 0, 1, 3, 0, 1, 0], "tokens_k": 17, "minutes": 0.6, "lookups": 6, "completed": 19, "rejections": null, "redo": null, "proposals": null, "references": null}}, {"Conveyor breakdown": {"n": 20, "classes": [10, 6, 0, 1, 2, 0, 1, 0], "tokens_k": 64, "minutes": 2.3, "lookups": 12, "completed": 19, "rejections": null, "redo": null, "proposals": null, "references": null}, "ur5e-1 breakdown": {"n": 20, "classes": [7, 8, 0, 2, 3, 0, 0, 0], "tokens_k": 78, "minutes": 3.0, "lookups": 10, "completed": 20, "rejections": null, "redo": null, "proposals": null, "references": null}, "Machining breakdown during part processing": {"n": 20, "classes": [2, 8, 0, 3, 5, 0, 2, 0], "tokens_k": 96, "minutes": 3.8, "lookups": 11, "completed": 18, "rejections": null, "redo": null, "proposals": null, "references": null}, "Part slippage": {"n": 20, "classes": [9, 5, 0, 4, 2, 0, 0, 0], "tokens_k": 43, "minutes": 1.4, "lookups": 9, "completed": 20, "rejections": null, "redo": null, "proposals": null, "references": null}}, {"Conveyor breakdown": {"n": 20, "classes": [11, 6, 0, 0, 2, 0, 1, 0], "tokens_k": 69, "minutes": 2.5, "lookups": 12, "completed": 19, "rejections": null, "redo": null, "proposals": null, "references": null}, "ur5e-1 breakdown": {"n": 20, "classes": [8, 9, 0, 1, 2, 0, 0, 0], "tokens_k": 83, "minutes": 3.2, "lookups": 10, "completed": 20, "rejections": null, "redo": null, "proposals": null, "references": null}, "Machining breakdown during part processing": {"n": 20, "classes": [3, 9, 0, 1, 5, 0, 2, 0], "tokens_k": 101, "minutes": 4.1, "lookups": 11, "completed": 18, "rejections": null, "redo": null, "proposals": null, "references": null}, "Part slippage": {"n": 20, "classes": [12, 5, 0, 1, 2, 0, 0, 0], "tokens_k": 47, "minutes": 1.6, "lookups": 9, "completed": 20, "rejections": null, "redo": null, "proposals": null, "references": null}}, {"Conveyor breakdown": {"n": 20, "classes": [18, 0, 0, 0, 0, 0, 2, 0], "tokens_k": 58, "minutes": 3.4, "lookups": 9, "completed": 18, "rejections": {"ra": 7, "physical": 5, "cca": 2, "eq6": 2}, "redo": 1, "proposals": null, "references": null}, "ur5e-1 breakdown": {"n": 20, "classes": [15, 0, 0, 0, 0, 0, 5, 0], "tokens_k": 86, "minutes": 5.2, "lookups": 9, "completed": 15, "rejections": {"ra": 13, "physical": 8, "cca": 5, "eq6": 4}, "redo": 2, "proposals": null, "references": null}, "Machining breakdown during part processing": {"n": 20, "classes": [9, 0, 0, 0, 0, 0, 11, 0], "tokens_k": 118, "minutes": 7.6, "lookups": 10, "completed": 9, "rejections": {"ra": 23, "physical": 15, "cca": 9, "eq6": 11}, "redo": 3, "proposals": null, "references": null}, "Part slippage": {"n": 20, "classes": [18, 0, 0, 0, 0, 0, 2, 0], "tokens_k": 34, "minutes": 1.9, "lookups": 7, "completed": 18, "rejections": {"ra": 5, "physical": 4, "cca": 7, "eq6": 3}, "redo": 1, "proposals": null, "references": null}}, {"Conveyor breakdown": {"n": 20, "classes": [18, 0, 0, 0, 0, 0, 2, 0], "tokens_k": 310, "minutes": 12, "lookups": 15, "completed": 18, "rejections": {"ra": 29, "physical": 19, "cca": 6, "eq6": 3}, "redo": 3, "proposals": 290, "references": {"/resources/<name>/state_variables": 4.0, "/parts/<name>/state_variables": 1.0, "/resources/<name>/snapshot": 1.0, "/resources/<name>/static_capabilities": 2.0, "/regions": 1.0, "/resources/<name>/pose_relations": 1.0, "/resources/<name>/pending_tasks": 4.0}}, "ur5e-1 breakdown": {"n": 20, "classes": [13, 0, 0, 0, 0, 0, 7, 0], "tokens_k": 420, "minutes": 19, "lookups": 14, "completed": 13, "rejections": {"ra": 58, "physical": 39, "cca": 22, "eq6": 8}, "redo": 6, "proposals": 410, "references": {"/resources/<name>/state_variables": 2.0, "/resources/<name>/snapshot": 3.0, "/resources/<name>/static_capabilities": 2.0, "/geometry": 1.0, "/regions": 1.0, "/resources/<name>/pose_relations": 1.0, "/parts/<name>/target": 1.0}}, "Machining breakdown during part processing": {"n": 20, "classes": [11, 0, 0, 0, 0, 0, 9, 0], "tokens_k": 520, "minutes": 24, "lookups": 16, "completed": 11, "rejections": {"ra": 94, "physical": 62, "cca": 31, "eq6": 14}, "redo": 9, "proposals": 560, "references": {"/resources/<name>/state_variables": 5.0, "/resources/<name>/snapshot": 3.0, "/resources/<name>/static_capabilities": 1.0, "/parts/<name>/target": 1.0}}, "Part slippage": {"n": 20, "classes": [17, 0, 0, 0, 0, 0, 3, 0], "tokens_k": 263, "minutes": 8.1, "lookups": 12, "completed": 17, "rejections": {"ra": 25, "physical": 16, "cca": 18, "eq6": 6}, "redo": 3, "proposals": 300, "references": {"/resources/<name>/state_variables": 4.0, "/parts/<name>/state_variables": 2.0, "/resources/<name>/snapshot": 1.0, "/resources/<name>/static_capabilities": 2.0, "/parts/<name>/pose_relations": 2.0, "/parts/<name>/target": 1.0}}}], "gpt54": [{"Conveyor breakdown": {"n": 10, "classes": [4, 3, 0, 1, 1, 0, 1, 0], "tokens_k": 27, "minutes": 1.4, "lookups": 10, "completed": 9, "rejections": null, "redo": null, "proposals": null, "references": null}, "ur5e-1 breakdown": {"n": 10, "classes": [2, 4, 0, 2, 2, 0, 0, 0], "tokens_k": 32, "minutes": 1.6, "lookups": 9, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}, "Machining breakdown during part processing": {"n": 10, "classes": [0, 6, 0, 2, 2, 0, 0, 0], "tokens_k": 39, "minutes": 2.0, "lookups": 9, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}, "Part slippage": {"n": 10, "classes": [4, 3, 0, 1, 1, 0, 1, 0], "tokens_k": 20, "minutes": 0.9, "lookups": 8, "completed": 9, "rejections": null, "redo": null, "proposals": null, "references": null}}, {"Conveyor breakdown": {"n": 10, "classes": [5, 3, 0, 1, 1, 0, 0, 0], "tokens_k": 30, "minutes": 1.6, "lookups": 10, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}, "ur5e-1 breakdown": {"n": 10, "classes": [3, 4, 0, 1, 1, 0, 1, 0], "tokens_k": 35, "minutes": 1.8, "lookups": 9, "completed": 9, "rejections": null, "redo": null, "proposals": null, "references": null}, "Machining breakdown during part processing": {"n": 10, "classes": [1, 5, 0, 2, 2, 0, 0, 0], "tokens_k": 43, "minutes": 2.3, "lookups": 9, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}, "Part slippage": {"n": 10, "classes": [5, 3, 0, 1, 1, 0, 0, 0], "tokens_k": 22, "minutes": 1.1, "lookups": 8, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}}, {"Conveyor breakdown": {"n": 10, "classes": [5, 3, 0, 1, 1, 0, 0, 0], "tokens_k": 83, "minutes": 4.1, "lookups": 14, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}, "ur5e-1 breakdown": {"n": 10, "classes": [4, 3, 0, 1, 1, 0, 1, 0], "tokens_k": 101, "minutes": 5.4, "lookups": 12, "completed": 9, "rejections": null, "redo": null, "proposals": null, "references": null}, "Machining breakdown during part processing": {"n": 10, "classes": [1, 5, 0, 2, 2, 0, 0, 0], "tokens_k": 125, "minutes": 6.8, "lookups": 13, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}, "Part slippage": {"n": 10, "classes": [5, 3, 0, 1, 1, 0, 0, 0], "tokens_k": 56, "minutes": 2.5, "lookups": 11, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}}, {"Conveyor breakdown": {"n": 10, "classes": [6, 2, 0, 1, 1, 0, 0, 0], "tokens_k": 90, "minutes": 4.5, "lookups": 14, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}, "ur5e-1 breakdown": {"n": 10, "classes": [4, 3, 0, 1, 1, 0, 1, 0], "tokens_k": 108, "minutes": 5.8, "lookups": 12, "completed": 9, "rejections": null, "redo": null, "proposals": null, "references": null}, "Machining breakdown during part processing": {"n": 10, "classes": [2, 4, 0, 2, 2, 0, 0, 0], "tokens_k": 131, "minutes": 7.4, "lookups": 13, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}, "Part slippage": {"n": 10, "classes": [6, 2, 0, 1, 1, 0, 0, 0], "tokens_k": 61, "minutes": 2.9, "lookups": 11, "completed": 10, "rejections": null, "redo": null, "proposals": null, "references": null}}, {"Conveyor breakdown": {"n": 10, "classes": [8, 0, 0, 0, 0, 0, 2, 0], "tokens_k": 75, "minutes": 6.1, "lookups": 11, "completed": 8, "rejections": {"ra": 4, "physical": 3, "cca": 1, "eq6": 1}, "redo": 1, "proposals": null, "references": null}, "ur5e-1 breakdown": {"n": 10, "classes": [6, 0, 0, 0, 0, 0, 4, 0], "tokens_k": 112, "minutes": 9.4, "lookups": 11, "completed": 6, "rejections": {"ra": 8, "physical": 5, "cca": 3, "eq6": 2}, "redo": 2, "proposals": null, "references": null}, "Machining breakdown during part processing": {"n": 10, "classes": [4, 0, 0, 0, 0, 0, 6, 0], "tokens_k": 153, "minutes": 13.7, "lookups": 12, "completed": 4, "rejections": {"ra": 14, "physical": 9, "cca": 6, "eq6": 6}, "redo": 3, "proposals": null, "references": null}, "Part slippage": {"n": 10, "classes": [9, 0, 0, 0, 0, 0, 1, 0], "tokens_k": 44, "minutes": 3.4, "lookups": 9, "completed": 9, "rejections": {"ra": 3, "physical": 2, "cca": 5, "eq6": 2}, "redo": 1, "proposals": null, "references": null}}, {"Conveyor breakdown": {"n": 10, "classes": [9, 0, 0, 0, 0, 0, 1, 0], "tokens_k": 403, "minutes": 21.6, "lookups": 17, "completed": 9, "rejections": {"ra": 17, "physical": 11, "cca": 4, "eq6": 2}, "redo": 3, "proposals": 160, "references": null}, "ur5e-1 breakdown": {"n": 10, "classes": [7, 0, 0, 0, 0, 0, 3, 0], "tokens_k": 546, "minutes": 34.2, "lookups": 16, "completed": 7, "rejections": {"ra": 35, "physical": 23, "cca": 14, "eq6": 4}, "redo": 6, "proposals": 226, "references": null}, "Machining breakdown during part processing": {"n": 10, "classes": [5, 0, 0, 0, 0, 0, 5, 0], "tokens_k": 676, "minutes": 43.2, "lookups": 18, "completed": 5, "rejections": {"ra": 56, "physical": 37, "cca": 20, "eq6": 7}, "redo": 9, "proposals": 308, "references": null}, "Part slippage": {"n": 10, "classes": [9, 0, 0, 0, 0, 0, 1, 0], "tokens_k": 342, "minutes": 14.6, "lookups": 14, "completed": 9, "rejections": {"ra": 15, "physical": 10, "cca": 12, "eq6": 3}, "redo": 3, "proposals": 165, "references": null}}]}, "composition": {"Part slippage": {"comp": 15, "ev": [4, 3], "prims": 21, "lookups": [12, 23], "targeted": 90, "tokens_k": 410, "minutes": 19}, "Conveyor breakdown": {"comp": 17, "ev": [3, 0], "prims": 14, "lookups": [15, 17], "targeted": 84, "tokens_k": 450, "minutes": 22}, "Machining breakdown during part processing": {"comp": 7, "ev": [7, 2], "prims": 27, "lookups": [11, 35], "targeted": 89, "tokens_k": 780, "minutes": 41}, "ur5e-1 breakdown": {"comp": 11, "ev": [5, 1], "prims": 19, "lookups": [11, 29], "targeted": 93, "tokens_k": 620, "minutes": 33}}, "sources": [], "attempts": [], "max_turns": 40};
+const TIPS = [];
+const tip = (html) => { TIPS.push(html); return TIPS.length - 1; };
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const pct = (v) => `${Math.round(v * 100)}%`;
+const dash = "–";
+function wilson(k, n, z = 1.96) {
+  if (!n) return [0, 0];
+  const z2 = z * z, c = (k + z2 / 2) / (n + z2), h = (z / (n + z2)) * Math.sqrt((k * (n - k)) / n + z2 / 4);
+  return [Math.max(0, c - h), Math.min(1, c + h)];
+}
+
+const PLACEHOLDER = DATA.mode === "placeholder";
+const SETTINGS = DATA.settings;
+const ORDER = DATA.scenarios;
+const SHORT = DATA.scenario_short;
+const MODELS = DATA.models;
+const MAIN = MODELS[0];
+const FW_SINGLE = 4, FW_INCREMENTAL = 5;
+// Display order: what the LLM gets, then single-pass above incremental in each group.
+const SETTING_GROUPS = [
+  { label: "NO RULES, NO CHECKS", rows: [0, 2] },
+  { label: "RULES IN PROMPT, NO CHECKS", rows: [1, 3] },
+  { label: "FRAMEWORK: RA + CCA, RULES HIDDEN", rows: [4, 5] },
+];
+// One color per audit outcome, in the audit's order, then "not audited".
+const CLASS_COLORS = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)", "var(--s5)", "var(--muted)", "var(--dnf)", "var(--band)"];
+const CLASSES = DATA.classes.map((label, i) => ({ label, c: CLASS_COLORS[i] }));
+const NOT_AUDITED = CLASSES.length - 1;
+// Sequential blue ramp in tenths; cell text turns white from 70% up.
+const PASS_RAMP = ["#eef4fc", "#dbe8fb", "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#3987e5", "#2a78d6", "#256abf", "#1c5cab"];
+const cell = (m, s, scn) => DATA.cells[m.id][s][scn];
+const settingLabel = (s) => `${s + 1} · ${SETTINGS[s].n}`;
+function pooled(m, s) {
+  return ORDER.reduce((t, scn) => ({ k: t.k + cell(m, s, scn).classes[0], n: t.n + cell(m, s, scn).n }), { k: 0, n: 0 });
+}
+const sumOver = (m, s, f) => ORDER.reduce((t, scn) => t + f(cell(m, s, scn)), 0);
+
+// A model's mark: square for Claude and circle for OpenAI models.
+function modelMark(m, x, y, r, { stroke = 2, t } = {}) {
+  const style = `fill:${m.color};stroke:${m.color};stroke-width:${stroke}`;
+  const data = t === undefined ? "" : ` data-t="${t}"`;
+  return m.vendor === "Claude"
+    ? `<rect x="${x - r * 0.9}" y="${y - r * 0.9}" width="${r * 1.8}" height="${r * 1.8}" rx="1.5" style="${style}"${data}/>`
+    : `<circle cx="${x}" cy="${y}" r="${r}" style="${style}"${data}/>`;
+}
+
+/* ---------- Header, data sources and coverage ---------- */
+function renderHeader() {
+  const started = DATA.attempts.length;
+  document.getElementById("lede").textContent = PLACEHOLDER
+    ? `Placeholder numbers in the layout of Section 6.3, so the page can be reviewed before collection. Nothing here has been measured. Generated ${DATA.generated_at}.`
+    : `Study 1 results from the Experiments batch records: ${started} started attempts, generated ${DATA.generated_at}. Every count is out of the attempts started; cells with no attempts say so.`;
+  const chips = [
+    PLACEHOLDER ? `<span class="chip"><i class="fake"></i>Placeholder numbers: nothing collected yet</span>`
+      : `<span class="chip"><i class="real"></i>Real data: ${DATA.sources.length} batches, ${started} attempts</span>`,
+    ...MODELS.map((m) => `<span class="chip"><i class="real"></i>${esc(m.role)}: ${esc(m.name)}, ${m.planned} attempts per cell planned</span>`),
+    `<span class="chip"><i class="real"></i>${DATA.max_turns}-turn budget</span>`,
+  ];
+  document.getElementById("prov").innerHTML = chips.join("");
+  document.querySelectorAll("[data-tags]").forEach((el) => {
+    el.innerHTML = `<span class="tag${PLACEHOLDER ? "" : " real"}">${PLACEHOLDER ? "placeholder numbers" : "real results"}</span><span class="tag">${esc(el.getAttribute("data-tags"))}</span>`;
+  });
+}
+
+function renderSources() {
+  const head = `<thead><tr><th>Batch</th><th>Model</th><th>Status</th><th>Attempts started / planned</th><th>Created (UTC)</th><th>Code</th></tr></thead>`;
+  const body = DATA.sources.length
+    ? DATA.sources.map((b) => `<tr><td><code>${esc(b.batch)}</code></td><td>${esc(b.model)}</td><td>${esc(b.status)}</td><td>${b.started} / ${b.planned}</td><td>${esc(b.created)}</td><td>${esc(b.code)}</td></tr>`).join("")
+    : `<tr><td colspan="6" class="todo">${PLACEHOLDER ? "Placeholder page: no batch records are read." : "No study batch has been recorded yet."}</td></tr>`;
+  document.getElementById("sources-table").innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+function renderCoverage() {
+  const head = `<thead><tr><th>Setting</th>${SHORT.map((s) => `<th>${esc(s)}</th>`).join("")}<th>All four</th></tr></thead>`;
+  const body = MODELS.map((m) => `<tr class="model"><td colspan="${ORDER.length + 2}">${esc(m.name)} · ${esc(m.role)} · ${m.planned} attempts per cell planned</td></tr>` +
+    SETTINGS.map((_, s) => {
+      const cells = ORDER.map((scn) => {
+        const n = cell(m, s, scn).n;
+        return `<td${n ? "" : ' class="na"'}>${n} / ${m.planned}</td>`;
+      }).join("");
+      const total = sumOver(m, s, (c) => c.n);
+      return `<tr><td>${esc(settingLabel(s))}</td>${cells}<td>${total} / ${m.planned * ORDER.length}</td></tr>`;
+    }).join("")).join("");
+  document.getElementById("coverage-table").innerHTML = head + `<tbody>${body}</tbody>`;
+  const notAudited = MODELS.reduce((t, m) => t + SETTINGS.reduce((u, _, s) => u + sumOver(m, s, (c) => c.classes[NOT_AUDITED]), 0), 0);
+  document.getElementById("coverage-note").textContent = notAudited
+    ? `${notAudited} started attempts are not audited yet; they count in every denominator and show as "not audited". Run Audit missing in the Experiments tab.`
+    : "Started attempts only; attempts a batch never started are left out of every count.";
+}
+
+/* ---------- Fig. 11: audited outcome by setting, main model ---------- */
+function renderOutcome() {
+  const anyNotAudited = SETTINGS.some((_, s) => sumOver(MAIN, s, (c) => c.classes[NOT_AUDITED]) > 0);
+  document.getElementById("fig11-legend").innerHTML = CLASSES.filter((_, i) => i < NOT_AUDITED || anyNotAudited)
+    .map((c) => `<span><i class="sw" style="background:${c.c};outline:1px solid var(--hair)"></i>${c.label}</span>`).join("");
+  const W = 500, X0 = 196, BW = 200, RH = 34, GH = 18, TOP = 16, EX = X0 + BW + 10;
+  const H = TOP + SETTING_GROUPS.length * GH + SETTINGS.length * RH + 20;
+  let clipId = 0;
+  document.getElementById("fig11-panels").innerHTML = ORDER.map((scn) => {
+    const p = [];
+    p.push(`<text x="${EX}" y="10" class="lbl2">median effort</text>`);
+    [0, 0.5, 1].forEach((q) => {
+      const x = X0 + q * BW;
+      p.push(`<line x1="${x}" y1="${TOP}" x2="${x}" y2="${H - 22}" class="grid-line"/>`);
+      p.push(`<text x="${x}" y="${H - 6}" class="ax" text-anchor="middle">${Math.round(q * 100)}%</text>`);
+    });
+    let y = TOP;
+    SETTING_GROUPS.forEach((g, gi) => {
+      if (gi > 0) p.push(`<line x1="0" y1="${y + 2}" x2="${W}" y2="${y + 2}" class="base-line"/>`);
+      p.push(`<text x="0" y="${y + 14}" class="hdr">${g.label}</text>`);
+      y += GH;
+      g.rows.forEach((s) => {
+        const c = cell(MAIN, s, scn), bh = RH - 12;
+        p.push(`<text x="0" y="${y + 13}" class="lbl">${esc(settingLabel(s))}</text><text x="0" y="${y + 26}" class="lbl2">${esc(SETTINGS[s].d)} · n = ${c.n}</text>`);
+        if (!c.n) {
+          p.push(`<rect x="${X0}" y="${y + 4}" width="${BW}" height="${bh}" rx="3" style="fill:none;stroke:var(--axis);stroke-dasharray:3 3"/>`);
+          p.push(`<text x="${X0 + BW / 2}" y="${y + 4 + bh / 2 + 4}" class="lbl2" text-anchor="middle">no attempts yet</text>`);
+          y += RH;
+          return;
+        }
+        const cid = `c11-${clipId++}`;
+        p.push(`<clipPath id="${cid}"><rect x="${X0}" y="${y + 4}" width="${BW}" height="${bh}" rx="3"/></clipPath><g clip-path="url(#${cid})">`);
+        let x = X0;
+        c.classes.forEach((k, ci) => {
+          if (!k) return;
+          const w = (k / c.n) * BW, last = c.classes.slice(ci + 1).every((v) => v === 0);
+          const t = tip(`<b>${esc(scn)}</b> · ${esc(settingLabel(s))}<br>${CLASSES[ci].label}: <b>${k}/${c.n}</b>`);
+          p.push(`<rect x="${x}" y="${y + 4}" width="${Math.max(0, w - (last ? 0 : 2))}" height="${bh}" style="fill:${CLASSES[ci].c}" class="hit" data-t="${t}"/>`);
+          if (w >= 18) p.push(`<text x="${x + w / 2 - (last ? 0 : 1)}" y="${y + 4 + bh / 2 + 4}" class="seg" text-anchor="middle" pointer-events="none">${k}</text>`);
+          x += w;
+        });
+        p.push("</g>");
+        const effort = c.tokens_k === null ? dash : `${c.tokens_k}k`;
+        p.push(`<text x="${EX}" y="${y + 13}" class="val">${effort} <tspan class="lbl2">· ${c.minutes === null ? dash : c.minutes} min</tspan></text>`);
+        p.push(`<text x="${EX}" y="${y + 26}" class="lbl2">${c.lookups === null ? dash : c.lookups} lookups</text>`);
+        y += RH;
+      });
+    });
+    return `<div class="panel"><h4>${esc(scn)}</h4><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Audited outcomes by setting for ${esc(scn)}, main model">${p.join("")}</svg></div>`;
+  }).join("");
+  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, for the main model (${esc(MAIN.name)}; ${MAIN.planned} attempts per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts. Each attempt has the audit's outcome, set by the first failing check of its first failing event. Numbers at the right are the median tokens, generation time and fact lookups per attempt. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
+}
+
+/* ---------- Table 6: what validation rejected, framework settings, main model ---------- */
+function renderTable6() {
+  const head = `<thead>
+    <tr class="grp"><th></th><th colspan="5" class="sep">5 · ${esc(SETTINGS[FW_SINGLE].n)}</th><th colspan="5" class="sep">6 · ${esc(SETTINGS[FW_INCREMENTAL].n)}</th></tr>
+    <tr><th>Failure scenario</th>
+      <th class="sep">Completed<small>within ${DATA.max_turns} turns</small></th><th>Rewrites<small>whole outline, median</small></th><th>Rejected by RA<small>outlines</small></th><th>Rejected by CCA safety<small>after passing RA</small></th><th>Refused by CCA completion<small>Eq. 6</small></th>
+      <th class="sep">Completed<small>within ${DATA.max_turns} turns</small></th><th>Revisions<small>one event, median</small></th><th>Rejected by RA<small>events</small></th><th>Rejected by CCA safety<small>after passing RA</small></th><th>Refused by CCA completion<small>Eq. 6</small></th></tr></thead>`;
+  const group = (c, redo = true) => {
+    if (!c.n || !c.rejections) return `<td class="sep na">${dash}</td>` + `<td class="na">${dash}</td>`.repeat(4);
+    const r = c.rejections;
+    return `<td class="sep">${c.completed}/${c.n}</td><td>${redo ? (c.redo ?? dash) : ""}</td><td>${r.ra + r.physical}</td><td>${r.cca}</td><td>${r.eq6}</td>`;
+  };
+  const rows = ORDER.map((scn) => `<tr><td>${esc(scn)}</td>${group(cell(MAIN, FW_SINGLE, scn))}${group(cell(MAIN, FW_INCREMENTAL, scn))}</tr>`).join("");
+  const total = (s) => {
+    const cs = ORDER.map((scn) => cell(MAIN, s, scn)).filter((c) => c.n && c.rejections);
+    if (!cs.length) return group({ n: 0 });
+    const add = (f) => cs.reduce((t, c) => t + f(c), 0);
+    return group({ n: add((c) => c.n), completed: add((c) => c.completed), rejections: {
+      ra: add((c) => c.rejections.ra), physical: add((c) => c.rejections.physical), cca: add((c) => c.rejections.cca), eq6: add((c) => c.rejections.eq6) } }, false);
+  };
+  document.getElementById("tab6-table").innerHTML = head + `<tbody>${rows}<tr class="total"><td>All four scenarios</td>${total(FW_SINGLE)}${total(FW_INCREMENTAL)}</tr></tbody>`;
+  document.getElementById("tab6-caption").innerHTML = `<b>Table 6.</b> Rejections in the two framework settings for the main model (${esc(MAIN.name)}), summed over the started attempts per scenario. In ${esc(SETTINGS[FW_SINGLE].n)} (setting 5) a rejection stops a whole outline at its first failing event, and the LLM rewrites the outline; in ${esc(SETTINGS[FW_INCREMENTAL].n)} (setting 6) a rejection applies to one proposed event, which the LLM revises. RA (symbolic and physical evidence) runs before CCA safety in both, so every CCA safety rejection is a proposal that passed RA: a feasible but unsafe event (H2). The last column of each group counts CCA completion refusals (Eq. 6). Completed counts the attempts that finished an outline within ${DATA.max_turns} turns. The second model's rejections are in Fig. 13.`;
+}
+
+/* ---------- Fig. 12: outline lookups by reference, main model, setting 6 ---------- */
+function renderRetrieval() {
+  const rows = DATA.references;
+  const W = 720, X0 = 270, CW = (W - X0) / ORDER.length, RH = 28, TOP = 26;
+  const H = TOP + (rows.length + 1) * RH + 8;
+  const counted = ORDER.map((scn) => cell(MAIN, FW_INCREMENTAL, scn).references);
+  const values = counted.map((byPath) => (byPath ? rows.map((path) => byPath[path] || 0) : null));
+  const max = Math.max(1, ...values.flatMap((v) => v || []));
+  const p = [];
+  SHORT.forEach((s, j) => p.push(`<text x="${X0 + j * CW + CW / 2}" y="16" class="lbl" text-anchor="middle">${esc(s)}</text>`));
+  let y = TOP;
+  if (!rows.length) p.push(`<text x="0" y="${y + RH / 2 + 4}" class="lbl2">No lookups recorded yet.</text>`);
+  rows.forEach((path, i) => {
+    p.push(`<text x="0" y="${y + RH / 2 + 4}" class="lbl2" style="font-family:var(--font-mono)">${esc(path)}</text>`);
+    ORDER.forEach((scn, j) => {
+      const row = values[j], x = X0 + j * CW, cx = x + CW / 2, ty = y + RH / 2 + 4;
+      if (!row) {
+        p.push(`<text x="${cx}" y="${ty}" text-anchor="middle" class="lbl2">${dash}</text>`);
+        return;
+      }
+      const v = row[i], level = v > 0 ? Math.max(1, Math.round((v / max) * 9)) : 0, dark = level >= 7;
+      const t = tip(`<b>${esc(scn)}</b> · <code>${esc(path)}</code><br><b>${v}</b> lookups per attempt (mean of ${cell(MAIN, FW_INCREMENTAL, scn).n})`);
+      p.push(`<rect x="${x + 1.5}" y="${y + 1.5}" width="${CW - 3}" height="${RH - 3}" rx="3" style="fill:${v > 0 ? PASS_RAMP[level] : "var(--band)"}" data-t="${t}"/>`);
+      p.push(v > 0
+        ? `<text x="${cx}" y="${ty}" text-anchor="middle" style="font:500 11.5px var(--font-ui);fill:${dark ? "#ffffff" : "#15181d"}" pointer-events="none">${v}</text>`
+        : `<text x="${cx}" y="${ty}" text-anchor="middle" class="f-muted" style="font:500 11.5px var(--font-ui)" pointer-events="none">·</text>`);
+    });
+    y += RH;
+  });
+  p.push(`<line x1="0" y1="${y + 2}" x2="${W}" y2="${y + 2}" class="base-line"/>`);
+  p.push(`<text x="0" y="${y + RH / 2 + 5}" class="lbl">total</text>`);
+  values.forEach((row, j) => p.push(`<text x="${X0 + j * CW + CW / 2}" y="${y + RH / 2 + 5}" class="val" text-anchor="middle">${row ? Math.round(row.reduce((a, c) => a + c, 0) * 10) / 10 : dash}</text>`));
+  document.getElementById("fig12-svg").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Outline lookups per attempt by reference and failure scenario, main model">${p.join("")}</svg>`;
+  document.getElementById("fig12-caption").innerHTML = `<b>Fig. 12.</b> Context retrieved while building the recovery outline, by failure scenario: mean lookups per attempt of each reference in the knowledge base 𝒦, for the main model in ${esc(SETTINGS[FW_INCREMENTAL].n)} (setting 6). Each row is a reference as the outline prompt lists it, with the resource, part, region or key left out. Shading is scaled to the largest mean; a dot means no lookups and a dash means no attempts. The composition-stage rows follow once composition runs.`;
+}
+
+/* ---------- Table 7: setting 6 through primitive composition, main model ---------- */
+function renderTable7() {
+  const head = `<thead><tr>
+    <th>Failure scenario</th><th>Outline<small>passed / started</small></th><th>Composition<small>given an accepted outline</small></th>
+    <th>Overall<small>n/N [95% CI]</small></th><th>Events<small>new / nominal</small></th><th>Primitives<small>median per outline</small></th>
+    <th>Lookups<small>median, outline / composition</small></th><th>Targeted<small>outline lookups on resources used</small></th>
+    <th>Tokens<small>median, both stages</small></th><th>Time<small>median, both stages</small></th></tr></thead>`;
+  const ci = (k, n) => {
+    const [lo, hi] = wilson(k, n);
+    return `<small>[${lo.toFixed(2)}, ${hi.toFixed(2)}]</small>`;
+  };
+  let body;
+  if (!DATA.composition) {
+    body = `<tr><td colspan="10" class="todo">Composition has not been collected yet. The outline column will come from setting 6 of Fig. 11.</td></tr>`;
+  } else {
+    let outlines = 0, composed = 0, started = 0;
+    body = ORDER.map((scn) => {
+      const c = cell(MAIN, FW_INCREMENTAL, scn), r = DATA.composition[scn], outline = c.classes[0];
+      outlines += outline; composed += r.comp; started += c.n;
+      return `<tr><td>${esc(scn)}</td><td>${outline}/${c.n}</td><td>${r.comp}/${outline}</td><td>${r.comp}/${c.n} ${ci(r.comp, c.n)}</td>
+        <td>${r.ev[0]} / ${r.ev[1]}</td><td>${r.prims}</td><td>${r.lookups[0]} / ${r.lookups[1]}</td><td>${r.targeted}%</td><td>${r.tokens_k}k</td><td>${r.minutes} min</td></tr>`;
+    }).join("") + `<tr class="total"><td>All four scenarios</td><td>${outlines}/${started}</td><td>${composed}/${outlines}</td><td>${composed}/${started} ${ci(composed, started)}</td><td colspan="6"></td></tr>`;
+  }
+  document.getElementById("tab7-table").innerHTML = head + `<tbody>${body}</tbody>`;
+  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> ${esc(SETTINGS[FW_INCREMENTAL].n)} (setting 6) carried through primitive composition, for the main model (${esc(MAIN.name)}, one capture per scenario, offline planning). Composition completion is conditional on an accepted outline. Overall completion counts both stages in the same attempt over all started attempts, with a 95% Wilson interval. New events are recovery events absent from the nominal models; nominal events are the connection to the remaining plan. Targeted is the share of the outline's resource and part lookups that were about a resource or part in the accepted outline.`;
+}
+
+/* ---------- Fig. 13: main and second model ---------- */
+const CHECKS = [
+  { label: "RA feasibility (symbolic)", key: "ra", color: "var(--s2)" },
+  { label: "RA physical evidence", key: "physical", color: "var(--s2)" },
+  { label: "CCA safety", key: "cca", color: "var(--s4)" },
+];
+function renderComparison() {
+  document.getElementById("fig13-legend").innerHTML = MODELS.map((m) => `<span><svg width="14" height="14">${modelMark(m, 7, 7, 5)}</svg>${esc(m.name)} (${esc(m.role)})</span>`).join("");
+  const W = 560, X0 = 240, X1 = 450, cols = MODELS.map((_, i) => 466 + i * 48);
+  const xs = (q) => X0 + q * (X1 - X0);
+  const TOP = 22, GH = 22, RH = 26, RR = 24;
+  const bottom = TOP + SETTING_GROUPS.length * GH + SETTINGS.length * RH;
+  // Share of checked candidate events rejected in setting 6, per model and check.
+  const shares = MODELS.map((m) => {
+    const cs = ORDER.map((scn) => cell(m, FW_INCREMENTAL, scn)).filter((c) => c.n && c.rejections && c.proposals);
+    const checked = cs.reduce((t, c) => t + c.proposals, 0);
+    return { checked, values: CHECKS.map((k) => (checked ? cs.reduce((t, c) => t + c.rejections[k.key], 0) / checked : null)) };
+  });
+  // Rejection scale in 10% steps, so the gridlines fall on round shares.
+  const MAX = Math.max(0.1, Math.ceil(Math.max(0, ...shares.flatMap((s) => s.values.filter((v) => v !== null))) / 0.1) * 0.1);
+  const xr = (v) => X0 + (v / MAX) * (X1 - X0);
+  const rTop = bottom + 46, rBottom = rTop + CHECKS.length * RR, H = rBottom + 40;
+  const p = [];
+  const columnMarks = (y) => MODELS.forEach((m, i) => p.push(modelMark(m, cols[i] + 8, y, 4.5)));
+
+  p.push(`<text x="0" y="12" class="hdr">OUTLINES PASSED · ALL FOUR SCENARIOS POOLED</text>`);
+  columnMarks(8);
+  [0, 0.25, 0.5, 0.75, 1].forEach((q) => {
+    p.push(`<line x1="${xs(q)}" y1="${TOP}" x2="${xs(q)}" y2="${bottom}" class="${q === 0 ? "base-line" : "grid-line"}"/>`);
+    p.push(`<text x="${xs(q)}" y="${bottom + 14}" class="ax" text-anchor="middle">${pct(q)}</text>`);
+  });
+  let y = TOP;
+  SETTING_GROUPS.forEach((g) => {
+    p.push(`<text x="0" y="${y + 15}" class="hdr">${g.label}</text>`);
+    y += GH;
+    g.rows.forEach((s) => {
+      const cy = y + RH / 2;
+      p.push(`<text x="0" y="${cy + 4}" class="lbl">${esc(settingLabel(s))}</text>`);
+      MODELS.forEach((m, mi) => {
+        const { k, n } = pooled(m, s), my = cy + (mi === 0 ? -5 : 5);
+        if (!n) {
+          p.push(`<text x="${cols[mi]}" y="${cy + 4}" class="lbl2">${dash}</text>`);
+          return;
+        }
+        const q = k / n, [lo, hi] = wilson(k, n);
+        const t = tip(`<b>${esc(m.name)}</b> (${esc(m.role)}) · ${esc(settingLabel(s))}<br>passed <b>${k}/${n}</b> (${pct(q)})<br><span class="tw">95% CI ${pct(lo)}–${pct(hi)}</span>`);
+        p.push(`<path d="M${xs(lo)},${my - 3} V${my + 3} M${xs(lo)},${my} H${xs(hi)} M${xs(hi)},${my - 3} V${my + 3}" style="stroke:${m.color};stroke-width:1.4;fill:none;opacity:0.55"/>`);
+        p.push(modelMark(m, xs(q), my, 4.5, { t }));
+        p.push(`<text x="${cols[mi]}" y="${cy + 4}" class="val">${pct(q)}</text>`);
+      });
+      y += RH;
+    });
+  });
+
+  p.push(`<text x="0" y="${rTop - 12}" class="hdr">CHECKED EVENTS REJECTED · ${esc(SETTINGS[FW_INCREMENTAL].n.toUpperCase())} (SETTING 6)</text>`);
+  columnMarks(rTop - 16);
+  [0, MAX / 2, MAX].forEach((v, k) => {
+    p.push(`<line x1="${xr(v)}" y1="${rTop}" x2="${xr(v)}" y2="${rBottom}" class="${k === 0 ? "base-line" : "grid-line"}"/>`);
+    p.push(`<text x="${xr(v)}" y="${rBottom + 14}" class="ax" text-anchor="middle">${pct(v)}</text>`);
+  });
+  y = rTop;
+  CHECKS.forEach((check, j) => {
+    const cy = y + RR / 2;
+    p.push(`<rect x="0" y="${cy - 5}" width="3" height="10" style="fill:${check.color}"/><text x="8" y="${cy + 4}" style="font:400 11px var(--font-ui);fill:var(--ink-2)">${esc(check.label)}</text>`);
+    p.push(`<line x1="${X0}" y1="${cy}" x2="${X1}" y2="${cy}" class="grid-line"/>`);
+    MODELS.forEach((m, i) => {
+      const v = shares[i].values[j];
+      if (v === null) {
+        p.push(`<text x="${cols[i]}" y="${cy + 4}" class="lbl2">${dash}</text>`);
+        return;
+      }
+      const t = tip(`<b>${esc(m.name)}</b> · ${esc(check.label)}<br><b>${pct(v)}</b> of ${shares[i].checked} checked events rejected`);
+      p.push(modelMark(m, xr(v), cy + (i === 0 ? -4 : 4), 4.5, { t }));
+      p.push(`<text x="${cols[i]}" y="${cy + 4}" class="val">${pct(v)}</text>`);
+    });
+    y += RR;
+  });
+  p.push(`<text x="0" y="${rBottom + 30}" class="lbl" style="font-weight:600">any check</text>`);
+  MODELS.forEach((m, i) => {
+    const vs = shares[i].values;
+    p.push(`<text x="${cols[i]}" y="${rBottom + 30}" class="val" style="font-weight:600">${vs.some((v) => v === null) ? dash : pct(vs.reduce((a, c) => a + c, 0))}</text>`);
+  });
+  document.getElementById("fig13-chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Share of attempts passed per setting and setting 6 rejections by check, main and second model">${p.join("")}</svg>`;
+  document.getElementById("fig13-caption").innerHTML = `<b>Fig. 13.</b> The main model, ${esc(MAIN.name)} (squares), and a second model, ${esc(MODELS[1].name)} (circles). The figure shows whether the framework's effect holds for a second model, not which model is better: the models are not matched in vendor, release date or effort setting, and the prompt was developed on gpt-5.4 (frozen on 21 Oct 2026). Top: share of started attempts passed in each setting, pooled over the four scenarios, with 95% Wilson intervals; the main model's marks pool the bars of Fig. 11. Bottom: share of each model's checked candidate events that each check rejected in ${esc(SETTINGS[FW_INCREMENTAL].n)} (setting 6). A refusal counts as a failed attempt; no automatic fallback to another model is used.`;
+}
+
+/* ---------- Every attempt ---------- */
+function renderAttempts() {
+  const el = document.getElementById("attempts-body");
+  if (!DATA.attempts.length) {
+    el.innerHTML = `<p class="aside-line" style="margin:0">${PLACEHOLDER ? "Placeholder page: no attempts are listed." : "No study attempts have been recorded yet."}</p>`;
+    return;
+  }
+  const names = Object.fromEntries(MODELS.map((m) => [m.id, m.name]));
+  const head = `<thead><tr><th>Model</th><th>Setting</th><th>Scenario</th><th>Outcome</th><th>Failing stage</th><th>Stop</th><th>Events</th><th>Lookups</th><th>Tokens</th><th>Time</th><th>Attempt</th></tr></thead>`;
+  const value = (v, unit = "") => (v === null || v === undefined || v === "not recorded" ? dash : `${v}${unit}`);
+  const body = DATA.attempts.map((a) => `<tr><td>${esc(names[a.model])}</td><td>${esc(a.setting)}</td><td>${esc(a.scenario)}</td><td>${esc(a.outcome)}</td><td>${esc(a.stage)}</td><td>${esc(a.stop)}</td><td>${value(a.events)}</td><td>${value(a.lookups)}</td><td>${value(a.tokens_k, "k")}</td><td>${value(a.minutes, " min")}</td><td><code>${esc(a.attempt)}</code></td></tr>`).join("");
+  el.innerHTML = `<details><summary>Show all ${DATA.attempts.length} started attempts</summary><div class="table-wrap"><table class="results text wide">${head}<tbody>${body}</tbody></table></div></details>`;
+}
+
+/* ---------- Tooltip ---------- */
+const tipEl = document.getElementById("tip");
+function showTip(el, x, y) {
+  const i = el.getAttribute("data-t");
+  if (i === null) return;
+  tipEl.innerHTML = TIPS[+i];
+  tipEl.hidden = false;
+  const r = tipEl.getBoundingClientRect();
+  let left = x + 14, top = y + 14;
+  if (left + r.width > window.innerWidth - 8) left = x - r.width - 14;
+  if (top + r.height > window.innerHeight - 8) top = y - r.height - 14;
+  tipEl.style.left = Math.max(8, left) + "px";
+  tipEl.style.top = Math.max(8, top) + "px";
+}
+document.addEventListener("pointermove", (e) => {
+  const el = e.target.closest ? e.target.closest("[data-t]") : null;
+  if (el) showTip(el, e.clientX, e.clientY); else tipEl.hidden = true;
+});
+document.addEventListener("pointerdown", (e) => {
+  const el = e.target.closest ? e.target.closest("[data-t]") : null;
+  if (el) showTip(el, e.clientX, e.clientY); else tipEl.hidden = true;
+});
+window.addEventListener("scroll", () => { tipEl.hidden = true; }, { passive: true });
+
+renderHeader();
+renderSources();
+renderCoverage();
+renderOutcome();
+renderTable6();
+renderRetrieval();
+renderTable7();
+renderComparison();
+renderAttempts();
+</script>
+</body></html>

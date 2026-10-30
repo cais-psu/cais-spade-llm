@@ -4602,23 +4602,47 @@ _FAILURE_OUTLINE_CLOSING_RULES = (
     "- When you judge that normal production can carry on its remaining work from the state your events leave, "
     "return only `thought` and `decision: \"recovery_complete\"`; normal production then takes over.",
 )
+# A single-pass reply is the whole outline, so its last event is where the recovery ends.
+_SINGLE_PASS_COMPLETION_RULE = (
+    "- End `events` where you judge that normal production can carry on its remaining work from the state your "
+    "events leave; normal production then takes over.")
+_REFUSED_OUTLINE_FIELDS = ("outline_id", "event_name", "resource_jid", "part_name", "expected_end_state",
+                           "neighbor_end_state")
 
 
-def _failure_outline_candidate_rules(*, neighbor_end_state: bool) -> tuple[str, ...]:
-    """Return the Candidate Rules; ``neighbor_end_state`` is offered only when no outline check is enabled.
+def _failure_outline_candidate_rules(*, neighbor_end_state: bool, single_pass: bool = False) -> tuple[str, ...]:
+    """Return the Candidate Rules, or with ``single_pass`` the rules for the events of a whole outline.
 
-    Code applies a stated ``neighbor_end_state`` without checking it, so drafts with checks keep the rule
-    that an event states only its own resource and its part.
+    Args:
+        neighbor_end_state: Offer the optional ``neighbor_end_state`` field.
+        single_pass: The reply lists every event in order, and the outline's end ends the recovery.
     """
     place_field = "`neighbor_end_state` (if needed), " if neighbor_end_state else ""
+    lead = "- Each event, by one resource: " if single_pass else "- One event per candidate, by one resource: "
     return (
-        "- One event per candidate, by one resource: `outline_id`, `event_name` (what it achieves; new names "
+        lead + "`outline_id`, `event_name` (what it achieves; new names "
         f"allowed), `resource`, `part_name` (if a part is involved), `expected_end_state`, {place_field}`rationale` "
         "(the fact it relies on).",
         *_FAILURE_OUTLINE_EVENT_RULES,
         *((_NEIGHBOR_END_STATE_RULE,) if neighbor_end_state else ()),
-        *_FAILURE_OUTLINE_CLOSING_RULES,
+        _FAILURE_OUTLINE_CLOSING_RULES[0],
+        _SINGLE_PASS_COMPLETION_RULE if single_pass else _FAILURE_OUTLINE_CLOSING_RULES[1],
     )
+
+
+def _refused_outline_section(refused: dict) -> list[str]:
+    """Show a single-pass outline the checks refused, where it was refused, and ask for a new one."""
+    events = [{("resource" if key == "resource_jid" else key): deepcopy(event[key])
+               for key in _REFUSED_OUTLINE_FIELDS if key in event}
+              for event in refused.get("events") or [] if isinstance(event, dict)]
+    index = refused.get("refused_event_index")
+    if isinstance(index, int) and 0 <= index < len(events):
+        where = (f"It was refused at event {index + 1} of {len(events)} (`{events[index].get('outline_id')}`); "
+                 "the events before it passed.")
+    else:
+        where = "It was refused after its last event: normal production cannot carry on from the state it leaves."
+    return ["", "Your Last Outline (refused)", _compact_json(events), where,
+            "Give a new complete outline from the state below."]
 
 
 def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[str, Any]) -> str:
@@ -4638,17 +4662,23 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
     accepted = list(session_state.get("accepted_outline_prefix") or [])
     selection = (
         "Plan how to get from the current state to the Recovery Goal. Propose 2–5 different ways to do the next step of that "
-        "plan, then choose one with `selected_candidate_index`."
+        "plan, most preferred first."
         if llm_selects_next_event(session_state) else
         "Plan how to get from the current state to the Recovery Goal. Propose 2–5 different ways to do the next step of that "
         "plan. Do not select or rank candidates; the enabled outline checks validate each one."
     )
+    single_pass = session_state.get("single_pass_outline") is True
+    if single_pass:
+        selection = ("Plan how to get from the current state to the Recovery Goal. Give the whole plan in `events`: "
+                     "every recovery event, in the order they happen.")
     recorded = ("Expected after the events so far, not re-measured." if accepted
                 else "Recorded at the failure.")
     # The failure facts stay as measured; once events exist they are older than the projected state.
     measured = ("What was detected and measured at the failure, before your events. Resources and Parts below "
                 "show the state after them." if accepted
                 else "What was detected and measured, stated the same way for every resource.")
+    # What stays the same from turn to turn comes first and what the events change comes last, so
+    # consecutive prompts share a long identical beginning (the provider caches it). The text is the same.
     sections = [
         "Task and Role",
         "You are the recovery planner. A failure interrupted normal production. Until normal production takes "
@@ -4659,13 +4689,33 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
         "", "Failure", measured,
         *template["failure"],
         "", "Recovery Goal", *(template["goal"] or ["(none recorded)"]),
+        # Otherwise the rules stay with the CCA; the LLM looks them up or meets one in a refusal.
+        *(["", "Safety Rules", "Your events, and normal production after them, must keep these rules.",
+           _compact_safety_rules(dict(payload.get("llm_input") or {}))]
+          if session_state.get("safety_rules_to_llm", "prompt") == "prompt" else []),
+        "", "Event Rules" if single_pass else "Candidate Rules",
+        *_failure_outline_candidate_rules(neighbor_end_state=llm_selects_next_event(session_state), single_pass=single_pass),
+        "", "Knowledge Base",
+        "Request facts from the knowledge base by returning only `thought`, `decision: \"need_context\"` and 1–8 "
+        "`context_requests` from the list below; they are added to the next prompt before you propose events. When "
+        "proposing events, omit `decision` and `context_requests`.",
+        *template["refs"],
     ]
+    fixed_facts, current_facts = [], []
+    if payload.get("outline_served_context"):
+        named = {**payload, "outline_served_context": with_named_domains(payload["outline_served_context"],
+                                                                          template["resource_names"])}
+        fixed_facts, current_facts = _failure_outline_facts(named)
+    if fixed_facts:
+        sections += ["", "Retrieved context", *fixed_facts]
     if accepted:
         # Listed under the reply format's keys; with_resource_names below turns the JIDs into names.
         events = [{("resource" if key == "resource_jid" else key): value for key, value in row.items()}
                   for row in _accepted_transition_prefix_for_prompt(accepted, hide_registered_functions=True)]
         sections += ["", "Recovery Events So Far (planned, not executed)", _compact_json(events),
                      "Resources and Parts already include these events. Do not propose them again."]
+    if single_pass and session_state.get("single_pass_refused_outline"):
+        sections += _refused_outline_section(session_state["single_pass_refused_outline"])
     sections += _top_validation_feedback_section(
         summary=_outline_immediate_validation_feedback_summary(
             outline_validation_findings=list(session_state.get("outline_validation_findings") or []),
@@ -4683,19 +4733,9 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
         "", "Parts", "A part's condition is its variables: where it is, who holds it, and its process record "
         "(its unfinished process and the processes it completed); request `/parts/<name>/state_variables` "
         "for them.", *template["parts"],
-        "", "Safety Rules", "Your events, and normal production after them, must keep these rules.",
-        _compact_safety_rules(dict(payload.get("llm_input") or {})),
-        "", "Candidate Rules", *_failure_outline_candidate_rules(neighbor_end_state=llm_selects_next_event(session_state)),
-        "", "Knowledge Base",
-        "Request facts from the knowledge base by returning only `thought`, `decision: \"need_context\"` and 1–8 "
-        "`context_requests` from the list below; they are added to the next prompt before you propose events. When "
-        "proposing events, omit `decision` and `context_requests`.",
-        *template["refs"],
     ]
-    if payload.get("outline_served_context"):
-        named = {**payload, "outline_served_context": with_named_domains(payload["outline_served_context"],
-                                                                          template["resource_names"])}
-        sections += ["", "Retrieved context", _retrieved_outline_context_text(named)]
+    if current_facts:
+        sections += ["", "Retrieved current values", *current_facts]
     if payload.get("outline_context_errors"):
         sections += ["", "Missing context", _compact_json([
             {key: error[key] for key in ("ref", "error") if key in error} for error in payload["outline_context_errors"]])]
@@ -4876,6 +4916,96 @@ def _retrieved_outline_context_text(payload: dict[str, Any]) -> str:
         if already_shown:
             lines.append(already_shown)
     return "\n".join(lines)
+
+
+# Bookkeeping a looked-up fact carries that tells the model nothing: which turn and planned-state version
+# resolved it, and where each of its fields was read from.
+_FACT_BOOKKEEPING = ("accepted_trace_length", "revision", "field_sources")
+# Facts from these sources stay the same from turn to turn; any other source reads the planned state.
+_FIXED_FACT_SOURCES = frozenset({"declaration", "saved_context", "configuration"})
+_FACT_FIELD_ORDER = ("static_capabilities", "state_variables", "target", "pending_tasks", "capability_evidence",
+                     "gripper_reach", "primitives", "pose_relations", "snapshot")
+
+
+def _fact_order(ref: str) -> tuple:
+    """Sort looked-up facts by resource, then part, then the rest, each by name and then by field."""
+    segments = ref.split("/")
+    if len(segments) == 4 and segments[1] in ("resources", "parts"):
+        field = segments[3]
+        rank = _FACT_FIELD_ORDER.index(field) if field in _FACT_FIELD_ORDER else len(_FACT_FIELD_ORDER)
+        return (0 if segments[1] == "resources" else 1, segments[2], rank, field)
+    return (2, "", 0, ref)
+
+
+def _failure_outline_facts(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Split the looked-up facts into those that stay the same each turn and those that read the planned state.
+
+    A resource's or part's facts sit together, in name order, whatever order they were requested in.
+    Declarations keep their source; a variable's current value moves to the current lines. Bookkeeping
+    that tells the model nothing is left out, and a note several facts repeat is stated once, after them.
+
+    Args:
+        payload: Prompt input whose ``outline_served_context`` holds the looked-up facts by reference.
+
+    Returns:
+        The fixed lines and the current lines, each without its heading.
+    """
+    observation = payload.get("outline_observation_source") or {}
+    shown = payload["outline_template"]["shown"]
+    fixed: list[str] = []
+    current: list[str] = []
+    values_rules: dict[str, None] = {}
+    notes: dict[tuple[str, str, str], list[str]] = {}
+    last_group = None
+    for ref in sorted(payload["outline_served_context"], key=_fact_order):
+        fact = payload["outline_served_context"][ref]
+        segments = ref.split("/")
+        field = segments[3] if len(segments) == 4 else None
+        row = {key: deepcopy(value) for key, value in fact.items()
+               if key not in _FACT_BOOKKEEPING and not (key in observation and observation[key] == value)}
+        if isinstance(row.get("value"), dict):
+            row["value"].pop("field_sources", None)
+        if isinstance(row.get("values_rule"), str):
+            values_rules[row.pop("values_rule")] = None
+        interpretation = row.get("interpretation")
+        if isinstance(interpretation, dict) and isinstance(interpretation.get("rule"), str):
+            key = (str(interpretation.get("field")), interpretation["rule"], str(interpretation.get("source")))
+            notes.setdefault(key, []).append(segments[2] if len(segments) == 4 else ref)
+            row.pop("interpretation")
+        if row.get("source") in _FIXED_FACT_SOURCES:
+            values = {}
+            if field == "state_variables" and isinstance(row.get("value"), dict):
+                for name, declaration in row["value"].items():
+                    if isinstance(declaration, dict) and "current_value" in declaration:
+                        values[name] = declaration.pop("current_value")
+            group = _fact_order(ref)[:2]
+            if fixed and group != last_group:
+                fixed.append("")
+            last_group = group
+            fixed.append(ref + ": " + _inline_json(row))
+            if values:
+                current.append(ref + ": " + _inline_json({"current_value": values}))
+            continue
+        already_shown = ""
+        state = shown.get(segments[1], {}).get(segments[2], {}) if field else {}
+        value = row.get("value")
+        if field == "snapshot" and isinstance(value, dict):
+            repeated = [key for key, item in value.items() if key in state and state[key] == item]
+            if repeated:
+                row["value"] = {key: item for key, item in value.items() if key not in repeated}
+                already_shown = "Fields already shown above: " + ", ".join(repeated)
+        elif field in state and state[field] == value:
+            row.pop("value", None)
+            already_shown = "Value already shown above: " + field
+        current.append(ref + ": " + _inline_json(row))
+        if already_shown:
+            current.append(already_shown)
+    if values_rules or notes:
+        fixed += ["", "Notes on the facts above:"]
+        fixed += [f"- state_variables values_rule: {rule}" for rule in values_rules]
+        fixed += [f"- {field} interpretation ({', '.join(names)}; source {source}): {rule}"
+                  for (field, rule, source), names in notes.items()]
+    return fixed, current
 
 
 __all__ = [

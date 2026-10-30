@@ -13,6 +13,7 @@ from ..robot_task_model import (
     _first,
     _format,
     _state,
+    _step_ref,
     _sub,
 )
 
@@ -153,8 +154,20 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "qw": _state("_task_ctx", "access_retreat_pose", "qw"),
                     "speed": 0.45,
                 },
-                public_params={"speed": 0.45},
-                note="Configured collision-aware retreat from enclosed source.",
+                public_params={
+                    "x": _step_ref("pick_targets.<PART>", "access_retreat_pose.x"),
+                    "y": _step_ref("pick_targets.<PART>", "access_retreat_pose.y"),
+                    "z": _step_ref("pick_targets.<PART>", "access_retreat_pose.z"),
+                    "qx": _step_ref("pick_targets.<PART>", "access_retreat_pose.qx"),
+                    "qy": _step_ref("pick_targets.<PART>", "access_retreat_pose.qy"),
+                    "qz": _step_ref("pick_targets.<PART>", "access_retreat_pose.qz"),
+                    "qw": _step_ref("pick_targets.<PART>", "access_retreat_pose.qw"),
+                    "speed": 0.45,
+                },
+                note=(
+                    "Configured collision-aware retreat from an enclosed source, used only when the pick "
+                    "target has access_retreat_pose; it ends at event_facts.pick_targets.<PART>.retreat_pose."
+                ),
                 when=(
                     RobotTaskGuard(
                         predicate="always",
@@ -177,13 +190,10 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "dz": _sub(_state("_task_ctx", "travel_z"), _state("_position", "z")),
                     "speed": 0.45,
                 },
-                public_params={
-                    "dx": 0.0,
-                    "dy": 0.0,
-                    "dz": 0.05,
-                    "speed": 0.45,
-                },
-                note="Positive dz lift/retreat after grasp.",
+                note=(
+                    "Positive dz lift straight up to travel_z after grasp, used only when the pick target has "
+                    "no access_retreat_pose; it ends at event_facts.pick_targets.<PART>.retreat_pose."
+                ),
                 when=(
                     RobotTaskGuard(
                         predicate="always",

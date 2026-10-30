@@ -25,7 +25,7 @@ JOINT_SEARCH_CACHE: ContextVar[dict | None] = ContextVar("_cartesian_joint_calcu
 # Fixed extra starting points, as fractions of every joint's range, keep the answer reproducible.
 _START_FRACTIONS = (0.5, 0.87, 0.24, 0.61, 0.98, 0.35)
 # The fixed base-pose grid: spacing, headings per position, and the floor cell of the connection check.
-_GRID_STEP_M = 0.25
+_GRID_STEP_M = 0.1
 _GRID_HEADINGS = 8
 _FLOOR_CELL_M = 0.05
 
@@ -276,10 +276,11 @@ def free_base_poses(floor: Mapping[str, Any], footprint: Sequence[float], start_
                     radius_m: float = 1.5) -> list[list[float]]:
     """Return candidate planar base poses near a point, in a fixed order, where the base fits and can get to.
 
-    Declared docks come first, then a grid around the point, nearest first, at evenly spaced headings. A
-    pose is kept when the footprint, a rectangle centred on the base, lies on the floor clear of every
-    obstacle, and when its position connects to the start through floor wide enough for the footprint's
-    narrow side. That connection is a necessary condition only; the base's own planner plans the route.
+    Declared docks within the radius come first, then a grid around the point, nearest first, at evenly
+    spaced headings. A pose is kept when the footprint, a rectangle centred on the base, lies on the floor
+    clear of every obstacle, and when its position connects to the start through floor wide enough for the
+    footprint's narrow side. That connection is a necessary condition only; the base's own planner plans
+    the route.
 
     Args:
         floor: ``floor_extent_xy`` [x0, x1, y0, y1] and ``floor_obstacles_xy`` (name to [x0, x1, y0, y1]).
@@ -328,7 +329,8 @@ def free_base_poses(floor: Mapping[str, Any], footprint: Sequence[float], start_
                    for i in range(-steps, steps + 1) for j in range(-steps, steps + 1)
                    if math.hypot(i, j) * _GRID_STEP_M <= radius_m),
                   key=lambda point: (math.hypot(point[0] - around_xy[0], point[1] - around_xy[1]), point))
-    candidates = [list(dock[:3]) for dock in docks] + [
+    candidates = [list(dock[:3]) for dock in docks
+                  if math.hypot(dock[0] - around_xy[0], dock[1] - around_xy[1]) <= radius_m] + [
         [x, y, 2 * math.pi * index / _GRID_HEADINGS - math.pi] for x, y in grid for index in range(_GRID_HEADINGS)]
     return [pose for pose in candidates if fits(*pose)]
 

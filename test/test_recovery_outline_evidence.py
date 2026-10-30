@@ -1352,6 +1352,30 @@ def test_support_place_target_derives_contact_without_changing_observations(tilt
     assert (scene, target) == original
 
 
+@pytest.mark.parametrize("upright", [True, False])
+def test_support_place_target_rests_an_upright_cylinder_on_its_circular_face(upright):
+    import math
+    from cais_spade_llm.resources.robot.recovery_capability import _support_place_pose
+
+    scene, _, _, task = _custody_event_case(False)
+    scene["physics_evidence"]["models"]["square"]["joint_count"] = 0
+    scene["physics_evidence"]["models"]["square"]["links"]["link"]["collisions"][0]["geometry"] = {
+        "type": "cylinder", "radius": .02, "length": .1}
+    part, destination = task["part_name"], "Buffer For Machined parts"
+    # Lying on its side, the cylinder's axis is horizontal.
+    tilt = 0. if upright else math.pi / 2
+    scene["snapshot"]["parts"][part]["current_pose"] = [0., 0., .2, math.sin(tilt / 2), 0., 0., math.cos(tilt / 2)]
+    scene["resources"][destination]["geometry_source"] = {"model": "table"}
+    target = {"target_origin_pose": {"x": .1, "y": .2, "z": -.05}, "support_surface_height": -.05}
+    if not upright:
+        with pytest.raises(ValueError, match="upright"):
+            _support_place_pose(part=part, destination=destination, target=target, physical_evidence=scene)
+        return
+    result = _support_place_pose(part=part, destination=destination, target=target, physical_evidence=scene)
+    assert result["support_evidence"]["status"] == "supported"
+    assert result["part_pose"][:3] == pytest.approx([.1, .2, 0.], abs=1e-12)
+
+
 @pytest.mark.parametrize("missing", ["height", "shape", "gravity", "ambiguous", "footprint", "static", "center", "joint_count", "joint"])
 def test_support_place_target_rejects_unsupported_or_unstable_contact(missing):
     import math

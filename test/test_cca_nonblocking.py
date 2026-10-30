@@ -86,7 +86,7 @@ def test_only_a_robot_acting_for_a_part_or_away_from_rest_keeps_its_way_home(cel
     _set(cell, "Buffer For Machined parts", zone_4_part=part)
     _place(cell, part, "Buffer For Machined parts", TRIMMED)
     _set(cell, "ur5e-1", resource_location="Conveyor")
-    context, invalid = cca_nonblocking._end_context(cell.session, cell.prepared, cell.capture)
+    context, invalid, _ = cca_nonblocking._end_context(cell.session, cell.prepared, cell.capture)
     plant = EnvironmentPlant(context.calculation_snapshot(), OnlineSafetyMonitor({}, []), cell.jids,
                              {part: context.requirements[part][-1]})
     rows = plant._part_templates(part, Budget())
@@ -117,12 +117,39 @@ def test_a_part_no_normal_event_can_carry_on_is_refused_by_name_and_place(cell):
                                 f"at {_target(cell, part)}) from Conveyor output_nest"]
 
 
+@pytest.mark.parametrize("exit_state, blocked, reason", [
+    ("occupied", "KET4_Square_4mm", "KET4_Square_4mm cannot reach its remaining requirement (trim → square, then "
+                                    "assembly at {target}) from Exit"),
+    ("empty", "Exit", "Exit is in a state normal production does not have (empty; part_name KET4_Square_4mm)"),
+])
+def test_a_part_left_at_the_exit_is_refused_as_that_part_not_as_the_product(cell, exit_state, blocked, reason):
+    part = "KET4_Square_4mm"
+    _set(cell, "Storage", **{f"inventory.{part}": False})
+    _set(cell, "Exit", resource_state=exit_state, part_name=part)
+    _place(cell, part, "Exit")
+    check = _check(cell)
+    # The Exit holds the product only when its part_name is the product (user decision, 2026-10-30); another part
+    # there is that part, which no normal event takes from the Exit.
+    assert check["nonblocking_status"] == "BLOCKING" and check["blocked"] == [blocked]
+    assert check["reasons"] == [reason.format(target=_target(cell, part))]
+
+
+def test_a_part_recorded_away_from_the_resource_that_holds_it_names_the_values_that_say_so(cell):
+    part = "KET4_Square_4mm"
+    _set(cell, "Storage", **{f"inventory.{part}": False})
+    _set(cell, "ur5e-3", resource_state="positioned", held_part=part)
+    _place(cell, part, "Buffer For Machined parts")
+    check = _check(cell)
+    assert check["nonblocking_status"] == "BLOCKING"
+    assert (f"{part} is recorded at Buffer For Machined parts, but ur5e-3's values (held_part {part}) put it at "
+            "ur5e-3") in check["reasons"]
+
+
 def test_a_resource_left_in_a_state_its_model_does_not_have_is_refused_without_a_search(cell):
     _set(cell, "KMR", resource_state="positioned", resource_location=None)
     check = _check(cell)
     assert check == {"nonblocking_status": "BLOCKING", "blocked": ["KMR"], "reasons": [
-        "KMR is in a state normal production does not have "
-        "(positioned; held_part none; approached_part none; resource_location none)"],
+        "KMR is in a state normal production does not have (positioned; held_part none; resource_location none)"],
         "evidence": {"invalid_state": ["Resource state disagrees with held_part"]}}
 
 
@@ -178,6 +205,50 @@ def test_the_hook_refuses_a_blocking_completion_and_the_prompt_shows_the_refusal
         asyncio.run(handle_validated_candidates(session=cell.session, prepared=cell.prepared,
                                                 response=deepcopy(declare),
                                                 planner=SimpleNamespace(product_agent=SimpleNamespace())))
+
+
+def test_a_machine_left_in_its_fault_state_is_one_normal_production_has_with_or_without_its_part(cell):
+    # Its part taken out, the broken M1 stays interrupted: a declared fault state, not an empty machine at work.
+    _set(cell, "M1", resource_state="interrupted", part_name=None)
+    assert _check(cell)["nonblocking_status"] == "NONBLOCKING"
+    errors = []
+    owners(cell.context.models, {**cell.context.snapshot(), "M1": {**cell.context.snapshot()["M1"],
+                                 "resource_state": "interrupted", "part_name": None}},
+           cell.context.part_tracker, cell.context.product_name, errors=errors)
+    assert errors == []
+
+
+@pytest.mark.parametrize("gripper, status", [("open", "NONBLOCKING"), ("failed", "BLOCKING")])
+def test_normal_production_cannot_use_a_grasp_the_device_reports_it_cannot_make(cell, gripper, status):
+    part = "KET4_Square_4mm"
+    _set(cell, "Storage", **{f"inventory.{part}": False})
+    _set(cell, "Buffer For Machined parts", zone_4_part=part)
+    _place(cell, part, "Buffer For Machined parts", TRIMMED)
+    # The device's own report, as grounding records it from the failure on: a condition the nominal models
+    # do not have, so normal production leaves it as it is.
+    for rows in (cell.session["symbolic_resources"], cell.session["base_symbolic_resources"]):
+        rows[cell.jids["ur5e-3"]]["gripper_state"] = gripper
+    check = _check(cell)
+    assert check["nonblocking_status"] == status
+    if status == "BLOCKING":
+        assert check["blocked"] == [part]
+        assert check["evidence"]["unrunnable_events"]["ur5e-3"]["pick_grasp"] == (
+            "grasp_part needs gripper_state ≠ failed; gripper_state is failed")
+        # Its arm still moves: only the events whose programs grasp or release are out.
+        assert "move_home" not in check["evidence"]["unrunnable_events"]["ur5e-3"]
+    else:
+        assert "unrunnable_events" not in check["evidence"]
+
+
+@pytest.mark.parametrize("unavailable, status", [(["M1"], "NONBLOCKING"), ([], "BLOCKING")])
+def test_a_device_that_reports_itself_unavailable_owes_normal_production_no_state(cell, unavailable, status):
+    # Out of production until repaired by hand, it need not be in a state normal production has.
+    _set(cell, "M1", resource_state="paused", part_name=None)
+    cell.capture["unavailable_resources"] = unavailable
+    check = _check(cell)
+    assert check["nonblocking_status"] == status
+    if status == "BLOCKING":
+        assert check["evidence"] == {"invalid_state": ["Machine state disagrees with workholding"]}
 
 
 def test_a_faulted_robot_owes_normal_production_no_return_to_rest(cell):

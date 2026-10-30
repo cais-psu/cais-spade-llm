@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-"""Shared base class for all SPADE agents that communicate via an OpenAI-powered LLM."""
+"""Shared base class for all SPADE agents that communicate via an LLM (OpenAI, or Claude for structured replies)."""
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -26,6 +27,40 @@ from cais_spade_llm.utils.runtime_cleanup import cais_log_dir, install_action_lo
 load_dotenv()
 
 _client = OpenAI()  # Single shared client so we reuse HTTP sessions and rate-limit buckets.
+
+# Room for Claude's adaptive thinking plus the JSON reply; the request is streamed, so a long one does not time out.
+_CLAUDE_MAX_TOKENS = 32000
+
+
+def _is_claude(model_name: str) -> bool:
+    return str(model_name or "").startswith("claude-")
+
+
+# The outline prompt states what stays the same first; its first changing section starts at one of these headers.
+_CHANGING_SECTIONS = ("\n\nRecovery Events So Far", "\n\nYour Last Outline (refused)", "\n\nValidation Feedback\n",
+                      "\n\nResources\n")
+
+
+def _cached_user_content(prompt: str) -> str | list[dict[str, Any]]:
+    """Split a prompt before its first changing section and mark the part before it for Claude's prompt cache.
+
+    The text is unchanged; only its first part is reused across turns. A prompt without those sections is
+    sent as one block.
+    """
+    cuts = [prompt.find(marker) for marker in _CHANGING_SECTIONS if marker in prompt]
+    if not cuts or min(cuts) <= 0:
+        return prompt
+    cut = min(cuts)
+    return [{"type": "text", "text": prompt[:cut], "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": prompt[cut:]}]
+
+
+@functools.cache
+def _claude_client() -> Any:
+    """Return the shared Anthropic client, created on the first Claude call so OpenAI-only runs need no key."""
+    import anthropic
+
+    return anthropic.Anthropic()
 
 
 def _parse_structured_json_text(raw_text: str) -> Any:
@@ -433,6 +468,11 @@ class LlmAgent(Agent):
 
         if not 1 <= max_attempts <= 5:
             raise ValueError("max_attempts must be between 1 and 5")
+        if _is_claude(self.model):
+            # Called on the class: SavedRecoveryProduct borrows this method without inheriting from LlmAgent.
+            return await LlmAgent._ask_claude_structured(self, prompt, response_format=response_format, tools=tools,
+                                                     include_agent_instructions=include_agent_instructions,
+                                                     max_attempts=max_attempts)
 
         initial_messages: list[dict[str, Any]] = []
         if include_agent_instructions and self.instructions:
@@ -551,5 +591,79 @@ class LlmAgent(Agent):
                     raise
 
             raise RuntimeError("Exceeded max tool rounds")
+
+        return await asyncio.to_thread(_call)
+
+    async def _ask_claude_structured(self, prompt: str, *, response_format: dict[str, Any],
+                                     tools: list[dict[str, Any]] | None, include_agent_instructions: bool,
+                                     max_attempts: int) -> dict[str, Any]:
+        """Ask a Claude model for the structured reply through Anthropic's SDK.
+
+        The reply schema reaches Claude as an instruction, not an enforced format: OpenAI receives it with
+        ``strict: False`` as a hint, and Claude's enforced JSON outputs cannot express the reply's free-form
+        objects (every object needs ``additionalProperties: false``). Thinking is adaptive, its depth set by
+        ``effort``. The streamed final message is recorded as returned, then its text is parsed.
+
+        Args:
+            prompt: The user-role prompt, sent unchanged.
+            response_format: The OpenAI ``json_schema`` entry; its ``schema`` is stated to Claude.
+            tools: Must be empty; tool calls are not supported on this path.
+            include_agent_instructions: Whether to send this agent's configured instructions first.
+            max_attempts: Application-level attempts; one also disables SDK retries.
+
+        Returns:
+            The parsed structured response.
+        """
+        if tools:
+            raise ValueError("Tool calls are not supported for Claude models")
+        import anthropic
+
+        system = ([{"type": "text", "text": self.instructions}] if include_agent_instructions and self.instructions
+                  else [])
+        system.append({"type": "text", "text": "Reply with only one JSON object that follows this JSON schema:\n"
+                       + json.dumps(response_format["schema"], ensure_ascii=False)})
+        payload = {"model": self.model, "max_tokens": _CLAUDE_MAX_TOKENS, "system": system,
+                   "messages": [{"role": "user", "content": _cached_user_content(prompt)}],
+                   # Sent on every Claude model: Opus 4.7/4.8 do not think unless asked, and newer ones treat this as their default.
+                   "thinking": {"type": "adaptive"}, "output_config": {"effort": self.reasoning_effort}}
+        request_summary = {**deepcopy(payload), "reasoning_effort": self.reasoning_effort,
+                           "response_source": "live", "request_sent": False}
+        self._last_structured_request = request_summary
+
+        def _call() -> dict[str, Any]:
+            records = RequestRecords(request_summary)
+            client = _claude_client().with_options(max_retries=0) if max_attempts == 1 else _claude_client()
+
+            def stream_final_message(**kwargs: Any) -> Any:
+                with client.messages.stream(**kwargs) as stream:
+                    return stream.get_final_message()
+
+            back = 1.0
+            last_err: Exception | None = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    message = records.submit(stream_final_message, deepcopy(payload), tool_round=0, attempt=attempt)
+                    break
+                except RequestCaptureError:
+                    raise
+                except anthropic.BadRequestError as exc:
+                    raise RuntimeError(f"LLM call failed: {_structured_call_error_summary(exc)}") from exc
+                except Exception as e:  # noqa: BLE001
+                    time.sleep(back)
+                    back = min(back * 2, 8.0)
+                    last_err = e
+            else:
+                raise RuntimeError(
+                    f"LLM call failed after retries: {_structured_call_error_summary(last_err)}"
+                ) from last_err
+            if message.stop_reason in {"refusal", "max_tokens"}:
+                raise RuntimeError(f"Claude stopped with {message.stop_reason} before a complete reply")
+            text = "".join(block.text for block in message.content if block.type == "text")
+            try:
+                return _parse_structured_json_text(text or "{}")
+            except json.JSONDecodeError:
+                records.write("round00_parse_error", {"kind": "parse_error", "tool_round": 0,
+                                                      "attempt": attempt, "error_type": "JSONDecodeError"})
+                raise
 
         return await asyncio.to_thread(_call)

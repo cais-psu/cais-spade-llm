@@ -125,16 +125,16 @@ def test_llm_choice_is_committed_and_candidates_stay_isolated(captured, reverse)
     if reverse:
         candidates.reverse()
     before = deepcopy(prepared)
-    choice = next(index for index, row in enumerate(candidates) if row["outline_id"] == "pause")
     status, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-        response={"thought": "Compare supplied alternatives.", "candidate_events": candidates,
-                  "selected_candidate_index": choice}))
+        response={"thought": "Compare supplied alternatives.", "candidate_events": candidates}))
     assert status == "need_next_task"
-    assert audit["llm_selected_candidate_index"] == choice
+    # The LLM lists its candidates most preferred first; with no check on, the first is applied.
+    assert audit["llm_selected_candidate_index"] == 0
     assert len(session["accepted_outline_prefix"]) == 1
-    assert session["accepted_outline_prefix"][0]["event_name"] == "pause"
-    assert session["symbolic_parts"]["RGOCG4-50_Round_4mm"]["current_process"]["status"] == "paused"
+    assert session["accepted_outline_prefix"][0]["event_name"] == candidates[0]["event_name"]
+    paused = session["symbolic_parts"]["RGOCG4-50_Round_4mm"]["current_process"]["status"] == "paused"
+    assert paused is (candidates[0]["outline_id"] == "pause")
     assert prepared == before
     assert audit["candidate_events"] == candidates and audit["transition_validation"]["status"] == "not_checked"
 
@@ -151,7 +151,7 @@ def test_nothing_checks_the_llm_reply_or_its_chosen_event(captured):
     candidates = [event("noop", "machine", None, resource_state="loaded"), sequence()[0]]
     # A reply code cannot read raises; the draft records the error.
     with pytest.raises(KeyError):
-        propose({"thought": "Two candidates, no choice.", "candidate_events": candidates})
+        propose({"thought": "Neither events nor a decision."})
     # A repeat, a variable the resource does not declare and a stated params are applied as stated.
     for row in (candidates[0], candidates[0], event("slot", "machine", None, zone_1_part="KET4_Square_4mm"),
                 {**sequence()[0], "params": {"x": 1.0}}):
@@ -370,10 +370,12 @@ def test_prompt_states_recorded_facts_for_every_robot_without_tuned_targets(shar
     asyncio.run(draft.generate())
     prompt = provider.call_args_list[1].kwargs.get("prompt") or provider.call_args_list[1].args[0]
     assert "Prefer approximately" not in prompt
-    # The goal comes first; bulky declarations are listed by ref, not inlined.
-    headers = ("Failure", "Recovery Goal", "Resources", "Parts", "Safety Rules", "Candidate Rules",
-               "Knowledge Base")
+    # The goal comes first; bulky declarations are listed by ref, not inlined. What the events change
+    # (Resources, Parts) comes after what stays the same, so consecutive prompts share their beginning.
+    headers = ("Failure", "Recovery Goal", "Candidate Rules", "Knowledge Base", "Resources", "Parts")
     assert [prompt.index(f"\n{header}\n") for header in headers] == sorted(prompt.index(f"\n{header}\n") for header in headers)
+    # The safety rules stay with the CCA by default.
+    assert "\nSafety Rules\n" not in prompt and "SAFE_cell_mutex" not in prompt
     assert "Diagnostic Mode" not in prompt and "Resource Capabilities" not in prompt
     assert "- arm_b did not complete place_approach" in prompt
     assert "- arm_b: measured pose (0.000, 0.000, 1.200), inside cell" in prompt
@@ -381,7 +383,7 @@ def test_prompt_states_recorded_facts_for_every_robot_without_tuned_targets(shar
     assert "Declared coverage" not in prompt and "covers:" not in prompt
     assert "\nRecovery Goal\n- " in prompt
     assert "- gear: state assembled, location cell (normally arm_b's place_approach)\n" in prompt
-    assert "\narm_b (robot)  failed; resource_location station; held_part none; pose (0.000, 0.000, 1.200), inside cell; " in prompt
+    assert "\narm_b (robot)  failed; resource_location station; held_part null; pose (0.000, 0.000, 1.200), inside cell; " in prompt
     assert "\narm_a (robot)  picked; resource_location buffer; held_part peg; " in prompt
     assert "\ngear  not held, not at any station, measured at (0.900, 0.100, 1.000)\n" in prompt
     assert "misplaced" not in prompt and "robot states:" not in prompt and "Part states:" not in prompt
@@ -395,6 +397,25 @@ def test_prompt_states_recorded_facts_for_every_robot_without_tuned_targets(shar
         assert fact["value"]["max_xy_radius_m"] == 0.5 and "tolerance_m" in fact["interpretation"]
     region = multi_turn_context.resolve_outline_context(draft.prepared, session, "/regions/cell")
     assert region["value"]["bounds"] == [[-0.25, 0.25], [-0.25, 0.25], [1.0, 1.4]]
+
+
+@pytest.mark.parametrize("setting", ["prompt", "knowledge_base", "hidden"])
+def test_safety_rules_reach_the_llm_only_as_the_setting_allows(shared_cell, tmp_path, setting):
+    record, specs = shared_cell
+    draft = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts", safety_rules_to_llm=setting)
+    session = multi_turn.build_multi_turn_session_seed(draft.prepared)
+    session["current_phase"] = "outline"
+    prompt = multi_turn._build_phase_prompt(draft.prepared, session)[1]
+    assert ("\nSafety Rules\n" in prompt) is ("- SAFE_cell_mutex: " in prompt) is (setting == "prompt")
+    assert ("- /safety_rules: the safety rules your events" in prompt) is (setting == "knowledge_base")
+    resolve = multi_turn_context.resolve_outline_context
+    if setting == "hidden":
+        with pytest.raises(ValueError, match="Unsupported context reference"):
+            resolve(draft.prepared, session, "/safety_rules")
+    else:
+        assert [rule["id"] for rule in resolve(draft.prepared, session, "/safety_rules")["value"]] == ["SAFE_cell_mutex"]
+    # The CCA still checks every selected rule.
+    assert draft.record["safety_rules_to_llm"] == setting and draft.record["safety_rules"][0]["id"] == "SAFE_cell_mutex"
 
 
 def test_the_prompt_asks_for_a_plan_and_dates_the_failure_facts_once_events_exist(shared_cell, tmp_path):
@@ -413,7 +434,7 @@ def test_the_prompt_asks_for_a_plan_and_dates_the_failure_facts_once_events_exis
         assert ("Until normal production takes over, only your recovery events change the planned state; a job "
                 "already running keeps running until an event pauses or stops it.") in prompt
         assert ("Plan how to get from the current state to the Recovery Goal. Propose 2–5 different ways to do the next step "
-                "of that plan, then choose one with `selected_candidate_index`.") in prompt
+                "of that plan, most preferred first.") in prompt
         assert "Give your plan in `thought` (two short sentences)" in prompt
     # Drafts offer neighbor_end_state right after the event's own end state.
     event_schema = multi_turn._get_response_schema("outline", session)["schema"]["$defs"]["outline_event"]
@@ -505,7 +526,8 @@ def test_diagnostic_refs_serve_declarations_and_derived_pose_relations(shared_ce
     arm_b = resolve(prepared, session, "/resources/arm_b/pose_relations")["value"]
     assert arm_b["containing_regions"] == ["cell"]
     assert arm_b["by_declared_location"] == {"arm_a": ["cell"], "arm_b": ["cell"]}
-    assert resolve(prepared, session, "/safety_rules/SAFE_cell_mutex")["value"]["id"] == "SAFE_cell_mutex"
+    with pytest.raises(ValueError, match="Unsupported context reference"):
+        resolve(prepared, session, "/safety_rules/SAFE_cell_mutex")
     assert "world frame" in resolve(prepared, session, "/geometry")["interpretation"]
     listed = [ref for ref, _ in multi_turn_context.diagnostic_refs(prepared)]
     assert "/resources/<jid>/primitives" not in listed
@@ -525,7 +547,7 @@ def test_roster_shows_the_declared_locations_of_a_resource_without_reachability(
     prompt = multi_turn._build_phase_prompt(prepared, session)[1]
     # Without recorded runtime state the resource stays under Other Resources, with its declared locations.
     # Without recorded runtime state the resource is still listed, with its declared locations.
-    assert "\nmobile (robot)  state not recorded; held_part none; capabilities: reachable locations Storage, cell\n" in prompt
+    assert "\nmobile (robot)  state not recorded; held_part null; capabilities: reachable locations Storage, cell\n" in prompt
     assert "field_sources" not in prompt and "evaluation_support" not in prompt
     relations = multi_turn_context.resolve_outline_context(prepared, session, "/resources/arm_b/pose_relations")["value"]
     assert relations["by_declared_location"]["mobile"] == ["cell"]
@@ -549,11 +571,12 @@ def test_llm_always_chooses_a_candidate_in_a_draft(shared_cell, tmp_path, monkey
     call = provider.call_args_list[1]
     prompt = call.kwargs.get("prompt") or call.args[0]
     assert _candidate_limit(call.kwargs) == 5
-    assert "selected_candidate_index" in json.dumps(call.kwargs["response_format"])
+    # The order of the candidates is the LLM's choice, so no index is asked for.
+    assert "selected_candidate_index" not in json.dumps(call.kwargs["response_format"])
     assert "recovery_complete" in json.dumps(call.kwargs["response_format"])
     # Chat completions reject function tools with reasoning effort, so facts are requested by JSON.
     assert "tools" not in call.kwargs
-    assert "then choose one with `selected_candidate_index`" in prompt
+    assert "of that plan, most preferred first." in prompt
     assert "Do not select or rank candidates" not in prompt
     # Code applies neighbor_end_state unchecked, so every draft offers it.
     assert "neighbor_end_state" in json.dumps(call.kwargs["response_format"])
@@ -655,9 +678,9 @@ def test_template_states_a_machine_fault_from_recorded_facts(captured):
         "- KET4_Square_4mm: at M1; processes: trim → square running on M1"]
     assert template["goal"] == ["- KET4_Square_4mm: process trim, result square (normally M1's machine_part)"]
     assert template["resources"] == [
-        "M2 (resource)  loaded; resource_location M2; held_part none; part_name RGOCG4-50_Round_4mm; capabilities: reachable "
+        "M2 (resource)  loaded; resource_location M2; held_part null; part_name RGOCG4-50_Round_4mm; capabilities: reachable "
         "locations M1, M2; trim (circle, square)",
-        "arm (resource)  idle; resource_location M2; held_part none; capabilities: reachable locations M1, M2"]
+        "arm (resource)  idle; resource_location M2; held_part null; capabilities: reachable locations M1, M2"]
     resources = "\n".join(template["resources"])
     # Owner bookkeeping and nominal event names are not offered.
     assert "active_job" not in resources and "private_job" not in resources and "machine_part" not in resources
@@ -704,6 +727,13 @@ def test_resource_names_round_trip_through_prompt_schema_and_response(captured):
         {"outline_id": "unload", "resource": "M2", "part_name": "KET4_Square_4mm", "expected_end_state": {},
          "neighbor_end_state": {"M2": {"part_name": None}}}]}, prepared)
     assert placed["candidate_events"][0]["neighbor_end_state"] == {"machine": {"part_name": None}}
+    # A single-pass outline's events map back the same way.
+    outline = facts.response_with_jids({"thought": "t", "events": [
+        {"outline_id": "unload", "resource": "M2", "part_name": "KET4_Square_4mm", "expected_end_state": {},
+         "neighbor_end_state": {"M2": {"part_name": None}}}]}, prepared)
+    assert outline["events"][0]["resource_jid"] == "machine" and "resource" not in outline["events"][0]
+    assert outline["events"][0]["neighbor_end_state"] == {"machine": {"part_name": None}}
+    assert "candidate_events" not in outline
 
 
 
@@ -730,7 +760,8 @@ def test_a_lookup_domain_names_a_resource_listed_by_jid_and_by_name_once(capture
     session = multi_turn.build_multi_turn_session_seed(prepared)
     session.update(current_phase="outline", outline_requested_refs=[
         "/resources/arm/state_variables", "/parts/KET4_Square_4mm/state_variables"])
-    retrieved = multi_turn._build_phase_prompt(prepared, session)[1].split("\nRetrieved context\n", 1)[1]
+    prompt = multi_turn._build_phase_prompt(prepared, session)[1]
+    retrieved = prompt.split("\nRetrieved context\n", 1)[1].split("\nResources\n", 1)[0]
     replies = dict(line.split(": ", 1) for line in retrieved.splitlines() if line.startswith("/"))
     for ref in ("/resources/arm/state_variables", "/parts/KET4_Square_4mm/state_variables"):
         assert json.loads(replies[ref])["value"]["part_location"]["domain"] == ["M2", None], ref
@@ -1395,14 +1426,14 @@ def test_nominal_work_restarts_at_each_parts_earliest_remaining_step():
     assert [row["source_task_id"] for row in multi_turn_diagnostic.entry_conditions(prepared)] == ["home"]
 
 
-def test_a_choice_by_index_accepts_candidates_that_share_a_label(captured):
+def test_candidates_that_share_a_label_are_accepted_in_the_llm_s_order(captured):
     prepared, _ = outline_draft._inputs(captured)
     session = multi_turn.build_multi_turn_session_seed(prepared)
     first, second = event("noop", "machine", None, resource_state="loaded"), sequence()[0]
     second = {**second, "outline_id": first["outline_id"]}
     status, _ = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-        response={"thought": "Two options under one label.", "candidate_events": [first, second], "selected_candidate_index": 1}))
+        response={"thought": "Two options under one label.", "candidate_events": [second, first]}))
     assert status == "need_next_task" and session["accepted_outline_prefix"][0]["event_name"] == second["event_name"]
 
 
@@ -1422,6 +1453,7 @@ def test_a_base_motion_primitive_locates_a_mobile_resource_by_its_pose():
     model = prepared["recovery_resources"]["KMR"]["recovery_des_model"]
     assert model["state_variables"]["pose"]["fields"] == ["x", "y", "yaw"]
     assert model["state_variables"]["pose"]["locates_resource"] is True
+    assert model["state_variables"]["pose"]["effect"] == "base_pose"
     assert _coordinate_parameters(model) == ["x", "y", "yaw"]
 
 def test_conditions_come_from_each_resources_model_and_primitives():
@@ -1442,6 +1474,8 @@ def test_conditions_come_from_each_resources_model_and_primitives():
     assert added == {"arm": ["pose"], "mover": ["pose"], "machine": ["processCompleted"]}
     variables = {jid: entry["recovery_des_model"]["state_variables"] for jid, entry in prepared["recovery_resources"].items()}
     assert variables["arm"]["pose"]["fields"] == ["x", "y", "z"] and variables["mover"]["pose"]["fields"] == ["x", "y", "yaw"]
+    # Composition reads a pose that follows a primitive effect through that effect's field.
+    assert variables["arm"]["pose"]["effect"] == "current_pose" and "effect" not in variables["mover"]["pose"]
     assert variables["machine"]["processCompleted"]["scope"] == "part" and "pose" not in variables["station"]
     assert prepared["llm_input"]["part_facts"][0]["processCompleted"] == [{"process": "trim", "result": "square"}]
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import _outline_state_field_schema
@@ -1642,6 +1676,22 @@ def test_a_part_s_own_entry_on_a_place_reads_not_stated_until_the_event_states_i
     assert "part_location.<part name>: peg loading_position_1" in facts._resource_row("belt", prepared, stated, names)
 
 
+def test_a_neighbor_that_is_no_resource_changes_no_state_and_is_not_served(tmp_path):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_context as context
+
+    record, specs = _belt_cell(tmp_path)
+    prepared = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts").prepared
+    session = multi_turn.build_multi_turn_session_seed(prepared)
+    # Unchecked, the event names a board that is no resource as the peg's place and as a neighbor.
+    _apply([{**event("peg_on_board", "arm_a", "peg", resource_state="placed", held_part=None, part_location="board"),
+             "neighbor_end_state": {"board": {"slot_1": "peg"}}}], session, prepared)
+    assert "board" not in session["symbolic_resources"]
+    assert not [row for row in session["accepted_outline_prefix"][-1]["condition_changes"] if row["entity"] == "board"]
+    assert session["accepted_outline_prefix"][-1]["neighbor_end_state"] == {"board": {"slot_1": "peg"}}
+    # The next prompt serves recorded resources only, so the board's name in the peg's location serves nothing.
+    assert "board" not in context.select_outline_context(prepared, session)["resource_jids"]
+
+
 def test_a_resource_lookup_states_current_values_and_what_events_left_unstated(tmp_path):
     record, specs = _belt_cell(tmp_path)
     buffer = record["prepared_recovery_request"]["recovery_resources"]["buffer"]
@@ -1708,7 +1758,7 @@ def test_a_place_inside_a_resource_changes_only_the_owner_record_its_events_decl
     prepared = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts").prepared
     names = facts.resource_names(prepared)
     unstated, stated = (multi_turn.build_multi_turn_session_seed(prepared) for _ in range(2))
-    assert "staging_part none (buffer tray)" in facts._resource_row("buffer", prepared, unstated, names)
+    assert "staging_part null (buffer tray)" in facts._resource_row("buffer", prepared, unstated, names)
     to_tray = event("peg_to_tray", "arm_a", "peg", resource_state="placed", held_part=None, part_state="ready",
                     part_location="buffer tray")
     _apply([to_tray], unstated, prepared)

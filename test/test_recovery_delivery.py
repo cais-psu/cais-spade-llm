@@ -1544,9 +1544,10 @@ def test_kmr_owned_primitive_catalog_and_recovery_preserve_partial_custody():
                                       gripper_state='closed')
         catalog = {entry['name']: entry for entry in agent.recovery_execution_primitive_catalog()}
         assert {'compute_pick_targets', 'compute_place_targets', 'move_cartesian',
-                'move_to_named_pose', 'move_base', 'open_gripper', 'close_gripper',
-                'attach_part', 'detach_part'} <= catalog.keys()
-        assert {'rotate_arm_base', 'move_to_configuration', 'dock', 'custody'}.isdisjoint(catalog)
+                'move_to_named_pose', 'move_base', 'grasp_part', 'release_part'} <= catalog.keys()
+        # Gripper controls stay inside grasp_part and release_part.
+        assert {'rotate_arm_base', 'move_to_configuration', 'dock', 'custody', 'open_gripper', 'close_gripper',
+                'attach_part', 'detach_part'}.isdisjoint(catalog)
         assert catalog['move_cartesian']['params']['target']['type'] == 'array'
         assert catalog['move_cartesian']['output_schema']['fraction'] == 'number'
         # The snapshot a macro checks against carries what the KMR holds, as a UR5e's does.
@@ -1574,7 +1575,6 @@ def test_a_catalog_asks_for_every_parameter_a_declared_effect_reads():
     agent = KMRResourceAgent('kmr-catalog-test@localhost', 'none', worker=SimpleNamespace(run=AsyncMock()))
     catalog = {entry['name']: entry for entry in agent.recovery_execution_primitive_catalog()}
     assert 'part_name' in catalog['grasp_part']['required_params']
-    assert 'part_name' in catalog['attach_part']['required_params']
     assert catalog['release_part']['required_params'] == []
 
 

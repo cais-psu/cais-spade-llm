@@ -529,8 +529,10 @@ def test_missing_or_private_context_never_invokes_live_observation(context, monk
                                                                   response=response, planner=object()))
     assert turn["context_errors"] and not turn["served_context"]
     live.assert_not_called()
-    asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session, response=response, planner=object()))
-    assert session["status"] == "NEEDS_CONTEXT"
+    _, repeated = asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
+                                                                      response=response, planner=object()))
+    assert "no new information" in repeated["context_errors"][-1]["error"]
+    live.assert_not_called()
 
 
 def test_public_snapshot_and_prompt_exclude_private_canaries(context):
@@ -847,17 +849,17 @@ def test_missing_robot_pose_uses_only_its_owner_and_never_calls_live_offline(con
         assert turn["served_context"][ref]["captured_at"] == 100.0
 
 
-def test_multi_turn_loop_records_retrieval_and_stops_without_progress(context, tmp_path, monkeypatch):
+def test_multi_turn_loop_records_retrieval_and_stops_at_the_turn_budget_without_progress(context, tmp_path, monkeypatch):
     prepared, session, _, _ = context
     prepared["recovery_debug"] = {"per_turn_debug_dir": str(tmp_path)}
     prepared["recovery_session"]["session_id"] = "retrieval-test"
-    session.update(current_phase="outline", max_turns=5)
+    session.update(current_phase="outline", max_turns=2)
     llm = AsyncMock(return_value={"thought": "Need the recorded part identities", "decision": "need_context", "context_requests": ["/parts"]})
     planner = SimpleNamespace(product_agent=SimpleNamespace(ask_llm_structured=llm))
     monkeypatch.setattr(multi_turn, "_try_handle_modeled_continuation", AsyncMock(return_value=None))
     asyncio.run(multi_turn.execute_multi_turn_recovery(planner, prepared, session_state=session))
     final = prepared["multi_turn_session_state"]
-    assert final["status"] == "NEEDS_CONTEXT"
+    assert final["status"] == "des_turn_limit"
     assert final["current_phase"] == "outline"
     assert final["accepted_outline_prefix"] == []
     assert llm.await_count == 2
@@ -945,7 +947,7 @@ def test_retrieval_prompt_states_request_limits_and_separates_declared_contracts
 
 
 @pytest.mark.parametrize("last_indices", [(1, 0), (0,), (1,)])
-def test_outline_retrieval_stops_on_reordered_or_subset_known_facts(context, last_indices):
+def test_outline_retrieval_answers_reordered_or_subset_known_facts_without_stopping(context, last_indices):
     prepared, session, jids, _ = context
     refs = [f"/resources/{jid}/snapshot" for jid in jids[:2]]
     async def retrieve(requested):
@@ -955,7 +957,7 @@ def test_outline_retrieval_stops_on_reordered_or_subset_known_facts(context, las
     assert session["status"] != "NEEDS_CONTEXT"
     requested = [refs[index] for index in last_indices]
     _, repeated = asyncio.run(retrieve(requested))
-    assert session["status"] == "NEEDS_CONTEXT"
+    assert session["status"] != "NEEDS_CONTEXT"
     assert repeated["context_requests"] == requested
     assert repeated["served_context"] == {ref: first["served_context"][ref] for ref in requested}
     assert "no new information" in repeated["context_errors"][-1]["error"]
@@ -979,7 +981,7 @@ def test_outline_retrieval_allows_new_information_among_known_references(context
     else:
         assert new in mixed["served_context"]
     _, repeated = asyncio.run(retrieve([new]))
-    assert session["status"] == "NEEDS_CONTEXT"
+    assert session["status"] != "NEEDS_CONTEXT"
     assert "no new information" in repeated["context_errors"][-1]["error"]
 
 
@@ -1000,8 +1002,9 @@ def test_outline_retrieval_refreshes_after_an_accepted_transition(context, missi
     else:
         assert before["served_context"][ref]["value"] == after["served_context"][ref]["value"]
         assert before["served_context"][ref]["revision"] != after["served_context"][ref]["revision"]
-    asyncio.run(retrieve())
-    assert session["status"] == "NEEDS_CONTEXT"
+    _, repeated = asyncio.run(retrieve())
+    assert session["status"] != "NEEDS_CONTEXT"
+    assert "no new information" in repeated["context_errors"][-1]["error"]
 
 
 @pytest.mark.parametrize("change", ["value", "source", "captured_at"])
@@ -1019,16 +1022,17 @@ def test_outline_retrieval_retains_changed_fact_evidence_at_same_revision(contex
     _, changed = asyncio.run(retrieve())
     assert session["status"] != "NEEDS_CONTEXT"
     assert changed["served_context"][ref] == fact
-    asyncio.run(retrieve())
-    assert session["status"] == "NEEDS_CONTEXT"
+    _, repeated = asyncio.run(retrieve())
+    assert session["status"] != "NEEDS_CONTEXT"
+    assert "no new information" in repeated["context_errors"][-1]["error"]
 
 
 @pytest.mark.parametrize("missing", [False, True])
-def test_multi_turn_loop_stops_alternating_known_requests_after_compaction(context, tmp_path, monkeypatch, missing):
+def test_multi_turn_loop_answers_alternating_known_requests_until_the_turn_budget(context, tmp_path, monkeypatch, missing):
     prepared, session, jids, _ = context
     prepared["recovery_debug"] = {"per_turn_debug_dir": str(tmp_path)}
     prepared["recovery_session"]["session_id"] = "alternating-retrieval-test"
-    session.update(current_phase="outline", max_turns=8)
+    session.update(current_phase="outline", max_turns=3)
     refs = ([f"/parts/{name}/target" for name in ("gear_small", "KET4_Square_4mm")] if missing else
             [f"/resources/{jid}/snapshot" for jid in jids[:2]])
     responses = [{"thought": "Read recorded facts", "decision": "need_context", "context_requests": [ref]}
@@ -1040,7 +1044,8 @@ def test_multi_turn_loop_stops_alternating_known_requests_after_compaction(conte
     monkeypatch.setattr(multi_turn, "_try_handle_modeled_continuation", AsyncMock(return_value=None))
     asyncio.run(multi_turn.execute_multi_turn_recovery(planner, prepared, session_state=session))
     final = prepared["multi_turn_session_state"]
-    assert final["status"] == "NEEDS_CONTEXT"
+    # A repeat ends nothing by itself; only the turn budget does.
+    assert final["status"] == "des_turn_limit"
     assert final["outline_context_seen_results"]
     assert final["accepted_outline_prefix"] == []
     assert llm.await_count == 3
@@ -1337,6 +1342,51 @@ def test_primitive_composition_still_retrieves_its_own_catalog(context):
     )
     assert errors == []
     assert served["/primitive_contracts/move_to_named_pose"]["name"] == "move_to_named_pose"
+
+
+def test_primitive_composition_lists_a_value_too_large_to_serve_by_field(context):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+        multi_turn_primitive_generation,
+    )
+
+    prepared, session, jids, _ = context
+    limit = multi_turn_primitive_generation._SERVED_VALUE_LIMIT_CHARS
+    event = {"outline_id": "RECOVERY_SEQ1", "resource_jid": jids[0], "notes": "x" * (limit + 1), "small": 1}
+    served, errors = multi_turn_primitive_generation._serve_context_requests(
+        prepared_recovery_request=prepared, session_state=session, outline_event=event,
+        context_requests=["/outline_event", "/outline_event/small"])
+    assert errors == []
+    # The LLM learns each field's size and requests the fields it needs; small values are served whole.
+    listing = served["/outline_event"]
+    assert listing["too_large_to_serve"] is True and listing["size_chars"] > limit
+    assert listing["field_sizes_chars"]["notes"] > limit and listing["field_sizes_chars"]["small"] == 1
+    assert "/outline_event/outline_id" in listing["request_instead"]
+    assert served["/outline_event/small"] == 1
+
+
+def test_a_primitive_contract_card_lists_its_declared_alternatives():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+        multi_turn_primitive_generation,
+    )
+
+    catalog = [{"name": "start_job", "params": {"job_id": {"type": "string"}}, "required_params": ["job_id"],
+                "preconditions": {"selected_program": {"equals": program}}, "effects": {"resource_state": {"set": "running"}},
+                "product_guards": {"current_process": {"not_matches": {"machine": "M9"}}}} for program in ("circle", "square")]
+    catalog.append({"name": "pause_job", "params": {}, "preconditions": {}, "effects": {"resource_state": {"set": "paused"}}})
+    catalog.append({"name": "complete_job", "params": {"result": {}}, "preconditions": {}, "controllable": False,
+                    "after_sec": {"$evidence": "job.processing_time_sec"}, "effects": {"resource_state": {"set": "completed"}}})
+    card = multi_turn_primitive_generation._visible_primitive_catalog_card(catalog)
+    assert [row["name"] for row in card] == ["start_job", "pause_job", "complete_job"]
+    # An awaited outcome says so on its card, under its declared names.
+    assert card[2]["controllable"] is False and card[2]["after_sec"] == {"$evidence": "job.processing_time_sec"}
+    start = card[0]
+    assert "preconditions" not in start and start["params"] == {"job_id": {"type": "string"}}
+    assert [row["preconditions"] for row in start["alternatives"]] == [
+        {"selected_program": {"equals": "circle"}}, {"selected_program": {"equals": "square"}}]
+    assert start["alternatives"][0]["product_guards"] == {"current_process": {"not_matches": {"machine": "M9"}}}
+    assert card[1]["effects"] == {"resource_state": {"set": "paused"}} and "alternatives" not in card[1]
+    assert [row["name"] for row in multi_turn_primitive_generation._visible_primitive_catalog_names(catalog)] == [
+        "start_job", "pause_job", "complete_job"]
 
 
 def test_public_capabilities_keep_recorded_limits_sources_empty_values_and_conflicts(context):

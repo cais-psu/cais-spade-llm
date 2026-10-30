@@ -82,6 +82,9 @@ def test_a_transport_reaches_downstream_stops_only(rid, start, target, status):
     # The KMR's routes never reach the assembly station; from a free spot beside it the arm reaches its edge.
     ([-0.65, 0.0, 1.05], "FEASIBLE"),
     ([0.0, 0.0, 1.05], "NEEDS_CONTEXT"),
+    # M2's staging tray lies inside the ur5e-2 work area; the free spots from which the arm reaches it are
+    # narrower than a 0.25 m grid.
+    ([-2.6, 1.1, 1.0], "FEASIBLE"),
 ])
 def test_a_mobile_base_reaches_from_a_free_base_pose_its_routes_never_use(target, status):
     from cais_spade_llm.recovery_framework import SCENE_PATH

@@ -33,6 +33,7 @@ from cais_spade_llm.agents.shared_information.llm_request_records import (
     recovery_request_directory,
 )
 from cais_spade_llm.resources.resource_primitives import (
+    filter_recovery_primitive_catalog,
     filter_synthesis_primitive_catalog,
 )
 from cais_spade_llm.resources.resource_profile import (
@@ -300,6 +301,9 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
         "check_ra_feasibility": recovery_session.get("check_ra_feasibility") is True,
         "check_nonblocking": recovery_session.get("check_nonblocking") is True,
         "check_cca_safety": recovery_session.get("check_cca_safety") is True,
+        **({"single_pass_outline": True} if recovery_session.get("single_pass_outline") is True else {}),
+        **({"safety_rules_to_llm": recovery_session["safety_rules_to_llm"]}
+           if "safety_rules_to_llm" in recovery_session else {}),
         "turn_index": 0,
         "max_turns": max_turns,
         "max_observations": max_observations,
@@ -3219,13 +3223,14 @@ def _primitive_catalog_for_resource(
 ) -> list[dict[str, Any]]:
     recovery_resources = dict(prepared_recovery_request.get("recovery_resources") or {})
     recovery_entry = dict(recovery_resources.get(resource_jid) or {})
-    return filter_synthesis_primitive_catalog(
+    catalog = filter_synthesis_primitive_catalog(
         [
             dict(row)
             for row in (recovery_entry.get("primitive_catalog") or [])
             if isinstance(row, dict)
         ]
     )
+    return filter_recovery_primitive_catalog(catalog, resource_type=recovery_entry.get("resource_type", ""))
 
 
 def _primitive_resource_sequence_findings(
@@ -3658,7 +3663,7 @@ def _build_phase_prompt(
         prompt_session = {key: value for key, value in session_state.items() if key not in {
             "turns", "projected_physical_evidence", "pending_outline_validation",
             "nominal_continuation_evidence", "outline_monitor_context",
-            "validation_resource_context", "validation_resource_evidence_captures",
+            "validation_resource_context", "validation_resource_evidence_captures", "single_pass_checks",
         }}
         if phase == "outline":
             prompt_session["turns"] = [{key: deepcopy(turn[key]) for key in (
@@ -3767,20 +3772,22 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
         from .multi_turn_diagnostic import llm_selects_next_event
         from .multi_turn_outline_facts import (
             schema_with_neighbor_end_state,
+            schema_with_outline_events,
             schema_with_resource_names,
             schema_without_params,
         )
 
         chooses = llm_selects_next_event(session_state)
-        if chooses:
-            schema["schema"]["properties"]["selected_candidate_index"] = {
-                "type": "integer", "minimum": 0, "maximum": candidate_bound - 1,
-                "description": "Index of the candidate you choose."}
-        decision = schema["schema"]["properties"].get("decision")
-        if decision is not None:
-            decision["enum"] = [*decision["enum"], "recovery_complete"]
-            decision["description"] = ("Use null for proposed events, need_context to request facts, or "
-                                       "recovery_complete when you judge the failure overcome.")
+        if session_state.get("single_pass_outline") is True:
+            # One reply is the whole outline: it chooses no candidate, and its last event ends the recovery.
+            schema = schema_with_outline_events(schema)
+        else:
+            # The LLM lists its candidates most preferred first, so the order is its choice; no index is asked for.
+            decision = schema["schema"]["properties"].get("decision")
+            if decision is not None:
+                decision["enum"] = [*decision["enum"], "recovery_complete"]
+                decision["description"] = ("Use null for proposed events, need_context to request facts, or "
+                                           "recovery_complete when you judge the failure overcome.")
         schema = schema_without_params(schema)
         if chooses:
             # Code applies neighbor_end_state unchecked, so only drafts without outline checks offer it.
@@ -5382,6 +5389,9 @@ def _ground_modeled_step_value(
                 bindings=bindings,
             )
             return {"context_ref": grounded}, unresolved
+        if "$state" in value or "$sub" in value:
+            # The robot computes these at run time; a recovery step cannot carry them.
+            return deepcopy(value), {"$state" if "$state" in value else "$sub"}
         grounded_dict: dict[str, Any] = {}
         unresolved: set[str] = set()
         for key, item in value.items():

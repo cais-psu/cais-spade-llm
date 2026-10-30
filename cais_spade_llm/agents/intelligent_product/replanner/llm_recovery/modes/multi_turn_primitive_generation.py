@@ -36,6 +36,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_v
     annotate_validation_finding,
 )
 from cais_spade_llm.resources.resource_primitives import (
+    filter_recovery_primitive_catalog,
     filter_synthesis_primitive_catalog,
 )
 from cais_spade_llm.resources.resource_profile import (
@@ -498,14 +499,12 @@ def _primitive_catalog_for_resource(
     recovery_resources = dict(prepared_recovery_request.get("recovery_resources") or {})
     recovery_entry = dict(recovery_resources.get(resource_jid) or {})
     if prepared_recovery_request.get("composition_validation_version") == 1:
-        return deepcopy(recovery_entry.get("execution_primitive_catalog") or [])
-    return filter_synthesis_primitive_catalog(
-        [
-            dict(row)
-            for row in (recovery_entry.get("primitive_catalog") or [])
-            if isinstance(row, dict)
-        ]
-    )
+        catalog = recovery_entry.get("execution_primitive_catalog") or []
+    else:
+        catalog = filter_synthesis_primitive_catalog(
+            [dict(row) for row in (recovery_entry.get("primitive_catalog") or []) if isinstance(row, dict)]
+        )
+    return filter_recovery_primitive_catalog(catalog, resource_type=recovery_entry.get("resource_type", ""))
 
 
 def _resource_type_for_resource(
@@ -1276,34 +1275,50 @@ def _primitive_resource_sequence_findings(
 # ---------------------------------------------------------------------------
 
 
+_CONTRACT_CARD_FIELDS = ("preconditions", "effects", "product_guards", "product_effects", "parameters", "controllable",
+                         "after_sec")
+
+
 def _visible_primitive_catalog_card(
     primitive_catalog: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     card: list[dict[str, Any]] = []
+    by_name: dict[str, dict[str, Any]] = {}
     for entry in primitive_catalog or []:
         if not isinstance(entry, dict):
             continue
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        card.append(
-            {
-                "name": name,
-                "description": str(
-                    entry.get("description") or entry.get("semantic_summary") or ""
-                ).strip(),
-                "params": deepcopy(entry.get("params") or {}),
-                "required_params": [
-                    str(item).strip()
-                    for item in (entry.get("required_params") or [])
-                    if str(item).strip()
-                ],
-                "preconditions": deepcopy(entry.get("preconditions") or {}),
-                "effects": deepcopy(entry.get("effects") or {}),
-                "output_schema": deepcopy(entry.get("output_schema") or {}),
-                "primitive_kind": str(entry.get("primitive_kind") or "").strip() or None,
-            }
-        )
+        contract = {
+            "preconditions": deepcopy(entry.get("preconditions") or {}),
+            "effects": deepcopy(entry.get("effects") or {}),
+            **{key: deepcopy(entry[key]) for key in _CONTRACT_CARD_FIELDS[2:] if key in entry},
+        }
+        if name in by_name:
+            # A primitive with alternative contracts lists each; a step uses the first that applies.
+            row = by_name[name]
+            if "alternatives" not in row:
+                row["alternatives"] = [{key: row.pop(key) for key in _CONTRACT_CARD_FIELDS if key in row}]
+            row["alternatives"].append(contract)
+            continue
+        row = {
+            "name": name,
+            "description": str(
+                entry.get("description") or entry.get("semantic_summary") or ""
+            ).strip(),
+            "params": deepcopy(entry.get("params") or {}),
+            "required_params": [
+                str(item).strip()
+                for item in (entry.get("required_params") or [])
+                if str(item).strip()
+            ],
+            **contract,
+            "output_schema": deepcopy(entry.get("output_schema") or {}),
+            "primitive_kind": str(entry.get("primitive_kind") or "").strip() or None,
+        }
+        by_name[name] = row
+        card.append(row)
     return card
 
 
@@ -1320,7 +1335,7 @@ def _visible_primitive_catalog_names(
         if not isinstance(entry, dict):
             continue
         name = str(entry.get("name") or "").strip()
-        if not name:
+        if not name or any(row["name"] == name for row in rows):
             continue
         kind = str(entry.get("primitive_kind") or "").strip() or None
         rows.append({"name": name, "primitive_kind": kind})
@@ -1734,6 +1749,25 @@ def _resolve_context_ref(
     return None, f"unknown ref head {head!r}"
 
 
+# A served value larger than this is listed by field instead, and the LLM requests the fields it needs. One
+# provider message holds at most 10 MiB; a KMR's whole recorded evidence alone served as about 18 MB.
+_SERVED_VALUE_LIMIT_CHARS = 100_000
+
+
+def _too_large_to_serve(ref: str, value: Any, size: int) -> dict[str, Any]:
+    """Describe a value too large to serve by its fields and their sizes, so the LLM can request one."""
+    if isinstance(value, dict):
+        fields = {str(key): len(json.dumps(item, default=str)) for key, item in value.items()}
+    elif isinstance(value, list):
+        fields = {str(index): len(json.dumps(item, default=str)) for index, item in enumerate(value)}
+    else:
+        fields = {}
+    example = f"{ref.rstrip('/')}/{next(iter(fields))}" if fields else ref
+    return {"too_large_to_serve": True, "size_chars": size, "limit_chars": _SERVED_VALUE_LIMIT_CHARS,
+            "field_sizes_chars": fields,
+            "request_instead": f"Request only the fields you need, one level deeper, for example {example}."}
+
+
 def _serve_context_requests(
     *,
     session_state: dict[str, Any],
@@ -1758,7 +1792,8 @@ def _serve_context_requests(
         if error:
             errors.append({"context_ref": ref, "reason": error})
             continue
-        served[ref] = value
+        size = len(json.dumps(value, default=str))
+        served[ref] = value if size <= _SERVED_VALUE_LIMIT_CHARS else _too_large_to_serve(ref, value, size)
     return served, errors
 
 
@@ -2185,8 +2220,11 @@ async def generate_primitive_batch_with_llm_agent(
                 "resource and part postcondition from declared effects. Primitive support is only a union "
                 "of possible contributors, not a sequence or a requirement to use every primitive. "
                 "Use exact primitive identities and explicit {\"context_ref\": \"/path\"} bindings. "
-                "Recorded owner inputs and the recovery_des_model are retrievable under "
-                f"/resources/{resource_jid}/resource_evidence and /resources/{resource_jid}/recovery_des_model. "
+                "A contract with controllable false is the resource's own outcome, after after_sec: a step that "
+                "names it sends no command and waits for it; bind its parameters to the record it completes. "
+                f"The recovery_des_model is retrievable under /resources/{resource_jid}/recovery_des_model. "
+                f"Recorded owner inputs are under /resources/{resource_jid}/resource_evidence/<field>: request only "
+                "the fields a parameter binds to; the whole record is too large and is listed by field. "
                 "Missing facts require need_context; they are different from explicit null. "
                 "Calculated event_facts are available only after their producing step. "
                 "For robot targets, prefer recorded owner inputs with part_name, and destination_location "
@@ -2200,9 +2238,10 @@ async def generate_primitive_batch_with_llm_agent(
                 "Geometric overrides require exact owner verification. "
                 "The robot target outputs include approach_pose, target_pose, and retreat_pose; bind all "
                 "seven pose coordinates to preserve the calculated orientation. Custody completion requires "
-                "reaching target_pose, grasp_part or release_part, then retreat_pose. For assembly_slot "
-                "placement, release_part.assembly_slot must bind slot_x, slot_y, part_height, board_top_z, "
-                "place_part_origin_z (as part_origin_z), and destination_location from the calculated place targets. "
+                "reaching target_pose, grasp_part or release_part, then retreat_pose. Only a place into the part's "
+                "assembly_slot (the location in /parts/<name>/target) binds release_part.assembly_slot: slot_x, "
+                "slot_y, part_height, board_top_z, place_part_origin_z (as part_origin_z), and destination_location "
+                "from the calculated place targets. Any other destination has no slot fields, so omit assembly_slot. "
                 "Validation findings identify the step or missing postcondition to revise. "
                 "This is composition for review; no execution is authorized."
             )

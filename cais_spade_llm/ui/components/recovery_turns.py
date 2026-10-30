@@ -142,6 +142,14 @@ def _legacy_llm_response(result: dict) -> dict | None:
     return None
 
 
+def _response_choices(raw: dict) -> list[dict]:
+    """Return a recorded LLM reply as OpenAI-style choices; a Claude message becomes one choice holding its text."""
+    if raw.get("type") == "message" and isinstance(raw.get("content"), list):
+        text = "".join(block.get("text", "") for block in raw["content"] if block.get("type") == "text")
+        return [{"message": {"content": text}}]
+    return raw.get("choices", [])
+
+
 def _proposed_events(data: dict) -> None:
     ui.label("Proposed events").classes("font-semibold")
     responses = [capture for capture in data["captures"] if capture["status"] == "captured"
@@ -149,7 +157,7 @@ def _proposed_events(data: dict) -> None:
     for capture in responses:
         record = capture["record"]
         ui.label(f"Round {record.get('tool_round', '?')} · attempt {record.get('attempt', '?')}").classes("text-sm text-slate-500")
-        choices = record.get("raw_response", {}).get("choices", [])
+        choices = _response_choices(record.get("raw_response", {}))
         if not choices:
             ui.label("LLM response message missing from capture.").classes("text-amber-700")
         for index, choice in enumerate(choices):
@@ -325,12 +333,13 @@ def render_turn_content(data: dict, tab: str, *, state_key: str = "") -> None:
         if kind == "provider_request":
             exact = True
             payload = record.get("payload", {})
-            ui.label(f"Model: {payload.get('model', 'not recorded')} · Reasoning effort: {payload.get('reasoning_effort', 'not recorded')}").classes("text-xs text-slate-500")
+            effort = payload.get("reasoning_effort") or (payload.get("output_config") or {}).get("effort", "not recorded")
+            ui.label(f"Model: {payload.get('model', 'not recorded')} · Reasoning effort: {effort}").classes("text-xs text-slate-500")
             _messages(payload.get("messages", []))
         elif kind == "provider_response":
             exact = True
             raw = record.get("raw_response", {})
-            _messages([{**choice.get("message", {}), "role": "assistant"} for choice in raw.get("choices", [])], pretty_json=True)
+            _messages([{**choice.get("message", {}), "role": "assistant"} for choice in _response_choices(raw)], pretty_json=True)
         elif kind in {"tool_result", "tool_error"}:
             _expansion("Returned context", f"{state_key}:{capture['path']}:context", lambda record=record: record, _text)
         else:
@@ -406,10 +415,6 @@ def _validation_records(records: list[dict], *, state_key: str) -> None:
 
 _VERDICT_COLORS = {"FEASIBLE": "positive", "SAFE": "positive", "NONBLOCKING": "positive", "NEEDS_CONTEXT": "warning",
                    "INFEASIBLE": "negative", "UNSAFE": "negative", "BLOCKING": "negative"}
-# How the RA derived a changed condition (Alg. 1) when no producing primitive is involved.
-_DERIVATIONS = {"free": "free: resource_state names the DES state", "unchanged": "unchanged",
-                "bookkeeping": "bookkeeping: not derived", "undeclared": "not a declared variable",
-                "place": "a place: decided by capability", "no_producer": "no primitive produces it"}
 
 
 def turn_checks(draft: dict | None, turn: int) -> dict:
@@ -448,7 +453,7 @@ def _llm_candidates(data: dict) -> list:
         record = capture["record"]
         if capture["status"] != "captured" or record.get("kind") != "provider_response":
             continue
-        for choice in record.get("raw_response", {}).get("choices", []):
+        for choice in _response_choices(record.get("raw_response", {})):
             content = choice.get("message", {}).get("content")
             try:
                 response = json.loads(content) if isinstance(content, str) else None
@@ -489,18 +494,26 @@ def _rounded(value: object) -> object:
 def _ra_conditions(conditions: list[dict]) -> None:
     rows = []
     for row in conditions:
-        if row.get("derivation") == "producers":
-            derivation = "produced by " + ", ".join(f"{producer['primitive']} ({producer['status']})"
-                                                     for producer in row.get("producers", []))
+        if row.get("producers"):
+            established = "produced by " + ", ".join(f"{producer['primitive']} ({producer['status']})"
+                                                     for producer in row["producers"])
+        elif row.get("found_by") and not row.get("reason"):
+            established = ("found from the stated pose" if row["found_by"] == "pose"
+                           else f"found by the {row['found_by']} check")
+        elif row.get("status") != "FEASIBLE" or "derivation" in row:
+            # A refused value says why in its reason; a row from an older draft carries no such record.
+            established = ""
+        elif row.get("condition") == "resource_state" and row.get("before") != row.get("after"):
+            established = "names the new state"
         else:
-            derivation = _DERIVATIONS.get(row.get("derivation"), str(row.get("derivation")))
+            established = "already holds"
         change = _value(row.get("after"))
         if "before" in row:
             change = f"{_value(row['before'])} → {change}"
         rows.append({"entity": row.get("entity"), "condition": row.get("condition"), "change": change,
-                     "derivation": derivation, "status": row.get("status"), "reason": row.get("reason", "")})
+                     "established": established, "status": row.get("status"), "reason": row.get("reason", "")})
     _rows_table([("entity", "Entity"), ("condition", "Condition"), ("change", "Before → after"),
-                 ("derivation", "Derivation (Alg. 1)"), ("status", "Status"), ("reason", "Reason")], rows)
+                 ("established", "Established by (Alg. 1)"), ("status", "Status"), ("reason", "Reason")], rows)
 
 
 def _ra_capability(capability: list[dict]) -> None:
@@ -553,8 +566,8 @@ def render_turn_validation(checks: dict, candidates: list) -> None:
     safety = {row["candidate_index"]: row for row in (safety_record or {}).get("results", [])}
     if ra:
         passes = "RA feasibility and CCA safety" if safety_record is not None else "RA feasibility"
-        ui.label(f"The LLM chose candidate {ra['llm_selected_candidate_index'] + 1}. Candidates are checked in the "
-                 f"LLM's order, its choice first; the first that passes {passes} is applied.").classes("text-sm")
+        ui.label(f"The LLM preferred candidate {ra['llm_selected_candidate_index'] + 1}. Candidates are checked in the "
+                 f"LLM's order, its preference first; the first that passes {passes} is applied.").classes("text-sm")
         for result in ra["results"]:
             index = result["candidate_index"]
             event = candidates[index] if index < len(candidates) and isinstance(candidates[index], dict) else {}
@@ -562,7 +575,7 @@ def render_turn_validation(checks: dict, candidates: list) -> None:
                 ui.label(f"Candidate {index + 1} · {result.get('event_name')} · "
                          f"{event.get('resource') or result.get('resource_jid')}").classes("font-semibold")
                 _verdict("RA feasibility (Alg. 1, Eq. 12)", result["feasibility_status"])
-                ui.label("Changed conditions: how each is produced").classes("text-sm")
+                ui.label("Stated values: what establishes each").classes("text-sm")
                 _ra_conditions(result.get("conditions") or [])
                 if result.get("capability"):
                     ui.label("Capability: reach, place and navigation").classes("text-sm")

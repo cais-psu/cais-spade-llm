@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from nicegui import context, ui
@@ -46,18 +47,19 @@ def _render_setup(bridge: SystemBridge) -> None:
     ui.button("Download paper protocol", icon="download", on_click=lambda: ui.download.file(_PAPER))
 
 
-def _render_experiments() -> None:
-    """Render the Journal 2 experiment placeholder and design download."""
+def _render_experiments(*, is_active: Callable[[], bool]) -> None:
+    """Render the Study 1 experiments and the design download; nothing here reaches the live runtime."""
+    from cais_spade_llm.ui.components.recovery_experiments import render_recovery_experiments
+
     with ui.card().classes("w-full gap-3"):
         with ui.row().classes("items-center gap-3"):
             ui.icon("science").classes("text-primary text-2xl")
             ui.label("Experiments").classes("text-xl font-semibold")
-            ui.badge("Coming soon").props("color=blue-grey outline")
-        ui.label("Experiment configuration and results will be added here.").classes("text-slate-600")
         ui.button(
             "Download experiment design", icon="download",
             on_click=lambda: ui.download.file(_EXPERIMENT_DESIGN),
         ).props("outline")
+    render_recovery_experiments(is_active=is_active)
 
 
 def render(bridge: SystemBridge) -> None:
@@ -99,7 +101,7 @@ def render(bridge: SystemBridge) -> None:
                     from cais_spade_llm.ui.pages import recovery
                     recovery.render(root=_ROOT, is_active=lambda: tabs.value == "recovery", bridge=bridge)
                 elif name == "experiments":
-                    _render_experiments()
+                    _render_experiments(is_active=lambda: tabs.value == "experiments")
                 else:
                     ui.label(
                         "Saved results retain their recorded inputs; the current setup is not applied to historical runs."

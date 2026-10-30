@@ -840,14 +840,14 @@ def test_turn_validation_shows_each_candidate_and_which_cca_check_judged_it(tmp_
         "captures": [{"status": "captured", "path": "response.json", "record": response}], "results": [], "prompts": []}))
     ra = [{"candidate_index": 0, "feasibility_status": "FEASIBLE", "event_name": "place_gear", "resource_jid": "jid-4",
            "conditions": [{"entity": "ur5e-4", "condition": "held_part", "before": "gear_small", "after": None,
-                           "derivation": "producers", "status": "FEASIBLE",
+                           "status": "FEASIBLE",
                            "producers": [{"primitive": "open_gripper", "status": "FEASIBLE"}]},
-                          {"entity": "ur5e-4", "condition": "resource_state", "after": "placed", "derivation": "free",
+                          {"entity": "ur5e-4", "condition": "resource_state", "after": "placed",
                            "status": "FEASIBLE"}],
            "capability": [{"check": "place", "part": "gear_small", "place": "board", "status": "FEASIBLE",
                            "witness": {"joint_positions": [0.12345, -1.5]}}], "primitive_set": ["open_gripper"]},
           {"candidate_index": 1, "feasibility_status": "INFEASIBLE", "event_name": "move_home", "resource_jid": "jid-3",
-           "conditions": [{"entity": "ur5e-3", "condition": "joint_lock", "after": True, "derivation": "undeclared",
+           "conditions": [{"entity": "ur5e-3", "condition": "joint_lock", "after": True,
                            "status": "INFEASIBLE", "reason": "joint_lock is not a declared variable of ur5e-3"}],
            "capability": [], "primitive_set": []}]
     draft = {
@@ -885,7 +885,7 @@ def test_turn_validation_shows_each_candidate_and_which_cca_check_judged_it(tmp_
     assert "CCA nonblocking (Eq. 6): normal production can carry on" in labels
     assert "ur5e-3 is still in the board area" in labels
     tables = [item for item in client.elements.values() if isinstance(item, ui.table)]
-    assert any(row.get("derivation") == "produced by open_gripper (FEASIBLE)" and row["change"] == "gear_small → null"
+    assert any(row.get("established") == "produced by open_gripper (FEASIBLE)" and row["change"] == "gear_small → null"
                for table in tables for row in table.rows)
     assert any(row.get("evidence") == "witness: {\"joint_positions\": [0.123, -1.5]}"
                for table in tables for row in table.rows)
@@ -1454,13 +1454,22 @@ def test_recovery_tabs_default_to_run_and_build_run_once(tmp_path, monkeypatch):
     client.delete()
 
 
-def test_experiments_placeholder_keeps_one_view_and_downloads_design(monkeypatch):
-    """Opening the placeholder and its download never accesses the runtime."""
+def test_experiments_tab_sets_up_study_1_without_reaching_the_runtime(monkeypatch, tmp_path):
+    """The Experiments tab plans Study 1 batches; opening it starts no work and never accesses the runtime."""
+    from cais_spade_llm.recovery_framework import outline_experiments, part_slippage_example
+    from cais_spade_llm.ui.components import recovery_experiments
+
     bridge = MagicMock(spec=SystemBridge)
     render_run = Mock()
     monkeypatch.setattr(recovery_run, "render", render_run)
     download = Mock()
     monkeypatch.setattr(ui.download, "file", download)
+    monkeypatch.setattr(outline_experiments, "_RUNNER", outline_experiments.OutlineExperiments(root=tmp_path / "runs"))
+    monkeypatch.setattr(part_slippage_example, "default_observation_paths",
+                        lambda: {"Part slippage": "part.json", "Conveyor breakdown": "conveyor.json"})
+    polls = []
+    monkeypatch.setattr(recovery_experiments.PageRefresh, "timer",
+                        lambda self, interval, callback, **kwargs: polls.append((self.is_active, callback)))
     callbacks = {}
     original_click = ui.button.on_click
 
@@ -1477,21 +1486,101 @@ def test_experiments_placeholder_keeps_one_view_and_downloads_design(monkeypatch
     with client:
         recovery_framework.render(bridge)
         tabs = next(item for item in client.elements.values() if isinstance(item, ui.tabs))
-        badge = next(item for item in client.elements.values() if isinstance(item, ui.badge))
-        assert badge.text == "Coming soon"
-        labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
-        assert "Experiments" in labels
-        assert "Experiment configuration and results will be added here." in labels
-        assert not any(isinstance(item, ui.timer) for item in client.elements.values())
+
+        def labels():
+            return [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+
+        assert "Experiments" in labels() and "Study 1: ablation" in labels()
+        assert not any(isinstance(item, ui.badge) for item in client.elements.values())
+        boxes = {item.text: item for item in client.elements.values() if isinstance(item, ui.checkbox)}
+        assert set(boxes) == {"Part slippage", "Conveyor breakdown"} and boxes["Part slippage"].value is True
+        numbers = {item._props.get("label"): item for item in client.elements.values() if isinstance(item, ui.number)}
+        assert set(outline_experiments.CONFIGURATIONS) <= set(numbers)
+        # Three attempts per setting by default.
+        per_scenario = 3 * len(outline_experiments.CONFIGURATIONS)
+        assert f"Planned: {per_scenario} attempts (1 scenario × {per_scenario} attempts per scenario)." in labels()
+        numbers["Framework, incremental"].value = 0
+        boxes["Conveyor breakdown"].value = True
+        assert (f"Planned: {2 * (per_scenario - 3)} attempts (2 scenarios × {per_scenario - 3} attempts per "
+                "scenario).") in labels()
+        assert {"Start batch", "Stop", "Export CSV", "Audit missing"} <= set(callbacks)
         callbacks["Download experiment design"]()
         download.assert_called_once_with(recovery_framework._EXPERIMENT_DESIGN)
         assert recovery_framework._EXPERIMENT_DESIGN.is_file()
+        # The tab polls the batch runner only while it is the visible view, and is built once.
+        assert len(polls) == 1 and polls[0][0]() is True
         tabs.value = "run"
+        assert polls[0][0]() is False
         tabs.value = "experiments"
-        assert [item for item in client.elements.values() if isinstance(item, ui.badge)] == [badge]
-        assert len([item for item in client.elements.values() if isinstance(item, ui.button)]) == 1
+        assert len(polls) == 1
         render_run.assert_called_once()
         assert bridge.mock_calls == []
+        assert not (tmp_path / "runs").exists()
+    client.delete()
+
+
+def test_experiments_tab_shows_a_saved_batch_and_its_attempt_by_name(monkeypatch, tmp_path):
+    """A saved batch fills the Fig. 11 and Table 6 tables; an attempt shows its events and audit by resource name."""
+    from cais_spade_llm.recovery_framework import outline_experiments, part_slippage_example
+    from cais_spade_llm.ui.components import recovery_experiments
+
+    robot = "recovery-resource-3@localhost"
+    draft = tmp_path / "runs" / "batch_1" / "attempts" / "draft_1"
+    draft.mkdir(parents=True)
+    (draft / "draft.json").write_text(json.dumps({
+        "status": "draft", "ra_feasibility_check": True, "turn_decisions": {"need_revision": 1},
+        "transition_trace": [{"event_name": "set_down_KET4", "resource_jid": robot, "part_name": "KET4",
+                              "condition_changes": [{"entity": robot, "variable": "held_part", "value": None, "by": "LLM"}]}],
+        "ra_feasibility_checks": [{"results": [{"feasibility_status": "INFEASIBLE",
+                                                "capability": [{"check": "place", "status": "INFEASIBLE"}]}]}]}))
+    (draft / "audit.json").write_text(json.dumps({
+        "status": "audited", "outcome": "unsafe", "failing_stage": "cca_safety", "first_failing_event": 1,
+        "findings": [{"reason": f"{robot} is in assembly_board-v1 while ur5e-4 is"}]}))
+    attempt = {"attempt_id": "attempt_001", "scenario": "Part slippage", "configuration": "Framework, incremental",
+               "repetition": 1, "status": "finished"}
+    (draft.parents[1] / "batch.json").write_text(json.dumps({
+        "batch_id": "batch_1", "status": "finished", "message": "Finished 1 attempts.", "seed": 7,
+        "settings": {"model": "gpt-5.4", "reasoning_effort": "medium", "max_turns": 80}, "plan": [attempt],
+        "rows": [outline_experiments.attempt_row(attempt, draft)],
+        "resource_names": {"Part slippage": {robot: "ur5e-3"}}}))
+    monkeypatch.setattr(outline_experiments, "_RUNNER", outline_experiments.OutlineExperiments(root=tmp_path / "runs"))
+    monkeypatch.setattr(part_slippage_example, "default_observation_paths", lambda: {"Part slippage": "part.json"})
+    polls, selects = [], []
+    monkeypatch.setattr(recovery_experiments.PageRefresh, "timer",
+                        lambda self, interval, callback, **kwargs: polls.append(callback))
+    original_select = ui.table.on_select
+    monkeypatch.setattr(ui.table, "on_select",
+                        lambda table, callback: selects.append((table, callback)) or original_select(table, callback))
+    request = Request({
+        "type": "http", "path": "/recovery-framework", "headers": [],
+        "query_string": b"tab=experiments",
+    })
+    client = Client(context.client.page, request=request)
+    with client:
+        recovery_framework.render(MagicMock(spec=SystemBridge))
+
+    async def poll():
+        with client:
+            await polls[0]()
+
+    asyncio.run(poll())
+    with client:
+        tables = [item for item in client.elements.values() if isinstance(item, ui.table)]
+        outcomes, rejections, attempts = tables[:3]
+        assert [(row["configuration"], row["scenario"], row["unsafe"]) for row in outcomes.rows] == [
+            ("Framework, incremental", "Part slippage", 1), ("Framework, incremental", "All scenarios", 1)]
+        assert rejections.rows[0]["physical_evidence"] == 1 and rejections.rows[0]["revisions or rewrites"] == 1
+        assert [(row["attempt_id"], row["outcome"]) for row in attempts.rows] == [("attempt_001", "unsafe")]
+        table, select = next((table, callback) for table, callback in selects if table is attempts)
+        table.selected = [attempts.rows[0]]
+        select()
+    _finish_reads(client)
+    with client:
+        labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+        assert "Audit: unsafe, first failing check cca_safety at event 1." in labels
+        assert "• ur5e-3 is in assembly_board-v1 while ur5e-4 is" in labels
+        events = [item for item in client.elements.values() if isinstance(item, ui.table)][-1]
+        assert events.rows[0]["resource"] == "ur5e-3" and "ur5e-3  held_part = none" in events.rows[0]["end_state"]
     client.delete()
 
 

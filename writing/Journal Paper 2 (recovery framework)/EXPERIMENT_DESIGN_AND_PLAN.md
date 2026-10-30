@@ -53,45 +53,66 @@ execute recovery. A validated outline, a validated primitive composition,
 and observed recovery of production are distinct outcomes. Actual Gazebo or
 hardware recovery measurements require a later execution study.
 
-### Ablation configurations (2 × 2)
+### Ablation configurations (six settings)
 
 Study 1 crosses two factors: how the outline is generated (single-pass or
-incremental) and whether events are validated (no validation, or RA and CCA
-validation). Reading across a row shows the effect of incremental generation;
-reading down a column shows the effect of validation.
+incremental) and what the LLM gets besides its own proposal: nothing, the
+safety rules in the prompt, or the framework's validation (RA and CCA checks
+with findings returned). Down a column: single-pass against incremental.
+Across a row: rules hidden, rules in the prompt, then checks.
 
-| | No validation | RA + CCA validation |
-| --- | --- | --- |
-| **Single-pass** (whole outline in one answer) | Single-pass LLM | Single-pass + validation |
-| **Incremental** (one event per turn on a code-tracked state) | Incremental LLM | Full framework |
+| | No rules, no checks | Rules in the prompt, no checks | Framework: rules hidden, RA + CCA checks |
+| --- | --- | --- | --- |
+| **Single-pass** (whole outline in one answer) | LLM, single-pass | LLM + rules, single-pass | Framework, single-pass |
+| **Incremental** (one event per turn on a code-tracked state) | LLM, incremental | LLM + rules, incremental | Framework, incremental |
 
-All four configurations get the same starting prompt (Failure, Recovery Goal,
-Resources, Parts, Safety Rules) and the same public context lookups
-(`need_context`) with the same lookup limit. The full set of observations does
-not fit in one prompt, so no configuration receives everything up front.
-Giving one configuration fewer facts would measure missing information rather
+**Names (user decision, 2026-10-29).** The framework is the validation plus
+the feedback, in two proposal modes; neither mode is called "the framework"
+alone, because single-pass may do as well as incremental. These are the
+Experiments tab names (`outline_experiments.CONFIGURATIONS`). Earlier text
+below and batches recorded before 2026-10-29 use the old names: Single-pass
+LLM = LLM, single-pass; Incremental LLM = LLM, incremental; Single-pass +
+validation = Framework, single-pass; Full framework = Framework, incremental.
+Batches recorded on 2026-10-28 also had "+ rules lookup" settings
+(`safety_rules_to_llm="knowledge_base"`), which the "LLM + rules" settings
+replace.
+
+All six settings get the same starting prompt (Failure, Recovery Goal,
+Resources, Parts) and the same public context lookups (`need_context`) with
+the same lookup limit. The safety rules are withheld from the LLM in the two
+framework settings and the two plain LLM settings
+(`safety_rules_to_llm="hidden"`, user decision 2026-10-28): in the framework
+they stay with the CCA, and the LLM meets a rule only in a CCA refusal. The two
+"LLM + rules" settings add the Safety Rules section to the prompt
+(`safety_rules_to_llm="prompt"`, user decision 2026-10-29, chosen over a
+`/safety_rules` lookup because readers know what "in the prompt" means and the
+models fetched the lookup on turn 1 anyway). They are the informed baseline:
+an unchecked LLM that knows every rule. The full set of observations does
+not fit in one prompt, so no setting receives everything up front.
+Giving one setting fewer facts would measure missing information rather
 than the generation method.
 
-**Single-pass LLM.** The LLM may look up facts, then returns the complete
+**LLM, single-pass.** The LLM may look up facts, then returns the complete
 recovery outline in one answer. Code computes no state between events and
 returns no findings; it only parses the answer and runs PA syntax and
 grounding checks. Several provider requests are possible (lookups), but there
 is one planning answer.
 
-**Incremental LLM.** The LLM proposes one event per turn. Between turns, code
+**LLM, incremental.** The LLM proposes one event per turn. Between turns, code
 applies the proposed effects tentatively and shows the updated projected state
 x<sup>R</sup><sub>k-1</sub> in the next prompt (Sec. 5.1, Eq. 11). Lookups are
 available. Nothing checks feasibility, physical support, or safety.
 
-**Single-pass + validation.** The LLM returns a complete outline as in
-Single-pass LLM. Code then computes the projected states and runs RA
+**Framework, single-pass.** The LLM returns a complete outline as in
+LLM, single-pass. Code then computes the projected states and runs RA
 feasibility, RA physical evidence, and CCA safety on the events in order,
 stopping at the first failing event. On a rejection the LLM receives the
-findings and rewrites the whole outline. Repair from the failing event onward
+findings, together with its refused outline and the index of the refused event (user decision,
+2026-10-27), and rewrites the whole outline. Repair from the failing event onward
 is not allowed, because that is incremental generation. Rewrites continue until
 an outline passes or the token budget ends.
 
-**Full framework.** Incremental LLM plus RA feasibility, RA physical evidence,
+**Framework, incremental.** LLM, incremental plus RA feasibility, RA physical evidence,
 and CCA safety on each proposed event, in that order. A rejected event is not
 admitted, the state does not advance, and the findings are returned so the LLM
 revises that one event. An event is admitted only when all three pass.
@@ -130,9 +151,10 @@ selected specifications. Physical evidence stays with RA because RA owns it.
   whether an outline is complete. The termination rule for validated runs is
   still open in [PAPER_FRAMEWORK.md](PAPER_FRAMEWORK.md); whichever rule is
   chosen applies to both validated configurations.
-- A malformed or incomplete single-pass answer is recorded as did not finish
-  in Single-pass LLM, and as a rejected outline that counts against the budget
-  in Single-pass + validation. Only recorded transport retries are allowed.
+- A reply code cannot read ends the attempt as did not finish in every
+  configuration, as it does in the Full framework (user decision, 2026-10-27;
+  it replaces counting such a reply as a rejected outline in Single-pass +
+  validation). Only recorded transport retries are allowed.
 - Fact lookups are recorded per attempt in every configuration, so a
   difference between single-pass and incremental generation can be checked
   against a difference in lookups.
@@ -151,9 +173,9 @@ Configuration names are labels. They do not rename code identifiers. Preserve
 
 | Configuration | Generation setting | `check_ra_feasibility`, `check_physical_evidence`, `check_cca_safety` | Current availability |
 | --- | --- | --- | --- |
-| Single-pass LLM | Lookups, then a complete outline in one answer | all `false` | Not available. There is no standalone single-pass mode. `action_horizon="full"` prompt text asks for "a complete recovery outline trace" per candidate, but it is unverified on the `validation_contract_version` 2 path. It can reuse the existing lookup handling and change only the reply format and when the loop ends. Phase 4. |
+| Single-pass LLM | Lookups, then a complete outline in one answer | all `false` | Available since 2026-10-27: `OutlineDraft(single_pass_outline=True)` on the shared draft pipeline (same prompt and lookups; only the reply format differs), run from the Experiments tab. |
 | Incremental LLM | One proposal per turn | all `false` | Closest existing path: the validation-off outline draft used for the 19–21 October runs (`outline_diagnostic_bypass`; 1–5 candidates per turn, the LLM picks one with `selected_candidate_index`). Verify it against this definition in Phase 4. |
-| Single-pass + validation | Complete outline, checked after generation, rewritten whole on rejection | all `true` | Not available. Needs the independent audit component (phase 3) as the checker and a whole-outline regeneration loop. Phase 4. |
+| Single-pass + validation | Complete outline, checked after generation, rewritten whole on rejection | all `true` | Available since 2026-10-27: `single_pass_outline` with the three checks. `check_outline` in `multi_turn_validated_event.py` checks each event with the incremental path's own step and is shared with the audit (`outline_audit.py`); a refusal returns the refused outline and its findings for a whole rewrite. |
 | Full framework | One proposal per turn | all `true` | Ran as Attempt 17 with `pure_llm` and `incremental_validated` on the legacy validated route. Phase 4 moves it onto the shared pipeline. |
 
 Distinctions found in the current code on 2026-10-14:
@@ -210,13 +232,15 @@ not promised results.
   the same point on fixed inputs.
 - **H3:** The Full framework finishes audited outlines, at a measured cost in
   turns, tokens, and time relative to Incremental LLM.
-- **H4:** Within the same token budget, the Full framework finishes more
-  audited outlines than Single-pass + validation, with a larger difference for
-  longer recoveries.
+- **H4 (open comparison, 2026-10-29):** Framework, incremental against
+  Framework, single-pass: which finishes more audited outlines within the
+  same budget, and at what cost. No direction is set; the paper reports
+  whichever mode does better and does not assume incremental wins.
 
-No directional hypothesis is set for Single-pass LLM versus Incremental LLM.
-If H4 does not hold, the paper should not claim that validating each event
-during generation is better than validating complete outlines.
+No directional hypothesis is set for LLM, single-pass versus LLM, incremental.
+Unless the results favor Framework, incremental, the paper should not claim
+that validating each event during generation is better than validating
+complete outlines.
 
 **Endpoint: the outline stage.** Primitive composition is excluded from
 Study 1 because the retained composition still has
@@ -752,9 +776,9 @@ phase 2 using the record format fixed in phase 4, then phases 5 onward.
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
 | 1 | Separate experiment design document | Exact scenarios, studies, configuration definitions, model extensibility, measurement definitions, figure specifications, and phase checklist; valid local references | Complete: 2026-10-13; revised 2026-10-14 and 2026-10-21 |
-| 2 | Experiments tab and persistent configuration/results | Navigation preserves form state; capture readiness and trial counts are correct; Study 1 configuration selection shows unavailable configurations with reasons; records and exports round-trip; no automatic model calls | Partial: placeholder, navigation, and design download delivered 2026-10-14; configuration and persistent records pending |
-| 3 | Independent outline auditor | Attempt 17's outline passes, including nominal continuation. Reviewed negative controls fail at the expected event and check: one each for RA feasibility, physical support, `SAFE_shared_area_mutex`, `SAFE_gear_small_before_KET4_Square_4mm`, and nominal continuation (the mock `part_slippage` plans may supply the two safety cases if their events convert to the outline format). Missing evidence yields `unresolved`. No provider, Gazebo, controller, or feedback path. | Next |
-| 4 | Study 1 configurations and the `Part slippage` pilot | Single-pass reply format with the same prompt, lookups, and lookup limit. Incremental configurations on one shared pipeline with one proposal per turn and exact recorded settings. Single-pass + validation checks finished outlines with the phase 3 component and rewrites whole outlines. Single-pass LLM and Incremental LLM make zero RA/CCA calls and receive no validation findings. Experiment-record retention exception agreed. The pilot runs 12 attempts and every finished outline is audited. | Planned |
+| 2 | Experiments tab and persistent configuration/results | Navigation preserves form state; capture readiness and trial counts are correct; Study 1 configuration selection shows unavailable configurations with reasons; records and exports round-trip; no automatic model calls | Software delivered 2026-10-27: Study 1 setup, batch runner with frozen manifests, persistent records, Fig. 11 / Table 6 summaries, CSV and JSON export (see handoff). No trials run |
+| 3 | Independent outline auditor | Attempt 17's outline passes, including nominal continuation. Reviewed negative controls fail at the expected event and check: one each for RA feasibility, physical support, `SAFE_shared_area_mutex`, `SAFE_gear_small_before_KET4_Square_4mm`, and nominal continuation (the mock `part_slippage` plans may supply the two safety cases if their events convert to the outline format). Missing evidence yields `unresolved`. No provider, Gazebo, controller, or feedback path. | Software delivered 2026-10-27 (`outline_audit.py`); offline check on three saved drafts. Attempt 17 and the reviewed negative controls not yet run |
+| 4 | Study 1 configurations and the `Part slippage` pilot | Single-pass reply format with the same prompt, lookups, and lookup limit. Incremental configurations on one shared pipeline with one proposal per turn and exact recorded settings. Single-pass + validation checks finished outlines with the phase 3 component and rewrites whole outlines. Single-pass LLM and Incremental LLM make zero RA/CCA calls and receive no validation findings. Experiment-record retention exception agreed. The pilot runs 12 attempts and every finished outline is audited. | Software delivered 2026-10-27; pilot not run |
 | 5 | Study 1 on the remaining failures | Each added failure enters only after the Full framework completes an audited outline there (runtime roadmap dependency); each runs as a frozen four-configuration batch | Planned |
 | 6 | Study 2 end-to-end workers | Fresh isolated attempts; actual settings captured; outline, primitive, and overall endpoints verified; required RA/CCA/nominal evidence; cancellation and retained history | Planned |
 | 7 | Study 3 reviewed cases and policy replay | Identical inputs across four policies using the phase 3 auditor; independent labels; accurate acceptance and unresolved outcomes; zero live dispatch | Planned |
@@ -819,6 +843,10 @@ identifiers only for trials that actually ran.
 | 2026-10-14 | Study reorder and method definitions | Made a method comparison Study 1 and defined three methods by decision authority. Former Studies 1 and 2 became Studies 2 and 3. Added the experiment-record retention rule pending an AGENTS.md exception. Superseded the same day by the four-rung ladder. Documentation only; no code changes or trials. | Superseded |
 | 2026-10-14 | Four-rung ladder | Replaced the three methods with the user-selected ladder: LLM single-turn, LLM multi-turn, LLM + RA, LLM + RA + CCA. Removed the separate LLM-with-validation method; one proposal per turn in rungs 2–4, so the symbolic selector moved to possible study A. Recorded construction-guaranteed eliminations, the missing generate-and-test baseline (possible study B), the rung 4 completion dependency, and current code availability for each rung. Documentation only; no code changes or trials. | Superseded on 2026-10-21 |
 | 2026-10-21 | 2 × 2 ablation | Replaced the four-rung ladder with a 2 × 2 (user decision): Single-pass LLM, Incremental LLM, Single-pass + validation, Full framework. All four get the same prompt, lookups, lookup limit, and token budget, because the full observations do not fit in one prompt. Single-pass + validation (former possible study B) rewrites whole outlines after a rejection. Dropped the former rung 3 (RA only); its H2 evidence comes from CCA rejections of RA-passed proposals in both validated configurations, now reported in a rejection table for every scenario. Added H4 and lookup counts. Figure mock-ups: https://claude.ai/artifact/Autf82GVVeYAGSWgc9CeLg. Documentation only; no code changes or trials. | Phase 3: independent outline auditor |
+| 2026-10-27 | 2, 3, 4 (software) | Single-pass generation (`single_pass_outline`; four flag-gated prompt blocks and a rewrite section; incremental prompt and schema bytes verified unchanged on the fixture and the four captures), the independent outline audit (`outline_audit.py`: RA symbolic, RA physical, CCA safety, nonblocking; first failing check of the first failing event), the batch runner (`outline_experiments.py`: exact flags per configuration, seeded order per scenario and repetition, frozen code and input hashes checked before and after each attempt, records never deleted) and the Experiments tab. User decisions: Experiments tab only; a rewrite shows the refused outline and findings; an unreadable reply does not finish in any configuration; experiment records are never deleted (AGENTS.md). The incremental configurations keep the frozen prompt's 2–5 candidates per turn (ed3d9fe), recorded as `candidate_proposal_budget` 5, not one proposal per turn as written under Held constant. Token budget and lookup limit recorded as not set; default 80 turns. Offline audit of three saved drafts: Part slippage unsafe at event 2, Conveyor physically unsupported at event 3, Machining infeasible at event 1 after the 2026-10-27 grounding change. Focused tests pass; no paid trials ran. | Pilot: Part slippage, four configurations × 3 from the Experiments tab |
+| 2026-10-28 | Prompt display fix | Empty values are now written `null` in the outline prompt (Resources, Parts, failure facts), not `none` (user decision). In the first live Single-pass + validation run (Part slippage, gpt-5.4 medium) 5 of 6 refused outlines were the nonblocking check rejecting the text "none" the model copied from the prompt. Display fix under the prompt-freeze rule; applies to all four configurations. Checked on the four captures: only none → null lines change (8–9 per prompt). Experiment drafts must come after this change. | Pilot from the Experiments tab |
+| 2026-10-28 | Safety rules withheld | The LLM is no longer given the safety rules (user decision), so the CCA's safety check can be shown catching unsafe decisions the LLM makes: in 17 checked runs with the rules in the prompt it refused 0 events, while the nonblocking check refused 44 completion claims. `OutlineDraft(safety_rules_to_llm="prompt" | "knowledge_base" | "hidden")`; the CCA checks every selected rule in all three, and a refusal names the rule and its facts. `"hidden"` is the default, so the Recovery UI and the Experiments runner hide the rules too. | First hidden-rules runs (gpt-5.4 medium, four scenarios) |
+| 2026-10-28 | Candidates by preference order | The LLM lists 2–5 candidates most preferred first; `selected_candidate_index` is removed and the first listed candidate is its choice (user decision). A reply that only forgot the index used to end the attempt (Haiku 5.5, gpt-5-mini), which mixed reply format into the model comparison. Runs before this change used the index. Same day: the RA refuses a release that leaves `part_location` unstated, and the custody refusal states the owner's values. | Rerun the main set |
 
 ## 8. Repository references
 

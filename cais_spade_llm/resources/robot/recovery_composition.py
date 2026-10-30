@@ -2,11 +2,11 @@ from __future__ import annotations
 
 """Robot-owned calculations and completion evidence for authored recovery programs."""
 
+from collections.abc import Callable
 from copy import deepcopy
 import math
 
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
-from cais_spade_llm.resources.resource_profile import resource_snapshot_set_field
 
 
 def preview_composition_output(*, primitive: str, params: dict, recovery_snapshot: dict,
@@ -86,12 +86,101 @@ def preview_composition_output(*, primitive: str, params: dict, recovery_snapsho
     return {}
 
 
+def _source_records(part: str, acting_jid: str, grounding_context: dict, physical_evidence: dict) -> list[tuple]:
+    """Return every value that records the part where it rested, with the value it takes once the part has left.
+
+    As the RA's pick finds them (``ra_feasibility._Check.source_variables``): a resource-scope value that is the
+    part, or a per-part variable for the part that is not null or false; it becomes null, or false where its
+    declared values have no null.
+    """
+    records = []
+    for owner, model in physical_evidence.get("environment_models", {}).items():
+        jid = physical_evidence.get("jids", {}).get(owner)
+        if jid is None or jid == acting_jid:
+            continue
+        declarations = {name.replace("{part_name}", part): declaration
+                        for name, declaration in model.get("state_variables", {}).items()}
+        values = {**physical_evidence.get("environment_valuation", {}).get(owner, {}),
+                  **{key: value for key, value in grounding_context.get("resources", {}).get(jid, {}).items()
+                     if key in declarations}}
+        for name, declaration in declarations.items():
+            if (declaration or {}).get("scope") == "part" or name not in values:
+                continue
+            value = values[name]
+            if value == part or (name.endswith("." + part) and value is not None and value is not False):
+                domain = (declaration or {}).get("domain") or []
+                nullable = not domain or any(item is None for item in domain)
+                records.append((jid, name, None if nullable or not any(item is False for item in domain) else False))
+    return records
+
+
+def hold_picked_part(resource_evidence: dict, *, task: dict, recovery_des_model: dict, recovery_snapshot: dict,
+                     pick_target: dict | None) -> None:
+    """Let a place calculation after the event's own grasp read the part as that grasp holds it.
+
+    In one event that takes a part and puts it down, the place target needs the held part's grasp transform and
+    pick context. They come from the event's own pick calculation, as the completion records them for the grasp;
+    the completion then checks that the grasp reached its target and retreated.
+    """
+    part, target = task.get("part_name"), pick_target
+    keys = ("x", "y", "z", "qx", "qy", "qz", "qw")
+    if (not isinstance(target, dict) or recovery_snapshot.get("held_part") != part
+            or (resource_evidence.get("attachment") or {}).get("part_name") == part
+            or not all(key in target.get("target_pose", {}) and key in target.get("observed_pose", {}) for key in keys)):
+        return
+    event = next((row for row in recovery_des_model.get("events", []) if row.get("event_name") == "pick_grasp"), {})
+    _hold(resource_evidence, part, target, target["target_pose"], event)
+
+
+def _hold(evidence: dict, part_name: str, target: dict, pose: dict, event: dict) -> None:
+    """Record the part as a grasp at ``pose`` holds it: its grasp transform and the pick context."""
+    from cais_spade_llm.recovery_framework.geometry import multiply, rotate
+
+    observed = target["observed_pose"]
+    inverse = [-pose["qx"], -pose["qy"], -pose["qz"], pose["qw"]]
+    transform = [*rotate(inverse, [observed[key] - pose[key] for key in ("x", "y", "z")]),
+                 *multiply(inverse, [observed[key] for key in ("qx", "qy", "qz", "qw")])]
+    evidence["attachment"] = {"part_name": part_name, "model_name": target["model_name"],
+        "grasp_transform": transform, "projected_attachment_complete": True,
+        "source": {"kind": "projected", "contract_fingerprint": recovery_validation_fingerprint(event)}}
+    evidence.setdefault("state", {})["_task_ctx"] = deepcopy(target)
+
+
+def _receiving_slot(part_name: str, destination: str, origin: dict, physical_evidence: dict) -> tuple[str, str] | None:
+    """Find the resource and slot that take custody of a part placed on a supported place.
+
+    The slot is the one whose custody puts the part at the destination (``product_state_from_custody``): the
+    declared zone of the destination under the target, or a resource's slot for a place it owns, such as a
+    machine's workholding or its staging tray.
+
+    Returns:
+        The owning resource and its slot variable, or None when no single slot receives the part.
+    """
+    from cais_spade_llm.resources.environment_models import product_state_from_custody
+
+    models = physical_evidence.get("environment_models", {})
+    zones = [zone for zone in models.get(destination, {}).get("assignments", {}).get("zones", [])
+             if all(math.isclose(zone.get("pose", [float("inf")] * 3)[i], origin.get(axis, float("inf")),
+                                 rel_tol=0., abs_tol=1e-9) for i, axis in enumerate(("x", "y")))]
+    if zones:
+        return (destination, f"zone_{zones[0]['zone']}_part") if len(zones) == 1 else None
+    product = physical_evidence.get("product_name")
+    slots = [(owner, field) for owner, model in models.items()
+             for field, declaration in model.get("state_variables", {}).items()
+             if declaration.get("reference") == "part_name" and product_state_from_custody(
+                 part_name, owner, {"part_name": None, field: part_name}, product)["location"] == destination]
+    return slots[0] if len(slots) == 1 else None
+
+
 def project_composition_completion(*, task: dict, trace: list, recovery_des_model: dict,
                                    recovery_snapshot: dict, projected_snapshot: dict,
                                    part_context: dict, grounding_context: dict,
                                    primitive_catalog: list, resource_evidence: dict,
-                                   physical_evidence: dict) -> dict:
-    """Retain proven primitive effects and require evidence for further completion."""
+                                   physical_evidence: dict, locate_pose: Callable[[dict], str | None] | None = None) -> dict:
+    """Retain proven primitive effects and require evidence for further completion.
+
+    ``locate_pose`` names the place whose recorded area holds a pose, as the outline projection locates one.
+    """
     from cais_spade_llm.resources.robot.robot_primitives import robot_primitive_sequence_validator
 
     resource, part = deepcopy(projected_snapshot), deepcopy(part_context)
@@ -126,35 +215,29 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                           "bindings": deepcopy(bindings), "contract_fingerprint": recovery_validation_fingerprint(event)})
         return True
 
+    def set_field(field: str, value) -> None:
+        resource[field] = deepcopy(value)
+        alias = {"resource_state": "current_state", "resource_location": "current_location"}[field]
+        if alias in resource:
+            resource[alias] = deepcopy(value)
+        if field == "resource_location" and isinstance(resource.get("occupancy"), dict):
+            resource["occupancy"]["location"] = deepcopy(value)
+
     motion = {"move_to_named_pose", "move_cartesian", "move_pose", "move_relative", "move_joints", "rotate_joint", "move_insert"}
     last_motion = next((row for row in reversed(trace) if row["primitive"] in motion), None)
-    for row in trace:
-        if row["primitive"] == "move_to_named_pose":
-            # The declared move_home contract has one exact primitive and a fixed outcome.
-            matches = [event for event in recovery_des_model.get("events", [])
-                       if event.get("composition_contract", {}).get("steps")
-                       and len(event["composition_contract"]["steps"]) == 1
-                       and event["composition_contract"]["steps"][0].get("op") == row["primitive"]]
-            for event in matches:
-                step = event["composition_contract"]["steps"][0]
-                if row is not last_motion or step.get("when") or step.get("params", {}).get("pose_name") != row["resolved_params"].get("pose_name"):
-                    continue
-                for field, effect in event.get("updates", {}).items():
-                    if set(effect) == {"set"} and field in {"resource_state", "resource_location"}:
-                        resource[field] = deepcopy(effect["set"])
-                        resource_snapshot_set_field(resource, {"resource_state": "current_state", "resource_location": "current_location"}[field], effect["set"])
-                completed.append({"event_name": event["event_name"], "step_index": row["step_index"]})
     transfers = [row for row in trace if row["primitive"] in {"grasp_part", "release_part"}]
-    if len(transfers) > 1:
-        return fail("Multiple custody transfers in one event require an owner intermediate completion model")
-    if transfers:
-        transfer = transfers[0]
+    # One transfer, or the event's part taken and then put down, which Algorithm 1 checks as a grasp and a release.
+    if [row["primitive"] for row in transfers] not in ([], ["grasp_part"], ["release_part"], ["grasp_part", "release_part"]):
+        return fail("Only one custody transfer, or a grasp followed by a release, is supported in one event")
+    retreat = None
+    for number, transfer in enumerate(transfers):
         index, op = transfer["step_index"], transfer["primitive"]
         part_name = transfer["resolved_params"].get("part_name", task.get("part_name"))
         if part_name != task.get("part_name"):
             return fail("Custody transfer identifies a different part", "INFEASIBLE")
         compute = "compute_pick_targets" if op == "grasp_part" else "compute_place_targets"
-        targets = [step for step in trace[:index] if step["primitive"] == compute]
+        first = transfers[number - 1]["step_index"] + 1 if number else 0
+        targets = [step for step in trace[first:index] if step["primitive"] == compute]
         if not targets:
             return fail("The custody transfer requires a preceding owner target calculation", "INFEASIBLE")
         target = targets[-1].get("preview_output", {})
@@ -163,14 +246,17 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                    and math.isclose(pose[key], target["target_pose"][key], rel_tol=0., abs_tol=1e-9)
                    for key in ("x", "y", "z", "qx", "qy", "qz", "qw")):
             return fail("The custody transfer must reach the calculated target pose and orientation", "INFEASIBLE")
-        retreat = trace[index + 1:]
-        if not retreat or not any(step["primitive"] in {"move_relative", "move_cartesian", "move_pose"} for step in retreat):
+        end = transfers[number + 1]["step_index"] if number + 1 < len(transfers) else len(trace)
+        # The motion right after the transfer is its retreat; later motions may take the robot elsewhere.
+        retreat = next((step for step in trace[index + 1:end] if step["primitive"] in motion), None)
+        if retreat is None or retreat["primitive"] not in {"move_relative", "move_cartesian", "move_pose"}:
             return fail("Owner completion requires a retreat after the custody transfer", "INFEASIBLE")
+        reached = retreat.get("projected_snapshot", {}).get("current_pose", {})
         retreat_pose = target.get("retreat_pose", {})
         if not retreat_pose:
             return fail("The owner completion retreat pose is missing from the recorded target inputs")
-        if not all(key in resource.get("current_pose", {}) and key in retreat_pose
-                   and math.isclose(resource["current_pose"][key], retreat_pose[key], rel_tol=0., abs_tol=1e-9)
+        if not all(key in reached and key in retreat_pose
+                   and math.isclose(reached[key], retreat_pose[key], rel_tol=0., abs_tol=1e-9)
                    for key in ("x", "y", "z", "qx", "qy", "qz", "qw")):
             return fail("Finish the custody transfer at the calculated event_facts target retreat_pose", "INFEASIBLE")
         event = events.get("pick_grasp" if op == "grasp_part" else "place_insert", {})
@@ -184,32 +270,20 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
             return fail("The owner has no supported custody transfer and retreat completion contract")
         if op == "grasp_part":
             event = events.get("pick_grasp", {})
-            if not apply_updates(event, {"part_name": part_name}, {"part_state", "part_location"}):
+            # Since the aligned part model (October 23) the part's location is its only state field.
+            if not apply_updates(event, {"part_name": part_name}, {"part_location"}):
                 return fail("The owner has no supported pick completion effects")
             location = part_context.get("part_location", part_context.get("location"))
-            if location is not None:
-                if not apply_updates(event, {"origin_resource_location": location}, {"resource_location"}):
-                    return fail("The owner has no supported pickup location effect")
-                receiving_model = physical_evidence.get("environment_models", {}).get(location, {})
-                jid = physical_evidence.get("jids", {}).get(location)
-                values = grounding_context.get("resources", {}).get(jid, {})
-                occupied = [key for key, declaration in receiving_model.get("state_variables", {}).items()
-                            if declaration.get("reference") == "part_name" and values.get(key) == part_name]
-                if len(occupied) == 1:
-                    projected_resources[jid] = {occupied[0]: None}
+            if location is not None and not apply_updates(event, {"origin_resource_location": location},
+                                                          {"resource_location"}):
+                return fail("The owner has no supported pickup location effect")
+            for jid, field, empty in _source_records(part_name, task["resource_jid"], grounding_context, physical_evidence):
+                projected_resources.setdefault(jid, {})[field] = empty
             part["part_holder_resource_jid"] = task["resource_jid"]
             observed = target.get("observed_pose", {})
             if not all(key in observed for key in ("x", "y", "z", "qx", "qy", "qz", "qw")):
                 return fail("The owner requires the complete part pose for projected attachment")
-            from cais_spade_llm.recovery_framework.geometry import rotate, multiply
-
-            inverse = [-pose["qx"], -pose["qy"], -pose["qz"], pose["qw"]]
-            transform = [*rotate(inverse, [observed[key] - pose[key] for key in ("x", "y", "z")]),
-                         *multiply(inverse, [observed[key] for key in ("qx", "qy", "qz", "qw")])]
-            evidence["attachment"] = {"part_name": part_name, "model_name": target["model_name"],
-                "grasp_transform": transform, "projected_attachment_complete": True,
-                "source": {"kind": "projected", "contract_fingerprint": recovery_validation_fingerprint(event)}}
-            evidence.setdefault("state", {})["_task_ctx"] = deepcopy(target)
+            _hold(evidence, part_name, target, pose, event)
         else:
             event = events.get("place_insert", {})
             destination = target.get("destination_location")
@@ -221,26 +295,25 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
             if role == "support":
                 from cais_spade_llm.resources.environment_models import product_state_from_custody
 
-                model = physical_evidence.get("environment_models", {}).get(destination, {})
-                declarations = model.get("state_variables", {})
-                zones = [zone for zone in model.get("assignments", {}).get("zones", [])
-                    if all(math.isclose(zone.get("pose", [float("inf")]*3)[i], origin.get(axis, float("inf")),
-                                       rel_tol=0., abs_tol=1e-9) for i, axis in enumerate(("x", "y")))]
-                if len(zones) != 1 or not target.get("support_placement"):
+                receiving = _receiving_slot(part_name, destination, origin, physical_evidence)
+                if receiving is None or not target.get("support_placement"):
                     return fail("Placement requires a unique declared receiving zone and supported target")
-                field = f"zone_{zones[0]['zone']}_part"
-                jid = physical_evidence.get("jids", {}).get(destination)
-                values = deepcopy(physical_evidence.get("environment_valuation", {}).get(destination, {}))
+                owner, field = receiving
+                model = physical_evidence.get("environment_models", {}).get(owner, {})
+                declarations = model.get("state_variables", {})
+                jid = physical_evidence.get("jids", {}).get(owner)
+                values = deepcopy(physical_evidence.get("environment_valuation", {}).get(owner, {}))
                 values.update({key: value for key, value in grounding_context.get("resources", {}).get(jid, {}).items() if key in declarations})
+                values.update(projected_resources.get(jid, {}))
                 if declarations.get(field, {}).get("reference") != "part_name" or field not in values:
                     return fail("The receiving occupancy contract is missing")
                 if values[field] not in (None, part_name):
                     return fail("The receiving zone is occupied", "INFEASIBLE")
                 values[field] = part_name
-                product = product_state_from_custody(part_name, destination, values, physical_evidence.get("product_name"))
+                product = product_state_from_custody(part_name, owner, values, physical_evidence.get("product_name"))
                 part.update(part_location=product["location"])
                 projected_resources[jid] = values
-                completed.append({"source": "product_state_from_custody", "owner": destination,
+                completed.append({"source": "product_state_from_custody", "owner": owner,
                     "resource_values": values, "contract_fingerprint": recovery_validation_fingerprint(model)})
             elif role == "assembly_slot":
                 slot = transfer["resolved_params"].get("assembly_slot")
@@ -248,7 +321,7 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                 required.update(destination_location=destination, part_origin_z=target.get("place_part_origin_z"))
                 if not isinstance(slot, dict) or any(slot.get(key) != value for key, value in required.items()):
                     return fail("Assembly completion requires release_part.assembly_slot bound to the calculated target", "INFEASIBLE")
-                if not apply_updates(event, {"destination_location": destination}, {"part_state", "part_location"}):
+                if not apply_updates(event, {"destination_location": destination}, {"part_location"}):
                     return fail("The owner has no supported assembly completion effects")
             else:
                 return fail("The owner has no completion contract for this target surface")
@@ -268,6 +341,31 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
             evidence.setdefault("observed_parts", {})[part_name] = {"current_pose": deepcopy(origin), "frame": "world",
                 "source": {"kind": "projected", "contract_fingerprint": recovery_validation_fingerprint(event)}}
             evidence["attachment"] = {}
+    if last_motion is not None and last_motion["primitive"] == "move_to_named_pose":
+        # The declared move_home contract has one exact primitive and a fixed outcome; as the last motion, it
+        # is where the robot ends, after any transfer.
+        for event in recovery_des_model.get("events", []):
+            steps = event.get("composition_contract", {}).get("steps") or []
+            if (len(steps) != 1 or steps[0].get("op") != "move_to_named_pose" or steps[0].get("when")
+                    or steps[0].get("params", {}).get("pose_name") != last_motion["resolved_params"].get("pose_name")):
+                continue
+            for field, effect in event.get("updates", {}).items():
+                if set(effect) == {"set"} and field in {"resource_state", "resource_location"}:
+                    set_field(field, effect["set"])
+            completed.append({"event_name": event["event_name"], "step_index": last_motion["step_index"]})
+    stated = task.get("expected_end_state") or {}
+    final = resource.get("current_pose")
+    moved = (last_motion is not None and last_motion["primitive"] != "move_to_named_pose"
+             and (not transfers or last_motion is not retreat))
+    start = recovery_snapshot.get("resource_location", recovery_snapshot.get("current_location"))
+    if callable(locate_pose) and isinstance(final, dict):
+        if "pose" in stated and "resource_location" not in stated:
+            # As the outline projection locates a stated pose.
+            set_field("resource_location", locate_pose(final))
+        elif "resource_location" in stated and moved and (transfers or stated["resource_location"] != start):
+            # A move ends at the stated place when one of its recorded areas holds the final pose; a location
+            # the robot keeps holds, and a transfer's place stands unless the robot moves on after its retreat.
+            set_field("resource_location", locate_pose(final, stated["resource_location"]))
     for field, aliases in {"part_state": ("state", "current_state"),
                            "part_location": ("location", "current_location"),
                            "part_holder_resource_jid": ("current_holder_resource_jid", "holder_resource_jid")}.items():

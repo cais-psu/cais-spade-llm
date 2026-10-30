@@ -9,7 +9,9 @@ not the scenario's routes, so a recovery may leave a part off its usual route wh
 carry it on from there. The CCA composes the parts with work left and the resources their
 continuations use, starting from the projected end state, and accepts when that state lies in the
 composition's nonblocking region: whatever completions occur, every such part can still reach its
-remaining requirement and every resource it uses can still return to rest.
+remaining requirement and every resource it uses can still return to rest. A nominal event runs through
+its resource's primitives, so normal production cannot use one the device cannot run as the recovery
+leaves it, such as a grasp with the device's own gripper reported failed.
 
 The composition is searched to the end, with no step bound. Its state budget only protects the shared
 machine: running out of it is an error, never a verdict. No specification monitors are composed: the
@@ -53,7 +55,7 @@ _ROBOT_EVENTS = frozenset({"pick_approach", "pick_grasp", "place_approach", "pla
 _KMR_EVENTS = frozenset({"pick_approach", "pick_part", "move_to_resource", "place_approach", "place_release"})
 _WORKER_EVENTS = frozenset({"machine_part", "complete_job", "select_program", "start_job", "pause_job",
                             "resume_job", "stop_job", "advance_conveyor", "advance_part"})
-_STATE_FIELDS = ("held_part", "approached_part", "part_name", "staging_part", "resource_location")
+_STATE_FIELDS = ("held_part", "part_name", "staging_part", "resource_location")
 
 
 def capture_inputs(observations: dict) -> dict:
@@ -87,7 +89,7 @@ def check_completion(session: dict, prepared: dict, capture: dict) -> dict:
     Raises:
         RuntimeError: The composition could not be built or did not finish within its budget.
     """
-    context, invalid = _end_context(session, prepared, capture)
+    context, invalid, unrunnable = _end_context(session, prepared, capture)
     if invalid:
         return {"nonblocking_status": BLOCKING, "reasons": [reason for _, reason, _ in invalid],
                 "blocked": sorted({name for name, _, _ in invalid if name}),
@@ -110,8 +112,10 @@ def check_completion(session: dict, prepared: dict, capture: dict) -> dict:
     evidence = {"parts": parts, "explored_states": len(analysis.nodes), "seconds": analysis.elapsed,
                 "included_resources": sorted(scope.resources), "included_parts": sorted(scope.products),
                 "completion_conditions": deepcopy(scope.goals),
-                "missing_capabilities": _missing_capabilities(plant.missing_capabilities, context),
+                "missing_capabilities": _missing_capabilities(plant.missing_capabilities, context, unrunnable),
                 "specification_monitors": "none composed"}
+    if unrunnable:
+        evidence["unrunnable_events"] = unrunnable
     if analysis.status == "nonblocking":
         return {"nonblocking_status": NONBLOCKING, "reasons": [], "blocked": [], "evidence": evidence}
     reasons, blocked = _blocked(context, parts, scope.goals, [node.state for node in analysis.nodes.values()])
@@ -125,7 +129,8 @@ def refusal_findings(check: dict[str, Any]) -> list[dict]:
              "reason": "; ".join(check["reasons"])}]
 
 
-def _end_context(session: dict, prepared: dict, capture: dict) -> tuple[EnvironmentProductContext, list]:
+def _end_context(session: dict, prepared: dict,
+                 capture: dict) -> tuple[EnvironmentProductContext, list, dict[str, dict[str, str]]]:
     """Rebuild the runtime models and set them to the state the accepted events leave.
 
     Each resource takes the projected values its model declares; values no event stated keep the
@@ -134,20 +139,30 @@ def _end_context(session: dict, prepared: dict, capture: dict) -> tuple[Environm
     at, and a belt's order follows its parts' positions unless an event stated it. Each part takes its
     projected location and process record, plus the declared outcome of every planned task the
     recovery stood in for, since a robot's recovery event records no process result. Faulted
-    resources are unavailable. A value an event left unknown is reported before anything else.
+    resources are unavailable. A device that reports itself unavailable is out of production until it is
+    repaired by hand: its state need not be one normal production has, and normal production must finish
+    without it. A nominal event the device cannot run as the recovery leaves it has no executor (see
+    :func:`_unrunnable_events`). A value an event left unknown is reported before anything else.
 
     Returns:
-        The context, and each way the state is not one the models have, as (name, reason, detail).
+        The context, each way the state is not one the models have, as (name, reason, detail), and each
+        resource's unrunnable nominal events with the reason.
     """
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_diagnostic import (
         faulted_resources,
     )
+    from cais_spade_llm.resources.resource_primitives import current_primitive_declarations
 
     context = EnvironmentProductContext(**capture["inputs"], permitted_resources=capture["permitted_resources"])
+    scene = capture["inputs"]["scene"]
+    declarations = current_primitive_declarations(scene)
+    programs = (scene.get("resource_programs") or {}).get("resources") or {}
+    unrunnable: dict[str, dict[str, str]] = {}
     names = {jid: rid for rid, jid in capture["jids"].items()}
     grounded = prepared["code_grounding"]["resources"]
     unknown = session.get("diagnostic_unknown_owner_fields", {})
     robots = {row["resource_id"] for row in context.inputs["scene"]["robots"]}
+    out_of_production = set(capture["unavailable_resources"])
     invalid = []
     for rid, resource in context.resources.items():
         jid = capture["jids"][rid]
@@ -174,7 +189,11 @@ def _end_context(session: dict, prepared: dict, capture: dict) -> tuple[Environm
             _derive_belt_order(values)
         resource.valuation = values
         events = _ROBOT_EVENTS if rid in robots else _KMR_EVENTS if rid == "KMR" else _WORKER_EVENTS
-        for event_name in sorted(events & set(resource.model["local_event_alphabet"])):
+        blocked_events = _unrunnable_events(resource.model, row, declarations.get(rid, {}),
+                                            (programs.get(rid) or {}).get("functions") or {})
+        if blocked_events:
+            unrunnable[rid] = blocked_events
+        for event_name in sorted(events & set(resource.model["local_event_alphabet"]) - set(blocked_events)):
             resource.bind_executor(event_name, _not_executed, _not_executed, validate_start=_not_executed)
     for part, state in context.part_tracker.items():
         row = session["symbolic_parts"][part]
@@ -187,12 +206,14 @@ def _end_context(session: dict, prepared: dict, capture: dict) -> tuple[Environm
     _apply_claimed_outcomes(session, prepared, context)
     context.unavailable_resources = set(capture["unavailable_resources"]) | {
         names[jid] for jid in faulted_resources(session, prepared) if jid in names}
+    invalid = _owing(invalid, out_of_production)
     if invalid:
         # A state with values no event stated cannot be checked for coherence; report only those.
-        return context, invalid
+        return context, invalid, unrunnable
     valuation = context.snapshot()
     errors: list[tuple[str | None, str]] = []
     custody = owners(context.models, valuation, context.part_tracker, context.product_name, errors=errors)
+    errors = _owing(errors, out_of_production)
     for rid in dict.fromkeys(rid for rid, _ in errors if rid):
         messages = [message for name, message in errors if name == rid]
         # A value outside its domain is quoted, so a stated "none" is not read as no value.
@@ -208,9 +229,67 @@ def _end_context(session: dict, prepared: dict, capture: dict) -> tuple[Environm
         location = context.part_tracker[part].get("location")
         expected = product_state_from_custody(part, owner, valuation[owner], context.product_name)["location"]
         if location != expected:
-            invalid.append((part, f"{part} is recorded at {location} while {owner} holds it",
+            invalid.append((part, f"{part} is recorded at {location}, but {owner}'s values "
+                                  f"({_custody_values(valuation[owner], part)}) put it at {expected}",
                             f"{part}: location {location}, custody {expected}"))
-    return context, invalid
+    return context, invalid, unrunnable
+
+
+def _custody_values(values: dict, part: str) -> str:
+    """State the values with which a resource holds parts or places the product, for a custody refusal."""
+    return "; ".join(f"{field} {value}" for field, value in values.items() if value is not None and (
+        field in {"held_part", "part_name", "staging_part", "product_location"} or field.startswith("zone_")
+        or field.endswith("." + part)))
+
+
+def _unrunnable_events(model: dict, row: dict, declarations: dict[str, list[dict]],
+                       functions: dict[str, dict]) -> dict[str, str]:
+    """Return the nominal events a resource cannot run as the recovery leaves it, each with the reason.
+
+    A nominal event runs its program's primitives. Normal production changes only what its models have,
+    so a primitive precondition on a condition the model does not have, such as the device's own gripper
+    or availability, stays as the recovery leaves it. When such a precondition fails for every
+    alternative of a primitive, the primitive cannot run, and neither can an event whose every variant
+    runs it. A condition the state does not record decides nothing.
+    """
+    from cais_spade_llm.recovery_framework.ra_feasibility import _holds, _rule_text
+
+    def failure(primitive: str) -> str | None:
+        reasons = []
+        for variant in declarations[primitive]:
+            failed = [(field, rule) for field, rule in (variant.get("preconditions") or {}).items()
+                      if field not in model["state_variables"] and field in row
+                      and _holds(rule, row[field], {}) is False]
+            if not failed:
+                return None
+            field, rule = failed[0]
+            reasons.append(f"{primitive} needs {field} {_rule_text(rule, {})}; {field} is {row[field]}")
+        return reasons[0] if reasons else None
+
+    variants: dict[str, list[str | None]] = {}
+    for event in model["events"]:
+        program = (functions.get(event.get("program_key")) or {}).get("program")
+        if program is None:
+            continue
+        primitives = [op for op in dict.fromkeys(_program_ops(program)) if op in declarations]
+        variants.setdefault(event["event_name"], []).append(
+            next((reason for reason in map(failure, primitives) if reason), None))
+    return {name: reasons[0] for name, reasons in variants.items() if all(reasons)}
+
+
+def _program_ops(node: Any) -> list[str]:
+    """List the operations a resource program's steps run, in order."""
+    if isinstance(node, dict):
+        return ([node["op"]] if isinstance(node.get("op"), str) else []) + [
+            op for value in node.values() for op in _program_ops(value)]
+    if isinstance(node, list):
+        return [op for value in node for op in _program_ops(value)]
+    return []
+
+
+def _owing(rows: list[tuple], out_of_production: set[str]) -> list[tuple]:
+    """Keep what a resource owes normal production: one out of production until repaired by hand owes nothing."""
+    return [row for row in rows if row[0] not in out_of_production]
 
 
 def _derive_belt_order(values: dict) -> None:
@@ -261,13 +340,19 @@ def _apply_claimed_outcomes(session: dict, prepared: dict, context: EnvironmentP
             done.extend(result for result in results if result not in done)
 
 
-def _missing_capabilities(entries: set[str], context: EnvironmentProductContext) -> list[str]:
-    """Keep the plant's gaps worth review: a finish has no executor because its start dispatches it."""
+def _missing_capabilities(entries: set[str], context: EnvironmentProductContext,
+                          unrunnable: dict[str, dict[str, str]]) -> list[str]:
+    """Keep the plant's gaps worth review: a finish has no executor because its start dispatches it, and an
+    unrunnable event has none because the device cannot run it."""
     names = {(rid, str(event["event_id"])): event["event_name"]
              for rid, model in context.models.items() for event in model["events"]}
-    return sorted(entry for entry in entries if not (
-        entry.endswith(":executor")
-        and names.get(tuple(entry.split(":")[:2]), "").endswith(FINISH_SUFFIX)))
+
+    def explained(entry: str) -> bool:
+        rid, event_id = entry.split(":")[:2]
+        name = names.get((rid, event_id), "")
+        return name.endswith(FINISH_SUFFIX) or name in unrunnable.get(rid, {})
+
+    return sorted(entry for entry in entries if not (entry.endswith(":executor") and explained(entry)))
 
 
 def _parts_with_work_left(session: dict, prepared: dict, context: EnvironmentProductContext) -> list[str]:

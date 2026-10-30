@@ -63,6 +63,25 @@ def _checked_kind(draft: dict) -> str:
     return f"{'- and '.join(agents)}-checked" if agents else "Unvalidated"
 
 
+def checked_draft_label(row: dict) -> str:
+    """Name a checked draft by when it was made, its model and safety rule setting, and its size."""
+    try:
+        created = datetime.fromisoformat(str(row.get("created_at"))).astimezone().strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        created = str(row.get("created_at") or "")
+    rules = {"hidden": "rules hidden", "knowledge_base": "rules as lookup", "prompt": "rules in prompt"}.get(
+        row.get("safety_rules_to_llm"), "rules not recorded")
+    model = f"{row.get('model') or 'model not recorded'} {row.get('reasoning_effort') or ''}".strip()
+    parts = (created, model, rules, "single-pass" if row.get("single_pass_outline") else "",
+             f"{row.get('events')} events", str(row.get("run_id") or ""))
+    return " · ".join(part for part in parts if part)
+
+
+def _composition_path(state: dict) -> Path:
+    """Locate the completed composition: a checked draft's attempt keeps its own record."""
+    return Path(state.get("composition_path") or Path(state["artifact_directory"]) / "composition.json")
+
+
 def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C901, PLR0915 - shared page controls
     """Render one bridge-owned workflow; navigation only stops page polling."""
     state = bridge.get_part_slippage_example()
@@ -103,6 +122,13 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                     action = "generate_outline_fresh"
                 await bridge.part_slippage_action(action, feedback=feedback)
         except (ValueError, RuntimeError, OSError) as exc:
+            ui.notify(str(exc), type="negative")
+        update()
+
+    def load_checked() -> None:
+        try:
+            bridge.load_recovery_outline_draft(checked_select.value or "")
+        except (ValueError, OSError) as exc:
             ui.notify(str(exc), type="negative")
         update()
 
@@ -197,6 +223,15 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
             ui.notify(str(exc), type="warning")
         update()
 
+    def rules_lookup_changed() -> None:
+        if updating:
+            return
+        try:
+            bridge.set_recovery_safety_rules_lookup(rules_lookup.value)
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
+        update()
+
     for key, title, artifact_stage in (
         ("outline", "Recovery outline", "recovery_outline"),
         ("primitive", "Primitive composition", "recovery_primitves"),
@@ -208,11 +243,22 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                 with ui.row().classes("items-center gap-4"):
                     ra_check = ui.switch("RA feasibility check", value=bool(state.get("check_ra_feasibility")))
                     cca_check = ui.switch("CCA check", value=bool(state.get("check_cca")))
+                    rules_lookup = ui.switch("/safety_rules lookup", value=bool(state.get("safety_rules_lookup")))
                 ra_check.tooltip("Checks each proposed event with Alg. 1 and Eq. 12 before it is applied; "
                                  "a refusal returns to the LLM. Offline only.")
                 cca_check.tooltip("Checks each event the RA finds feasible against the selected specifications "
                                   "(safety, Eq. 13) and the LLM's recovery_complete (nonblocking, Eq. 6); a refusal "
                                   "returns to the LLM. Needs the RA feasibility check. Offline only.")
+                rules_lookup.tooltip("Lists /safety_rules in the Knowledge Base so the LLM can request the selected "
+                                     "safety rules; the prompt itself never lists them. Off (the default), the rules "
+                                     "stay with the CCA and the LLM meets a rule only in a CCA refusal. Offline only.")
+                with ui.row().classes("items-center gap-2 w-full") as checked_row:
+                    checked_select = ui.select({}, label="Checked drafts").classes("min-w-[28rem]")
+                    checked_select.tooltip("Finished drafts of this capture that the RA feasibility, CCA safety and "
+                                           "CCA nonblocking checks accepted. Load replays their events with those "
+                                           "checks on the current code, with no LLM call.")
+                    controls["load_checked_draft"] = ui.button("Load", icon="upload_file",
+                                                               on_click=load_checked).props("outline")
             with ui.row():
                 generate_action = "generate_outline" if key == "outline" else "generate_primitives"
                 controls[generate_action] = ui.button("Generate", on_click=lambda action=generate_action: act(action)).props("outline")
@@ -238,7 +284,7 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                 composition_status = ui.label().classes("text-sm font-semibold")
                 composition_programs = ui.column().classes("w-full")
                 composition_download = ui.button("Download composition evidence", icon="download",
-                    on_click=lambda: ui.download.file(Path(bridge.get_part_slippage_example()["artifact_directory"]) / "composition.json")).props("flat dense")
+                    on_click=lambda: ui.download.file(_composition_path(bridge.get_part_slippage_example()))).props("flat dense")
             if key == "primitive":
                 with ui.expansion("Feedback and Regenerate").classes("w-full"):
                     feedback = ui.textarea("Optional feedback").classes("w-full").props("autogrow")
@@ -249,8 +295,10 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                            "card": stage_card,
                            "turn_view": turn_view}
     recovery_mode.on_value_change(mode_changed)
+    checked_select.on_value_change(lambda: None if updating else update())
     ra_check.on_value_change(ra_check_changed)
     cca_check.on_value_change(cca_check_changed)
+    rules_lookup.on_value_change(rules_lookup_changed)
 
     with ui.card().classes("w-full") as execution_card:
         ui.label("Execution").classes("text-lg font-semibold")
@@ -270,6 +318,10 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         readiness = current.get("composition_readiness", {})
         workflow_label.text = ("Saved observations → Generate → Review draft" if offline
                                else "Start failure → Capture observations")
+        checked = {row["path"]: checked_draft_label(row) for row in current.get("checked_drafts") or []}
+        checked_value = checked_select.value if checked_select.value in checked else None
+        if checked_value is None and draft and current.get("draft_path") in checked:
+            checked_value = current["draft_path"]
         safety_badge.text = ("Offline — saved observations; safety checks deferred" if offline
                              else "Gazebo — safety checks deferred")
         safety_note.text = "Selected specifications are included in the prompt. Formal safety checks are skipped."
@@ -311,10 +363,14 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
             "execute": status == "ready_to_execute" and not review_only,
             "regenerate_primitives": (status in {"primitive_ready", "ready_to_execute", "offline_completed", "blocked"}
                                       and bool(current.get("outline")) and not current.get("imported_recovery")),
+            "load_checked_draft": offline and checked_value is not None,
         }
         if draft:
             for name in ("continue_outline", "generate_primitives", "regenerate_primitives", "execute", "prepare"):
                 available[name] = False
+            # Only a loaded checked draft the current checks reproduce can be composed, for review.
+            available["generate_primitives"] = available["regenerate_primitives"] = bool(
+                current.get("can_generate_composition"))
         for key, button in controls.items():
             button.set_enabled(available[key] and (key in {"stop", "stop_outline", "stop_primitives"} or not current.get("busy")))
         controls["generate_outline"].set_visibility(offline)
@@ -340,6 +396,10 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
             selected_observation = None
         if fields["observations"].options != scenario_options or fields["observations"].value != selected_observation:
             fields["observations"].set_options(scenario_options, value=selected_observation)
+        if checked_select.options != checked or checked_select.value != checked_value:
+            checked_select.set_options(checked, value=checked_value)
+        checked_row.set_visibility(offline)
+        checked_select.set_enabled(not current.get("busy"))
         selected_safety = current.get("selected_safety_files", [])
         # Keep recorded selection strings as option keys even when the bridge
         # lists the same files with absolute paths, including scenario changes.
@@ -360,6 +420,9 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         cca_check.value = bool(current.get("check_cca"))
         cca_check.set_visibility(offline)
         cca_check.set_enabled(not current.get("busy") and bool(current.get("check_ra_feasibility")))
+        rules_lookup.value = bool(current.get("safety_rules_lookup"))
+        rules_lookup.set_visibility(offline)
+        rules_lookup.set_enabled(not current.get("busy"))
         for field in fields.values():
             field.set_enabled(not current.get("busy") and status not in {"running_example", "executing", "resuming"})
         if offline and status == "preparing_outline":
@@ -423,7 +486,7 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                           if review_only else "\n".join(f"{row['resource_id']} · {row['outline_id']} · {row['status']}" for row in records)
                           or "Ready after both generation stages complete.")
         if draft:
-            execution.text = f"{_checked_kind(draft)} draft: composition and execution are disabled."
+            execution.text = f"{_checked_kind(draft)} draft: execution is disabled; composition is for review only."
 
     update()
     load_options()

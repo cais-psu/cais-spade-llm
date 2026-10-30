@@ -702,6 +702,8 @@ def _diagnostic_fact(prepared: dict, session: dict, ref: str) -> dict:
 
 def resolve_outline_context(prepared: dict, session: dict, ref: str) -> dict:  # noqa: C901, PLR0912 - explicit public reference allowlist
     """Resolve an allowlisted fact reference with recorded provenance."""
+    if session.get("safety_rules_to_llm") == "hidden" and ref.split("/")[1:2] == ["safety_rules"]:
+        raise ValueError("Unsupported context reference")
     if session.get("outline_diagnostic_bypass") and (
             ref.split("/")[1:2] in (["safety_rules"], ["regions"], ["geometry"]) or is_diagnostic_ref(ref)):
         return _diagnostic_fact(prepared, session, ref)
@@ -889,7 +891,7 @@ def _remember_outline_context_results(prepared: dict, session: dict, entry: dict
 
 
 _PROPOSAL_FIELDS = ("candidate_events", "candidate_traces", "next_transition", "transition_trace", "transition_suffix",
-                    "selected_candidate_index")
+                    "selected_candidate_index", "events")
 
 
 def _context_request_error(response: dict) -> str | None:
@@ -949,7 +951,8 @@ async def handle_outline_context(*, prepared: dict, session: dict, response: dic
     if new_information is False or (
         new_information is None and signature == session.get("outline_context_request_fingerprint")
     ):
-        session["status"] = "NEEDS_CONTEXT"
+        # The repeat is answered, not ended on: the next prompt says it gave nothing new, and the turn
+        # budget bounds further repeats.
         entry["context_errors"].append({"error": "NEEDS_CONTEXT: repeated context request produced no new information"})
     session["outline_context_request_fingerprint"] = signature
     session["outline_context_errors"] = deepcopy(entry["context_errors"])

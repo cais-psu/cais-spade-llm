@@ -19,6 +19,26 @@ from cais_spade_llm.resources.resource_profile import (
 )
 
 
+INTERNAL_GRIPPER_PRIMITIVES = frozenset({"open_gripper", "close_gripper", "attach_part", "detach_part"})
+
+
+def filter_recovery_primitive_catalog(
+    primitive_catalog: list[dict[str, Any]], *, resource_type: str = "",
+) -> list[dict[str, Any]]:
+    """Keep gripper operations inside grasp_part and release_part for recovery.
+
+    Args:
+        primitive_catalog: Live declarations or an immutable saved catalog.
+        resource_type: Owner type when saved rows do not repeat it.
+
+    Returns:
+        Independent catalog rows excluding internal robot and KMR gripper controls.
+    """
+    return [deepcopy(row) for row in primitive_catalog
+            if not ((resource_type or row.get("resource_type")) in {"robot", "kmr"}
+                    and row.get("name") in INTERNAL_GRIPPER_PRIMITIVES)]
+
+
 def primitive_summary(
     *,
     description: str,
@@ -192,7 +212,7 @@ def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any
             effects=effects,
         )
         entries.append(entry)
-    return entries
+    return filter_recovery_primitive_catalog(entries, resource_type=resource_type)
 
 
 def current_primitive_declarations(scene: dict[str, Any]) -> dict[str, dict[str, list[dict[str, Any]]]]:
@@ -230,9 +250,17 @@ def current_primitive_declarations(scene: dict[str, Any]) -> dict[str, dict[str,
             owner = KMRPrimitives if rid == "KMR" else robot_primitive_owner_class(rid) if rid in robots else None
             contracts = {name: [_frontmatter_contract(getattr(owner, name))]
                          for name in bundle["primitives"] if callable(getattr(owner, name, None))}
-        declarations[rid] = {name: contracts.get(name, []) for name in bundle["primitives"]}
+        declarations[rid] = {name: contracts.get(name, []) for name in bundle["primitives"]
+                             if not ((rid in robots or rid == "KMR") and name in INTERNAL_GRIPPER_PRIMITIVES)}
         declarations[rid].update({name: variants for name, variants in contracts.items()
                                   if any(variant.get("controllable") is False for variant in variants)})
+    # A device that reports itself unavailable runs none of its primitives until it is repaired by hand,
+    # so every primitive needs its resource available, as the resource's recorded availability states.
+    for contracts in declarations.values():
+        for name, variants in contracts.items():
+            contracts[name] = [{**variant, "preconditions": {"availability": {"equals": "available"},
+                                                             **(variant.get("preconditions") or {})}}
+                               for variant in variants]
     return declarations
 
 
@@ -576,6 +604,8 @@ def sync_agent_from_recovery_snapshot(resource_agent: Any, snapshot: dict[str, A
 
 
 __all__ = [
+    "INTERNAL_GRIPPER_PRIMITIVES",
+    "filter_recovery_primitive_catalog",
     "build_recovery_des_model",
     "build_execution_primitive_catalog",
     "build_primitive_catalog",

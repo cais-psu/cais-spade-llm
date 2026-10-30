@@ -261,13 +261,10 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "dz": _sub(_state("_task_ctx", "travel_z"), _state("_position", "z")),
                     "speed": 0.45,
                 },
-                public_params={
-                    "dx": 0.0,
-                    "dy": 0.0,
-                    "dz": 0.08,
-                    "speed": 0.45,
-                },
-                note="Positive dz retreat after release.",
+                note=(
+                    "Positive dz retreat straight up to travel_z after release; it ends at "
+                    "event_facts.place_targets.<PART>.retreat_pose."
+                ),
                 failure_observations={
                     "part_name": _state("_held_part"),
                     "destination_location": _arg("destination_location"),

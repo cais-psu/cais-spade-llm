@@ -412,6 +412,10 @@ def create_app() -> None:
 
         log = logging.getLogger("ui.app")
         log.info("App shutdown: cleaning up resources...")
+        from cais_spade_llm.recovery_framework import outline_experiments
+
+        # A running experiment batch stops after its provider call in flight; finished attempts stay recorded.
+        outline_experiments.stop_running()
 
         # Stop watchdogs first.
         background_tasks = (

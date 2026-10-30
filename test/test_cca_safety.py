@@ -263,8 +263,9 @@ def test_a_restated_location_places_a_robot_only_where_it_is_known_to_rest(placi
 
 def test_a_restated_pose_leaves_the_robot_where_it_is(placing):
     session = {"symbolic_resources": {UR: {"resource_location": "Buffer For Machined parts"}}}
-    ra = {"capability": [], "conditions": [{"entity": "ur5e-3", "condition": "pose", "derivation": "unchanged"}]}
-    _, pose = cca_safety._acting_poses("ur5e-3", UR, {"expected_end_state": {"pose": {"x": -0.68, "y": 0.5, "z": 1.04}}},
+    pose = {"x": -0.68, "y": 0.5, "z": 1.04}
+    ra = {"capability": [], "conditions": [{"entity": "ur5e-3", "condition": "pose", "before": pose, "after": pose}]}
+    _, pose = cca_safety._acting_poses("ur5e-3", UR, {"expected_end_state": {"pose": pose}},
                                        session, {"symbolic_resources": {UR: {}}}, {**placing, "in_motion": []}, {}, ra)
     assert pose == {"joints": [1.0] * 6, "base": None}
 

@@ -15,6 +15,7 @@ from cais_spade_llm.recovery_framework.kmr_tasks import (
     KMR_TASKS,
     PRIMITIVE_CONTRACTS,
 )
+from cais_spade_llm.resources.resource_primitives import INTERNAL_GRIPPER_PRIMITIVES
 from cais_spade_llm.resources.resource_safety_preparation import (
     resource_model_declarations,
     resource_provider,
@@ -164,7 +165,10 @@ def _check_program(actual: dict, expected: dict, *, path: str, resource_id: str)
             allowed_fields = set(original) | {"params", "note"}
             if not set(original) <= set(step) <= allowed_fields:
                 raise ValueError(f"{path}.steps[{index}] has an invalid structure")
-            if any(step[key] != original[key] for key in original if key not in {"params", "note"}):
+            # A UR5e template shown to the LLM renders from code, not from these saved public_params;
+            # KMR templates render from the saved scene, so its public_params stay pinned to the code.
+            editable = {"params", "note", "public_params"} if resource_id.startswith("ur5e-") else {"params", "note"}
+            if any(step[key] != original[key] for key in original if key not in editable):
                 raise ValueError(f"{path}.steps[{index}] changes an executor or safety condition")
             if "params" in original and set(step.get("params", {})) != set(original["params"]):
                 raise ValueError(f"{path}.steps[{index}] changes supported executor parameters")
@@ -360,7 +364,20 @@ def current_program_revision(scene_path) -> str:
 
 
 def primitive_available(scene: dict, resource_id: str, primitive: str, *, recovery: bool) -> bool:
-    """Check the saved executor and recovery availability of one exact primitive."""
+    """Check executor availability while keeping gripper controls internal.
+
+    Args:
+        scene: Saved scene and its primitive declarations.
+        resource_id: Exact owner identifier.
+        primitive: Exact primitive name.
+        recovery: Whether the caller is selecting a standalone recovery step.
+
+    Returns:
+        Whether the primitive is available for this execution surface.
+    """
     validate_resource_programs(scene)
+    if (recovery and (resource_id.startswith("ur5e-") or resource_id == "KMR")
+            and primitive in INTERNAL_GRIPPER_PRIMITIVES):
+        return False
     row = scene["resource_programs"]["resources"][resource_id]["primitives"].get(primitive, {})
     return row.get("status") == "executable" and (not recovery or row.get("recovery_selectable") is True)

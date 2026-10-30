@@ -61,8 +61,10 @@ def test_machine_contracts_follow_the_machine_automaton(scene):
     limited = {"start_job", "resume_job"}
 
     def guards_of(name, preconditions):
+        # Every primitive also needs its device available; the runtime keeps unavailable resources out of
+        # dispatch instead of guarding each automaton event, so that precondition has no guard to match.
         preconditions = {key: value for key, value in preconditions.items()
-                         if not (name in limited and key == "selected_program")}
+                         if not (name in limited and key == "selected_program") and key != "availability"}
         state = preconditions["resource_state"]
         return [{**preconditions, "resource_state": {"equals": value}} for value in state["in"]] if "in" in state \
             else [preconditions]
@@ -151,6 +153,14 @@ def test_saved_catalog_covers_exact_resources_and_unused_executors(scene):
     assert not resources["Storage"]["primitives"] and not resources["Exit"]["primitives"]
     assert not primitive_available(scene, "KMR", "dock", recovery=True)
     assert not primitive_available(scene, "ur5e-1", "snap_part_to_slot", recovery=True)
+    # Gripper controls stay inside grasp_part and release_part; only saved nominal steps call them alone.
+    gripper_controls = {"open_gripper", "close_gripper", "attach_part", "detach_part"}
+    declarations = current_primitive_declarations(scene)
+    for resource_id in ("ur5e-1", "KMR"):
+        assert not any(primitive_available(scene, resource_id, name, recovery=True) for name in gripper_controls)
+        assert all(primitive_available(scene, resource_id, name, recovery=False) for name in gripper_controls)
+        assert primitive_available(scene, resource_id, "grasp_part", recovery=True)
+        assert gripper_controls.isdisjoint(declarations[resource_id])
     # Machining is start_job then the observed complete_job, which has no saved function.
     assert "machine_part" not in resources["M1"]["functions"]
     assert saved_workflow_program(scene, "M1", "start_job")["steps"][0]["op"] == "start_job"

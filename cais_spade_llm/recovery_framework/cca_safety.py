@@ -377,7 +377,8 @@ def _acting_poses(rid: str, jid: str, event: dict, session: dict, after: dict, c
             return work, {"joints": list(arm), "base": list(capture["docks"][location])}
     if work:
         return work, work[-1]
-    unchanged = {row.get("condition") for row in ra_result.get("conditions", []) if row.get("derivation") == "unchanged"}
+    unchanged = {row.get("condition") for row in ra_result.get("conditions", [])
+                 if "before" in row and row["before"] == row.get("after")}
     pose_changed = "pose" in end_state and "pose" not in unchanged
     location_changed = "resource_location" in end_state and location != before_location
     if pose_changed or location_changed:

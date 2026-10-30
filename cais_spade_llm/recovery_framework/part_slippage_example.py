@@ -120,6 +120,7 @@ class PartSlippageExample:
         self.observation_path = ""
         self.check_ra_feasibility = False
         self.check_cca = False
+        self.safety_rules_lookup = False
         self._defer_preparation = False
         self._selection_revision = 0
         self._selected_observation_summary: dict | None = None
@@ -127,6 +128,8 @@ class PartSlippageExample:
         self._selected_observations: dict = {}
         self._draft = None
         self._saved_draft_path: Path | None = None
+        # Belongs to the loaded checked draft; a different draft makes it stale.
+        self._composition = None
         self._task: asyncio.Task | None = None
         self._cancelled = False
         self._runtime = None
@@ -148,6 +151,7 @@ class PartSlippageExample:
             "selection_revision": self._selection_revision,
             "check_ra_feasibility": self.check_ra_feasibility,
             "check_cca": self.check_cca,
+            "safety_rules_lookup": self.safety_rules_lookup,
         }
         runtime = self._runtime
         if self.source == "gazebo" and runtime is not None and self._status["status"] in {"running_example", "blocked", "stopped"}:
@@ -169,9 +173,16 @@ class PartSlippageExample:
                 self._selected_observation_summary = observation_summary(self._selected_observations)
             state.update(observations=deepcopy(self._selected_observation_summary), observation_path=self.observation_path)
         if self.source == "offline":
+            from .outline_draft import checked_drafts
+
             if self._draft is not None:
                 state.update(self._draft.snapshot())
                 state["busy"] = state["busy"] or bool(self._draft._task and not self._draft._task.done())
+            composition = self._current_composition()
+            if composition is not None:
+                state.update(composition.snapshot())
+                state["busy"] = state["busy"] or composition.running
+            state["checked_drafts"] = checked_drafts(self.observation_path) if self.observation_path else []
             state.update(outline_mode="manual", primitive_mode="manual")
             missing = (state.get("observations") or {}).get("missing") or []
             if not self.observation_path:
@@ -203,6 +214,9 @@ class PartSlippageExample:
 
     def _generating_stage(self, session) -> str:
         """Name the stage a stage-level Stop can cancel, or "" once a stop is requested."""
+        composition = self._current_composition() if self.source == "offline" else None
+        if composition is not None and composition.running:
+            return "" if composition.stopping else "primitive"
         if self._task is not None and not self._task.done() and self._task.get_name() == "generate_outline_fresh":
             return "" if self._fresh_cancel.is_set() else "outline"
         if self.source == "offline" and self._draft is not None:
@@ -332,17 +346,93 @@ class PartSlippageExample:
         self.check_cca = enabled
         return self.snapshot()
 
+    def set_safety_rules_lookup(self, enabled: bool) -> dict:
+        """Offer or withhold the selected safety rules as the ``/safety_rules`` lookup in the next Offline outline.
+
+        The outline prompt never lists the rules. Withheld (the default), they stay with the CCA and the LLM
+        meets a rule only in a CCA refusal.
+
+        Args:
+            enabled: List ``/safety_rules`` in the Knowledge Base so the LLM can request the rules.
+
+        Returns:
+            The current workflow state.
+        """
+        if type(enabled) is not bool:
+            raise ValueError("The safety rules lookup is on or off")
+        if self.snapshot()["busy"]:
+            raise ValueError("Stop the current action before changing the safety rules lookup")
+        self.safety_rules_lookup = enabled
+        return self.snapshot()
+
     def _checks(self) -> dict:
-        """Return the OutlineDraft check arguments for the switches turned on, with the scenario's CCA assumptions."""
+        """Return the OutlineDraft arguments for the switches: the checks turned on, the scenario's CCA
+        assumptions, and whether the LLM may look up the safety rules."""
         from cais_spade_llm.recovery_framework.recovery_case_safety import default_cca_assumptions
 
         return {"check_ra_feasibility": self.check_ra_feasibility,
                 "check_nonblocking": self.check_cca, "check_cca_safety": self.check_cca,
-                "cca_assumptions": default_cca_assumptions(self.scenario) if self.check_cca else None}
+                "cca_assumptions": default_cca_assumptions(self.scenario) if self.check_cca else None,
+                "safety_rules_to_llm": "knowledge_base" if self.safety_rules_lookup else "hidden"}
 
     def saved_observations(self) -> list[dict]:
         """List retained observation sources without querying Gazebo."""
         return list_observations()
+
+    def _current_composition(self):
+        """Return the loaded checked draft's composition, if that draft is still the one shown."""
+        composition = self._composition
+        return composition if composition is not None and composition.draft is self._draft else None
+
+    def load_checked_draft(self, draft_path: str) -> dict:
+        """Load a finished checked outline draft for review and primitive composition.
+
+        Its events are replayed with the draft's recorded checks on the current code, with no model call;
+        composition is available when the replay reproduces the draft.
+
+        Args:
+            draft_path: One of the selected capture's listed checked drafts.
+
+        Returns:
+            The current workflow state.
+        """
+        from .outline_draft import checked_drafts
+
+        if self.source != "offline" or self.snapshot()["busy"]:
+            raise ValueError("Select Offline and wait for the current action before loading a draft")
+        if draft_path not in {row["path"] for row in checked_drafts(self.observation_path)}:
+            raise ValueError("Select one of the listed checked drafts")
+        self._draft = self._composition = None
+        self._status = {"status": "loading_draft",
+                        "message": "Loading the draft and replaying its events with its checks."}
+        self._task = asyncio.create_task(self._load_checked_draft(Path(draft_path)), name="load_checked_draft")
+        self._task.add_done_callback(self._task_finished)
+        return self.snapshot()
+
+    async def _load_checked_draft(self, path: Path) -> None:
+        from .outline_draft import DRAFT_MAX_TURNS, OutlineDraft, load_draft
+        from .primitive_composition import DraftComposition, replay_checked_draft
+
+        def load():
+            observations = read_observations(self.observation_path)
+            record = load_draft(path, observations)
+            settings = record.get("llm_settings") or {}
+            draft = OutlineDraft(observations, record["selected_safety_files"], model=settings.get("model"),
+                reasoning_effort=settings.get("reasoning_effort"), check_ra_feasibility=True,
+                check_nonblocking=True, check_cca_safety=True, cca_assumptions=record.get("cca_assumptions"),
+                single_pass_outline=bool(record.get("single_pass_outline")),
+                max_turns=record.get("max_turns", DRAFT_MAX_TURNS),
+                safety_rules_to_llm=record.get("safety_rules_to_llm") or "hidden")
+            draft.record, draft.directory = record, path.parent
+            draft.prepared["recovery_debug"] = {"artifact_directory": str(path.parent),
+                                                "per_turn_debug_dir": str(path.parent)}
+            source, reason = replay_checked_draft(draft, observations)
+            return observations, draft, DraftComposition(draft, observations, source, reason)
+
+        observations, draft, composition = await asyncio.to_thread(load)
+        self._selected_observations, self._selected_observation_summary = observations, None
+        self._draft, self._composition, self._saved_draft_path = draft, composition, path
+        self._status = {"status": "idle", "message": "Checked draft loaded."}
 
     def prepare_offline(self) -> dict:
         """Prepare the selected immutable capture without calling the LLM."""
@@ -505,6 +595,15 @@ class PartSlippageExample:
         """Forward an operator action to the owning ProductAgent event loop."""
         if action == "stop_generation":
             return await self._stop_generation()
+        composition = self._current_composition() if self.source == "offline" else None
+        if composition is not None and action in {"generate_primitives", "regenerate_primitives"}:
+            if self.snapshot()["busy"]:
+                raise ValueError("Wait for the current action to finish")
+            composition.start(feedback=feedback)
+            return self.snapshot()
+        if composition is not None and action == "stop" and composition.running:
+            composition.stop()
+            return self.snapshot()
         if action == "generate_outline_fresh":
             if self.source != "offline" or self.snapshot()["busy"] or not self.observation_path:
                 raise ValueError("Select saved observations in Offline and wait for the current action")
@@ -614,9 +713,13 @@ class PartSlippageExample:
         return self.snapshot()
 
     async def _stop_generation(self) -> dict:
-        """Stop the running outline draft; only Offline drafts generate outlines."""
-        if not self._generating_stage(None):
+        """Stop the running outline draft or the loaded draft's composition; both are Offline only."""
+        stage = self._generating_stage(None)
+        if not stage:
             raise ValueError("No recovery generation is running")
+        if stage == "primitive":
+            self._composition.stop()
+            return self.snapshot()
         # Offline Generate always starts a fresh outline, so the full attempt stop applies.
         return await self.action("stop")
 
