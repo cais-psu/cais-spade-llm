@@ -21,7 +21,11 @@ that resource declares needs nothing, and a name one of them declares comes only
 the resource's own event.
 
 Results state facts only, never a fix: FEASIBLE with the primitive set, INFEASIBLE with the fact that
-refuses the event, or NEEDS_CONTEXT when recorded evidence or a bounded search leaves it unresolved.
+refuses the event, or NEEDS_CONTEXT when recorded evidence or a bounded search leaves it unresolved. A check
+only accepts or refuses what the event states and never supplies a value (AGENTS.md, "No hidden rules in
+recovery events"): a value left out that a check finds changed is refused. A mobile base is checked from the
+pose the event states or the dock of the place it names; only an event that leaves it at no named place opens
+the search for a free base, which is the existence Eq. 12 asks for.
 """
 
 import math
@@ -38,8 +42,12 @@ FEASIBLE, INFEASIBLE, NEEDS_CONTEXT = "FEASIBLE", "INFEASIBLE", "NEEDS_CONTEXT"
 _TOP_DOWN_YAWS_RAD = (0.0, math.pi / 2, math.pi, -math.pi / 2)
 # Largest recorded surfaces of a place body tried as its work area.
 _BODY_SURFACES = 3
+# Points checked along a gripper, about 1 cm apart.
+_GRIPPER_POINTS = 23
 # Recorded shapes that only touch do not overlap.
 _TOUCH_M = 1e-6
+# Candidate bases judged on a pick's or place's heights, as many as a base search tries for one pose.
+_TRANSFER_BASE_TRIES = 12
 _ORDER = {FEASIBLE: 0, NEEDS_CONTEXT: 1, INFEASIBLE: 2}
 
 
@@ -149,7 +157,9 @@ class _Check:
         self.accepted = session.get("accepted_outline_prefix") or []
         self.part_names = set(self.parts) | set(session.get("symbolic_parts") or {})
         self.end = dict(event.get("expected_end_state") or {})
-        self.neighbors = dict(event.get("neighbor_end_state") or {})
+        stated = event.get("neighbor_end_state") or {}
+        self.neighbors = ({jid: values for jid, values in stated.items() if isinstance(values, dict)}
+                          if isinstance(stated, dict) else {})
 
     # Projected state v.
 
@@ -170,7 +180,8 @@ class _Check:
     # Alg. 1: each value the event states, and what establishes it.
 
     def conditions(self, found: dict) -> list[dict]:
-        rows = [self.condition(self.jid, name, after, found) for name, after in self.end.items()]
+        rows = [*self.unreadable_neighbors(), *self.unstated_found(found),
+                *(self.condition(self.jid, name, after, found) for name, after in self.end.items())]
         for jid, values in self.neighbors.items():
             if jid in self.unread_neighbors():
                 rows.append({"entity": jid, "condition": "neighbor_end_state", "after": deepcopy(values),
@@ -186,6 +197,43 @@ class _Check:
             if row.get("producers") and row["status"] != FEASIBLE:
                 row["reason"] = self.refusal(row["producers"], ruled_out)
         return rows
+
+    def unstated_found(self, found: dict) -> list[dict]:
+        """Refuse an event that leaves out a value its pick, place, stated pose or stated ledger changes.
+
+        Code never writes a value the event does not state, so a value left out stays as it was. Where that is
+        not what a check finds, the event states it. The part's own location has its own refusal.
+        """
+        rows = []
+        for (jid, name), (value, check, _) in found.items():
+            owner = jid or self.jid
+            declaration = self.variables(owner).get(name) or {}
+            if (name in (self.end if owner == self.jid else self.neighbors.get(owner) or {}) or name == "part_location"
+                    or declaration.get("private") or name.startswith(("task_ctx.", "_"))):
+                continue
+            scope = "resource" if jid else "part"
+            known, before = self.value(owner, name, scope)
+            if known and self.same_value(before, value):
+                continue
+            subject = self.name_of(owner) if jid else self.part
+            left = _text(before) if known else "not stated"
+            finding = {"pose": f"the stated pose puts {subject} at {_text(value)}",
+                       "processCompleted": f"the stated processCompleted completes {subject}'s {name}"}.get(
+                           check, f"the {check} check finds {subject}'s {name} {_text(value)}")
+            rows.append({"entity": subject, "condition": name, "status": NEEDS_CONTEXT, "found_by": check,
+                         "reason": f"{finding}, and the event leaves {name} {left}"})
+        return rows
+
+    def unreadable_neighbors(self) -> list[dict]:
+        """Refuse a neighbor_end_state that is not resources with their values.
+
+        Claude's replies are not held to the schema, and no check or projection can read such a value.
+        """
+        stated = self.event.get("neighbor_end_state")
+        if not stated or (isinstance(stated, dict) and all(isinstance(values, dict | None) for values in stated.values())):
+            return []
+        return [{"entity": self.jid, "condition": "neighbor_end_state", "after": deepcopy(stated), "status": INFEASIBLE,
+                 "reason": f"neighbor_end_state is {_text(stated)}, not resources with their values, so it is not read"}]
 
     def unread_neighbors(self) -> list[str]:
         """Return the names in neighbor_end_state that are no recorded resource, such as a part.
@@ -403,7 +451,58 @@ class _Check:
         target = self.stated_tool_pose(after)
         if target is None:
             return {"status": NEEDS_CONTEXT, "reason": f"{name} {_text(after)} has no orientation to check"}
-        return self.reach_pose(target, f"{name} {_text(after)}")
+        checked = self.reach_pose(target, f"{name} {_text(after)}")
+        if checked["status"] != FEASIBLE:
+            return checked
+        return self.gripper_blocked(target, f"{name} {_text(after)}") or checked
+
+    def gripper_blocked(self, target: list[float], what: str) -> dict | None:
+        """Refuse a stated pose whose gripper, or a part it keeps holding, passes through something.
+
+        The pose is the controlled link's. Recorded shapes are checked at points along the gripper down to its
+        fingertips, and against the held part where the capture records its grasp.
+        """
+        offset = (self.cell.resources.get(self.rid) or {}).get("tcp_offset_z")
+        if not isinstance(offset, (int, float)):
+            return None
+        tool = Rotation.from_quat(target[3:])
+        tips = np.add(target[:3], tool.apply([0.0, 0.0, abs(offset)]))
+        fingertips = f"its fingertips are {abs(offset):.3f} m from that pose along the tool"
+        hit, near = [], []
+        for point in np.linspace(target[:3], tips, _GRIPPER_POINTS).tolist():
+            exact, bounded = self.overlaps([[value, value] for value in point], set())
+            hit += [name for name in exact if name not in hit]
+            near += [name for name in bounded if name not in near]
+        if hit:
+            return {"status": INFEASIBLE, "reason": f"{what} puts {self.rid}'s gripper through {', '.join(hit)}; {fingertips}"}
+        held, box = self.held_part_box(target, tool)
+        exact, bounded = self.overlaps(box, set(), held) if box is not None else ([], [])
+        if exact:
+            return {"status": INFEASIBLE, "reason": f"{what} puts {self.rid}'s held {held} through {', '.join(exact)}"}
+        if near:
+            return {"status": NEEDS_CONTEXT, "reason": f"{what} puts {self.rid}'s gripper within the recorded bounds of "
+                                                       f"{', '.join(near)}, whose shapes are not checked; {fingertips}"}
+        if bounded:
+            return {"status": NEEDS_CONTEXT, "reason": f"{what} puts {self.rid}'s held {held} within the recorded bounds "
+                                                       f"of {', '.join(bounded)}, whose shapes are not checked"}
+        return None
+
+    def held_part_box(self, target: list[float], tool: Rotation) -> tuple[str | None, list[list[float]] | None]:
+        """Return the part the acting resource keeps holding and its box at a pose, where its grasp is recorded.
+
+        The box stops the recorded contact layer above the part's bottom, so a part set flush on a surface does
+        not count as passing through it.
+        """
+        known, held = self.value(self.jid, "held_part")
+        if not (known and isinstance(held, str)) or self.end.get("held_part", held) != held:
+            return None, None
+        bounds = (self.cell.part_geometry.get(held) or {}).get("local_bounds")
+        grasp = self.recorded_grasp(held)
+        if not bounds or grasp is None:
+            return held, None
+        box = _part_box(np.add(target[:3], tool.apply(grasp[:3])), tool * Rotation.from_quat(grasp[3:]), bounds)
+        box[2][0] += self.cell.contact_layer_m or 0.0
+        return held, box
 
     def stated_tool_pose(self, after: Any) -> list[float] | None:
         if not isinstance(after, dict) or not all(isinstance(after.get(axis), (int, float)) for axis in "xyz"):
@@ -415,7 +514,9 @@ class _Check:
             if current is None:
                 return None
             orientation = current[3:]
-        return [after["x"], after["y"], after["z"], *orientation]
+        # A zero or non-finite quaternion is no orientation.
+        length = math.hypot(*orientation)
+        return [after["x"], after["y"], after["z"], *orientation] if math.isfinite(length) and length > 0 else None
 
     def current_pose(self) -> list[float] | None:
         known, pose = self.value(self.jid, "pose")
@@ -534,11 +635,21 @@ class _Check:
             return [recorded[0], recorded[1], Rotation.from_quat(recorded[3:]).as_euler("xyz")[2]]
         return None
 
+    def named_docks(self) -> dict[str, list[float]]:
+        """Return the acting resource's declared docks by the place each belongs to."""
+        key = f"{self.rid}_docking_pose"
+        rows = {**self.cell.scene, **{row.get("resource_id"): row for row in self.cell.scene.get("machines", [])}}
+        return {name: row[key] for name, row in rows.items() if isinstance(row, dict) and isinstance(row.get(key), list)}
+
     def docks(self) -> list[list[float]]:
         key = f"{self.rid}_docking_pose"
         entries = [row for row in self.cell.scene.values() if isinstance(row, dict)] + list(self.cell.scene.get("machines", []))
         return [[row[key][0], row[key][1], row[key][5]] for row in entries
                 if isinstance(row.get(key), list) and len(row[key]) == 6]
+
+    def dock_at(self, place: Any) -> list[float] | None:
+        dock = self.named_docks().get(self.name_of(place)) if isinstance(place, str) else None
+        return [dock[0], dock[1], dock[5]] if dock and len(dock) == 6 else None
 
     def base_candidates(self, around: list[float]) -> list[list[float]]:
         from cais_spade_llm.resources.kinematic_reach import free_base_poses
@@ -548,6 +659,27 @@ class _Check:
         if start is None or not self.cell.floor:
             return []
         return free_base_poses(self.cell.floor, footprint, start[:2], around[:2], docks=self.docks())
+
+    def event_bases(self, around: list[float]) -> list[list[float]]:
+        """Return the bases the event leaves a mobile resource to work from.
+
+        A stated pose is that base, and a named place is its dock. Only where the event leaves the resource at no
+        named place is any free base open: Eq. 12 asks for one, and the LLM never writes the base's parameters.
+        """
+        stated = self.end.get("pose")
+        if isinstance(stated, dict):
+            return [[stated["x"], stated["y"], stated.get("yaw", 0.0)]] if self.base_fits(stated) else []
+        if "resource_location" in self.end:
+            location = self.end["resource_location"]
+        else:
+            known, pose = self.value(self.jid, "pose")
+            if known and isinstance(pose, dict) and all(isinstance(pose.get(axis), (int, float)) for axis in ("x", "y", "yaw")):
+                return [[pose["x"], pose["y"], pose["yaw"]]]
+            location = self.value(self.jid, "resource_location")[1]
+        if isinstance(location, str):
+            dock = self.dock_at(location)
+            return [dock] if dock else []
+        return self.base_candidates(around)
 
     def base_fits(self, pose: Any) -> bool:
         from cais_spade_llm.resources.kinematic_reach import free_base_poses
@@ -562,10 +694,58 @@ class _Check:
         fitting = free_base_poses(self.cell.floor, footprint, start[:2], stated[:2], docks=[stated], radius_m=0.0)
         return bool(fitting) and fitting[0] == stated
 
-    def reach_area(self, area: dict, what: str, *, part_start: list[float] | None = None) -> dict:
-        """Check whether the acting resource can bring its gripper, or a carried part, to a recorded area."""
+    def transfer_heights(self, transfer: str | None, place: Any, point: list[float]) -> list[float]:
+        """Return the heights above a spot that the acting resource's own calculation needs for a pick or place.
+
+        A mobile arm comes in and leaves at heights its owner calculates, which composition then binds, so a spot
+        it can only just touch is not one it can use. These are its owner's numbers, never restated here. An arm's
+        come from the pick's own context, which an outline does not have yet, so composition checks those.
+        """
+        from cais_spade_llm.recovery_framework.kmr_recovery import transfer_heights
+
+        if transfer is None or not self.mobile() or "task_execution" not in self.cell.scene[self.rid]:
+            return []
+        return transfer_heights(self.cell.scene, transfer, self.part, self.name_of(place) if isinstance(place, str) else None,
+                                point[2])
+
+    def reach_with_heights(self, chain: dict, point: list[float], orientation: list[float], bases: list[list[float]],
+                           heights: list[float]) -> dict | None:
+        """Return the reach of a point from the first candidate base that also reaches every height above it.
+
+        Each base is judged on all of them, so a base that only touches the spot does not end the search.
+        """
         from cais_spade_llm.resources.kinematic_reach import reach_from_base
 
+        def reached(z: float, candidates: list[list[float]]) -> dict:
+            return reach_from_base(chain, self.reference_pose([*point[:2], z], orientation), candidates,
+                                   base_height_m=chain["root_xyz"][2])
+
+        remaining = list(bases)
+        for _ in range(_TRANSFER_BASE_TRIES):
+            found = reached(heights[0] if heights else point[2], remaining)
+            if found["feasibility_status"] != FEASIBLE:
+                return None
+            base = found["base_pose"]
+            at_point = reached(point[2], [base]) if heights else found
+            if at_point["feasibility_status"] == FEASIBLE and all(
+                    reached(z, [base])["feasibility_status"] == FEASIBLE for z in heights[1:]):
+                return at_point
+            remaining.remove(base)
+            if not remaining:
+                return None
+        return None
+
+    def reach_area(self, area: dict, what: str, *, part_start: list[float] | None = None,
+                   transfer: str | None = None, place: Any = None) -> dict:
+        """Check whether the acting resource can bring its gripper, or a carried part, to a recorded area.
+
+        Args:
+            area: The recorded area.
+            what: How a refusal names the area.
+            part_start: Where a transporting resource carries the part from.
+            transfer: ``pick`` or ``place`` when a part is taken or put down there, which needs more than the spot.
+            place: The place the area belongs to.
+        """
         point = self.work_point(area)
         if self.transport():
             return self.transport_reach(area, point, part_start, what)
@@ -580,22 +760,25 @@ class _Check:
                     return checked
                 results.append(checked)
             return results[-1]
-        stated = self.end.get("pose")
-        bases = ([[stated["x"], stated["y"], stated.get("yaw", 0.0)]] if isinstance(stated, dict)
-                 and self.base_fits(stated) else self.base_candidates(point))
+        bases = self.event_bases(point)
         if not bases:
             return {"status": NEEDS_CONTEXT, "reason": f"no free, connected base pose for {self.rid} near {what}"}
+        heights = self.transfer_heights(transfer, place, point)
         # A declared dock that reaches the area is the base used, before any closer grid pose.
         docks = [base for base in bases if base in self.docks()]
         for candidates in ([docks] if docks else []) + [bases]:
             for orientation in self.orientations():
-                checked = reach_from_base(chain, self.reference_pose(point, orientation), candidates,
-                                          base_height_m=chain["root_xyz"][2])
-                if checked["feasibility_status"] == FEASIBLE:
+                checked = self.reach_with_heights(chain, point, orientation, candidates, heights)
+                if checked is not None:
                     return {"status": FEASIBLE, "witness": {"base_pose": checked["base_pose"],
                                                             "joint_positions": checked["joint_positions"]}}
+        height = f" and z {heights[0]:.3f} above it" if heights else ""
+        if len(bases) == 1:
+            x, y, yaw = bases[0]
+            return {"status": NEEDS_CONTEXT, "reason": f"{self.rid} has no configuration at {what}{height} from its "
+                                                       f"base ({x:.3f}, {y:.3f}, yaw {yaw:.3f})"}
         return {"status": NEEDS_CONTEXT, "reason": f"no candidate base pose gave {self.rid} a configuration at "
-                                                   f"{what}; reachability is unresolved"}
+                                                   f"{what}{height}; reachability is unresolved"}
 
     def transport_reach(self, area: dict, point: list[float], start: list[float] | None, what: str) -> dict:
         from cais_spade_llm.recovery_framework.workflow_gazebo import transport_chain
@@ -617,12 +800,14 @@ class _Check:
         return {"status": INFEASIBLE if checked["feasibility_status"] == INFEASIBLE else NEEDS_CONTEXT,
                 "reason": f"{what} is upstream of {self.part} or beyond {self.rid}'s last stop"}
 
-    def reach_place(self, place: Any, slot: str | None, what: str, *, part_start: list[float] | None = None) -> dict:
+    def reach_place(self, place: Any, slot: str | None, what: str, *, part_start: list[float] | None = None,
+                    transfer: str | None = None) -> dict:
         areas = [] if self.in_gripper(place, slot) else self.areas(place, slot)
         if not areas:
             return {"status": NEEDS_CONTEXT, "reason": self.unrecorded_place(place), "place": place,
                     **({"slot": slot} if slot else {})}
-        results = [self.reach_area(area, f"{what} ({area['name']})", part_start=part_start) for area in areas]
+        results = [self.reach_area(area, f"{what} ({area['name']})", part_start=part_start, transfer=transfer, place=place)
+                   for area in areas]
         best = _best(result["status"] for result in results)
         chosen = next(result for result in results if result["status"] == best)
         return {**chosen, "place": place, **({"slot": slot} if slot else {})}
@@ -813,30 +998,67 @@ class _Check:
         known, before = self.value(self.jid, "resource_location")
         if isinstance(location, str) and location != before and location not in self.named_poses():
             if self.mobile():
-                areas = self.areas(location)
-                bases = self.base_candidates(self.work_point(areas[0])) if areas else []
-                rows.append({"check": "navigate", "place": location,
-                             "status": FEASIBLE if bases else NEEDS_CONTEXT,
-                             **({"witness": {"base_pose": bases[0]}} if bases else
-                                {"reason": f"no free, connected base pose for {self.rid} near {location}"})})
+                dock = self.dock_at(location)
+                rows.append({"check": "navigate", "place": location, "status": FEASIBLE if dock else NEEDS_CONTEXT,
+                             **({"witness": {"base_pose": dock}} if dock else
+                                {"reason": f"{self.rid} has no dock at {location}"})})
             # A stated place can be any JSON value, such as a dict, so the places are compared, not hashed.
             elif not picks_or_places or location not in [row.get("place") for row in rows]:
                 rows.append({"check": "move", **self.reach_place(location, None, location)})
-        return rows
+        return [*rows, *self.pose_from_calculation(rows)]
+
+    def pose_from_calculation(self, rows: list[dict]) -> list[dict]:
+        """Refuse a stated pose where the acting resource's declared calculation gives the target.
+
+        ``pose`` gives a position nothing else gives. A declared pick or place calculation gives an arm's target
+        from the part or the place, a named posture gives its own joints and a dock a mobile base's pose, so the
+        event does not state those. Anywhere else the pose stays.
+        """
+        if "pose" not in self.end:
+            return []
+        declared = self.cell.declarations.get(self.rid) or {}
+        location, stated = self.end.get("resource_location"), self.end.get("part_location")
+        place, slot, _ = self.destination() if self.part is not None else (None, None, None)
+        target = stated if isinstance(stated, str) else place
+        checks = {row["check"] for row in rows}
+        places = "place" in checks
+        picks = "pick" in checks and not places
+        part_at, part_slot, position = self.part_place() if picks else (None, None, None)
+        named = None
+        if isinstance(location, str) and location in self.named_poses():
+            named = location
+        elif self.mobile():
+            docks = self.named_docks()
+            named = next((self.name_of(name) for name in (location, target if places else None, part_at)
+                          if isinstance(name, str) and self.name_of(name) in docks), None)
+        elif "compute_place_targets" in declared and places and self.has_geometry(place, slot):
+            named = target
+        elif "compute_pick_targets" in declared and picks and (position is not None or self.has_geometry(part_at, part_slot)):
+            named = f"{self.part}'s recorded position"
+        if named is None:
+            return []
+        return [{"check": "stated_pose", "status": INFEASIBLE, "reason": f"{named} gives {self.rid}'s target, so this event "
+                                                                         f"takes no pose; it states {_text(self.end['pose'])}"}]
+
+    def has_geometry(self, place: Any, slot: str | None) -> bool:
+        """Return whether a place is one with recorded geometry, not the acting resource or a gripper."""
+        return (isinstance(place, str) and place not in (self.jid, self.rid) and bool(self.areas(place))
+                and not self.in_gripper(place, slot))
 
     def unstated_part_location(self) -> list[dict]:
-        """Refuse a release that states the resource's held_part but not its part_location.
+        """Refuse a pick or a release that states the resource's held_part but not its part_location.
 
-        The resource's model declares both, and a held part leaving changes both: unstated, the projected
-        part would stay at the resource that no longer holds it.
+        The resource's model declares both, and a held part arriving or leaving changes both: unstated, the
+        projected part would stay where it no longer is.
         """
-        if "part_location" in self.end or "part_location" not in self.variables(self.jid):
+        if self.part is None or "part_location" in self.end or "part_location" not in self.variables(self.jid):
             return []
         known, held = self.value(self.jid, "held_part")
-        if not (known and held == self.part and "held_part" in self.end and self.end["held_part"] != self.part):
+        if not known or "held_part" not in self.end or (held == self.part) == (self.end["held_part"] == self.part):
             return []
+        direction = "from" if held == self.part else "to"
         return [{"check": "part_location", "part": self.part, "status": NEEDS_CONTEXT,
-                 "reason": f"the event changes {self.rid}'s held_part from {self.part} but does not state its "
+                 "reason": f"the event changes {self.rid}'s held_part {direction} {self.part} but does not state its "
                            "part_location"}]
 
     def unstated_slot(self) -> list[dict]:
@@ -905,6 +1127,7 @@ class _Check:
         located as the model locates a part from its custodian. A transport moves it to its stated slot on
         the acting resource. A move, navigation, pick or place at the stated location leaves the acting
         resource there; a stated pose, at the place whose dock or recorded area holds it, else at no named place.
+        A stated ledger entry that completes the part's unfinished process ends that process.
         """
         found: dict[tuple[str | None, str], tuple[Any, str, str]] = {}
         checks = {row["check"]: row["status"] for row in rows if self.part is not None and row.get("part") == self.part}
@@ -923,13 +1146,18 @@ class _Check:
             slot = self.own_slot()
             found[(self.jid, slot)] = (self.end[slot], "transport", checks["transport"])
         location = self.end.get("resource_location")
-        # The resource ends where its move or navigation takes it, else where it puts the part, else where it
-        # takes it; its own named postures come from its primitives.
-        ends = ([row for row in rows if row.get("check") in ("move", "navigate")]
-                or [row for row in rows if row.get("check") == "place" and "place" in row]
-                or [row for row in rows if row.get("check") == "pick" and "place" in row])
-        if isinstance(location, str) and location not in self.named_poses() and ends:
-            found[(self.jid, "resource_location")] = (ends[-1]["place"], ends[-1]["check"], ends[-1]["status"])
+        # The resource ends where its move or navigation takes it, else where it puts or takes the part, stated or
+        # not; its own named postures come from its primitives, so a pick and then home in one event stands.
+        moves = [row for row in rows if row.get("check") in ("move", "navigate")]
+        if not (isinstance(location, str) and location in self.named_poses()):
+            left = (moves[-1]["place"], moves[-1]["check"], moves[-1]["status"]) if moves else self.location_after(rows)
+            if left is not None:
+                found[(self.jid, "resource_location")] = left
+        known, process = self.value(self.jid, "current_process", "part") if self.part is not None else (False, None)
+        if known and isinstance(process, dict) and "current_process" not in self.end:
+            done = {key: process.get(key) for key in ("process", "result") if process.get(key) is not None}
+            if done in (self.end.get("processCompleted") or []):
+                found[(None, "current_process")] = (None, "processCompleted", FEASIBLE)
         pose = self.end.get("pose")
         # A stated pose says where the resource ends up; a mobile base is at a named place only on its dock.
         if (not isinstance(location, str) or self.mobile()) and isinstance(pose, dict) and all(
@@ -937,6 +1165,27 @@ class _Check:
             # The pose's own producer checks that the resource gets there.
             found[(self.jid, "resource_location")] = (self.place_at(pose), "pose", FEASIBLE)
         return found
+
+    def location_after(self, rows: list[dict]) -> tuple[Any, str, str] | None:
+        """Return where the event's pick or place leaves the acting resource, when the event names no place.
+
+        A mobile base stands at the dock its reach was checked from, else at no named place. Any other resource
+        stands at the place its part left or reached when its location declares that place, and at no named
+        place after picking a part at none; its location says nothing about another place.
+        """
+        moves = [row for row in rows if row.get("check") in ("pick", "place") and row.get("part") == self.part]
+        if not moves:
+            return None
+        row, check, status = moves[-1], moves[-1]["check"], moves[-1]["status"]
+        if self.mobile():
+            base = (row.get("witness") or {}).get("base_pose")
+            return (self.place_at({"x": base[0], "y": base[1]}), check, status) if base else None
+        places = [self.part_place()[0]] if check == "pick" else [self.end.get("part_location"), row.get("place")]
+        places = [self.name_of(place) if isinstance(place, str) else place for place in places]
+        if places == [None]:
+            return None, check, status
+        declared = (self.variables(self.jid).get("resource_location") or {}).get("domain") or []
+        return next(((place, check, status) for place in places if place in declared), None)
 
     def place_at(self, pose: dict) -> str | None:
         """Return the place a stated pose puts the acting resource at: a mobile base on a dock, else the declared
@@ -946,11 +1195,7 @@ class _Check:
         )
 
         if self.mobile():
-            docks = {name: row[f"{self.rid}_docking_pose"] for name, row in self.cell.scene.items()
-                     if isinstance(row, dict) and isinstance(row.get(f"{self.rid}_docking_pose"), list)}
-            docks |= {row.get("resource_id"): row[f"{self.rid}_docking_pose"] for row in self.cell.scene.get("machines", [])
-                      if isinstance(row, dict) and isinstance(row.get(f"{self.rid}_docking_pose"), list)}
-            return next((name for name, dock in docks.items()
+            return next((name for name, dock in self.named_docks().items()
                          if math.dist(dock[:2], [pose["x"], pose["y"]]) <= _TOUCH_M), None)
         return _place_of(pose, self.prepared)
 
@@ -1002,7 +1247,7 @@ class _Check:
             rows.append({"check": "pick", "part": self.part, **self.reach_part()})
         if puts:
             rows.append({"check": "place", "part": self.part,
-                         **self.reach_place(place, slot, f"{_text(place)}" + (f" {slot}" if slot else ""))})
+                         **self.reach_place(place, slot, f"{_text(place)}" + (f" {slot}" if slot else ""), transfer="place")})
             if neighbor is not None:
                 rows.append(self.capacity(neighbor, slot))
         elif released:
@@ -1169,17 +1414,21 @@ class _Check:
             return "would tip over, its recorded centre of mass outside where it touches down,"
         return None
 
-    def recorded_grasp(self) -> list[float] | None:
-        """Return the grasp the resource recorded on the event's part at the failure, while it holds it from then.
+    def recorded_grasp(self, part: str | None = None) -> list[float] | None:
+        """Return the grasp the resource recorded on a part at the failure, while it holds it from then.
 
         Once an accepted event has taken or released the part, the grasp it is held by is no longer recorded.
+
+        Args:
+            part: The part; the event's own when not given.
         """
+        part = part or self.part
         attachment = (self.cell.resources.get(self.rid) or {}).get("attachment") or {}
         grasp = attachment.get("grasp_transform")
-        if (attachment.get("part_name") != self.part or attachment.get("observed_attachment_complete") is not True
-                or not (isinstance(grasp, list) and len(grasp) == 7) or self.value(self.jid, "held_part") != (True, self.part)):
+        if (attachment.get("part_name") != part or attachment.get("observed_attachment_complete") is not True
+                or not (isinstance(grasp, list) and len(grasp) == 7) or self.value(self.jid, "held_part") != (True, part)):
             return None
-        return None if any(self.moves_part(task, self.part) for task in self.accepted) else grasp
+        return None if any(self.moves_part(task, part) for task in self.accepted) else grasp
 
     def moves_part(self, task: dict, part: str) -> bool:
         """Return whether an accepted event took or released a part: who holds it, or where it is, changed."""
@@ -1215,8 +1464,14 @@ class _Check:
         bodies = {(self.cell.scene.get(rid) or {}).get("gazebo_model") or rid: rid for rid in self.cell.rids.values()}
         return next((bodies[surface["model"]] for surface in supports if surface["model"] in bodies), None)
 
-    def overlaps(self, rest: list[list[float]], supports: set[str]) -> tuple[list[str], list[str]]:
-        """Return what overlaps a resting part: recorded boxes exactly, other shapes and parts by their bounds."""
+    def overlaps(self, rest: list[list[float]], supports: set[str], moving: str | None = None) -> tuple[list[str], list[str]]:
+        """Return what overlaps a resting part: recorded boxes exactly, other shapes and parts by their bounds.
+
+        Args:
+            rest: The box to test.
+            supports: Recorded shapes it rests on.
+            moving: The part the box belongs to; the event's own part when not given.
+        """
         exact, bounded = [], []
         for _, collision in self.static_collisions():
             if collision["id"] in supports or not _boxes_overlap(rest, collision["bounds"]):
@@ -1226,7 +1481,7 @@ class _Check:
                 bounded.append(collision["id"])
             elif _footprints_overlap(box, rest):
                 exact.append(collision["id"])
-        for part in sorted(self.part_names - {self.part}):
+        for part in sorted(self.part_names - {moving or self.part}):
             row = self.parts.get(part, {})
             bounds = (self.cell.part_geometry.get(part) or {}).get("local_bounds")
             _, pose = self.part_pose(part)
@@ -1241,10 +1496,10 @@ class _Check:
         place, slot, position = self.part_place()
         if position is not None:
             area = {"name": "observed pose", "bounds": [[position[0]] * 2, [position[1]] * 2, [position[2]] * 2]}
-            return self.reach_area(area, f"{self.part}'s observed position")
+            return self.reach_area(area, f"{self.part}'s observed position", transfer="pick", place=place)
         if place is None:
             return {"status": NEEDS_CONTEXT, "reason": f"the projected state does not record where {self.part} is"}
-        return self.reach_place(place, slot, f"{self.part} at {_text(place)}" + (f" {slot}" if slot else ""))
+        return self.reach_place(place, slot, f"{self.part} at {_text(place)}" + (f" {slot}" if slot else ""), transfer="pick")
 
     def transport_check(self, condition: str) -> dict:
         place, slot = self.rid, self.end[condition]

@@ -455,13 +455,18 @@ def check_environment_primitive_capability(*, primitive: str, params: dict, task
         except (KeyError, ValueError, TypeError) as exc:
             return answer('NEEDS_CONTEXT', str(exc))
         return check_kmr_primitive_capability(primitive=primitive, params=params, task=task,
-            recovery_snapshot=snapshot, resource_evidence=evidence)
+            recovery_snapshot=snapshot, resource_evidence=evidence, physical_evidence=physical_evidence)
+    scene = evidence.get('inputs', {}).get('scene', {})
+    if isinstance(scene.get(rid, {}).get('simulation_transport'), dict):
+        from cais_spade_llm.recovery_framework.transport_composition import check_transport_primitive
+
+        return answer(*check_transport_primitive(primitive=primitive, params=params, task=task,
+                                                 recovery_snapshot=snapshot, resource_evidence=evidence))
     descriptor = environment_recovery_descriptor(evidence, snapshot, resource_jid=task.get('resource_jid', ''))
     support = derive_primitive_union(task=task, recovery_des_model=descriptor, recovery_snapshot=snapshot)
     contributors = [row for row in support['matching_transitions'] if primitive in row['primitives']]
     if not contributors:
         return answer('NEEDS_CONTEXT', 'No declared owner successor supplies this primitive', support=support)
-    scene = evidence.get('inputs', {}).get('scene', {})
     checks = []
     for contributor in contributors:
         bindings = contributor['parameter_bindings']
@@ -480,20 +485,7 @@ def check_environment_primitive_capability(*, primitive: str, params: dict, task
                           projected_processing_observations=record)
         part = bindings.get('part_name')
         geometry = evidence.get('geometry', {}).get(part, {})
-        if rid == 'Conveyor' and part is None:
-            from cais_spade_llm.resources.nominal_conveyor import conveyor_parts
-
-            resident = conveyor_parts(model, evidence.get('environment_valuation', {}).get(rid, {}))
-            checked_parts = [feasibility(model, {'event_name': contributor['event_name'], 'parameters': bindings},
-                evidence.get('geometry', {}).get(name, {})) for name in resident]
-            if not checked_parts:
-                status, reasons = 'NEEDS_CONTEXT', ['No recorded Conveyor part custody is available']
-            else:
-                status = ('INFEASIBLE' if any(row[0] == 'INFEASIBLE' for row in checked_parts) else
-                          'NEEDS_CONTEXT' if any(row[0] == 'NEEDS_CONTEXT' for row in checked_parts) else 'FEASIBLE')
-                reasons = [reason for row in checked_parts for reason in row[1]]
-        else:
-            status, reasons = feasibility(model, {'event_name': contributor['event_name'], 'parameters': bindings}, geometry)
+        status, reasons = feasibility(model, {'event_name': contributor['event_name'], 'parameters': bindings}, geometry)
         if primitive == 'dwell':
             machine = next((row for row in scene.get('machines', []) if row.get('resource_id') == rid), {})
             minimum = machine.get('simulation_process', {}).get('processing_time_sec')
@@ -504,15 +496,6 @@ def check_environment_primitive_capability(*, primitive: str, params: dict, task
                 status, reasons = 'NEEDS_CONTEXT', ['Declared processing_time_sec is unavailable']
             elif type(duration) not in (int, float) or not math.isfinite(duration) or duration < minimum:
                 status, reasons = 'INFEASIBLE', ['Machining dwell is below the declared processing time']
-        elif primitive == 'move_relative':
-            configured = scene.get(rid, {}).get('simulation_transport', {}).get('speed_mps')
-            speed = params.get('speed_mps', configured)
-            if speed is None:
-                speed = configured
-            if type(configured) not in (int, float) or not math.isfinite(configured) or configured <= 0:
-                status, reasons = 'NEEDS_CONTEXT', ['Declared transport speed is unavailable']
-            elif type(speed) not in (int, float) or not math.isfinite(speed) or not 0 < speed <= configured:
-                status, reasons = 'INFEASIBLE', ['Transport speed exceeds the declared owner capability']
         else:
             status, reasons = 'NEEDS_CONTEXT', ['No owner calculation supports this primitive']
         checks.append({'event_name': contributor['event_name'], 'parameter_bindings': deepcopy(bindings),

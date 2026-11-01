@@ -3492,6 +3492,47 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             "(prior accepted decompositions)."
         ),
     ]
+    # What stays the same for a resource comes first, then its served model, which every event of the resource
+    # shares, so a provider's prompt cache can reuse them; the sections that change with the event follow.
+    sections.extend(
+        [
+            "",
+            "Visible Primitive Catalog (names only; full contract via /primitive_contracts/<name>)",
+            _compact_json(visible_catalog),
+            "",
+            "Published Ref Schema (for context_requests)",
+            _compact_json(published_ref_schema),
+        ]
+    )
+
+    if capability_names:
+        sections.extend(
+            [
+                "",
+                "Available Capability Decompositions (names only; retrieve the closest applicable one before authoring)",
+                _compact_json(capability_names),
+            ]
+        )
+    active_resource_jid = str(active_event_token.get("resource_jid") or "").strip()
+    model_ref = f"/resources/{active_resource_jid}/recovery_des_model"
+    if model_ref in served_context:
+        sections.extend(
+            [
+                "",
+                "Served Context: resource model",
+                _compact_json({model_ref: served_context[model_ref]}),
+            ]
+        )
+    event_context = {ref: value for ref, value in served_context.items() if ref != model_ref}
+    if event_context:
+        sections.extend(
+            [
+                "",
+                "Served Context (retrieved earlier in this event)",
+                _compact_json(event_context),
+            ]
+        )
+
     sections.extend(_top_validation_feedback_section(summary=primitive_feedback))
     sections.extend(
         [
@@ -3519,25 +3560,6 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             ]
         )
 
-    sections.extend(
-        [
-            "",
-            "Visible Primitive Catalog (names only; full contract via /primitive_contracts/<name>)",
-            _compact_json(visible_catalog),
-            "",
-            "Published Ref Schema (for context_requests)",
-            _compact_json(published_ref_schema),
-        ]
-    )
-
-    if capability_names:
-        sections.extend(
-            [
-                "",
-                "Available Capability Decompositions (names only; retrieve the closest applicable one before authoring)",
-                _compact_json(capability_names),
-            ]
-        )
     if suggested_capability_names:
         sections.extend(
             [
@@ -3553,15 +3575,6 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
                 "",
                 "Prior Accepted Decompositions (session-scoped memo; full via /memo/primitive_authoring)",
                 _compact_json(memo_summary),
-            ]
-        )
-
-    if served_context:
-        sections.extend(
-            [
-                "",
-                "Served Context (retrieved earlier in this event)",
-                _compact_json(served_context),
             ]
         )
 
@@ -3583,7 +3596,6 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             ]
         )
 
-    active_resource_jid = str(active_event_token.get("resource_jid") or "").strip()
     sections.extend(
         [
             "",

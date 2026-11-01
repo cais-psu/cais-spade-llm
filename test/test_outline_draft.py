@@ -124,17 +124,19 @@ def test_draft_retrieval_generation_and_reload_never_validate(observations, tmp_
             "place_release", "gripper_reach", "private_function", "private_program", "DO_NOT_COPY"))
 
 
-def test_approached_part_is_kept_from_the_llm(observations, tmp_path):
-    # Only the KMR's nominal Storage pick sets approached_part; no recovery primitive does (user decision, 2026-10-30).
+@pytest.mark.parametrize("name, scope", [("approached_part", "resource"), ("product_location", "part")])
+def test_a_variable_only_normal_production_sets_is_kept_from_the_llm(observations, tmp_path, name, scope):
+    # No recovery primitive sets these; only the KMR's Storage pick and the product's way to the Exit do
+    # (user decision, 2026-10-30).
     entry = observations["prepared_recovery_request"]["recovery_resources"]["owner"]
-    entry["recovery_des_model"]["state_variables"]["approached_part"] = {"type": ["string", "null"], "scope": "resource"}
-    entry["recovery_snapshot"]["approached_part"] = "KET4_Square_4mm"
+    entry["recovery_des_model"]["state_variables"][name] = {"type": ["string", "null"], "scope": scope}
+    entry["recovery_snapshot"][name] = "KET4_Square_4mm"
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path)
-    assert "approached_part" not in draft.prepared["recovery_resources"]["owner"]["recovery_des_model"]["state_variables"]
+    assert name not in draft.prepared["recovery_resources"]["owner"]["recovery_des_model"]["state_variables"]
     session = multi_turn.build_multi_turn_session_seed(draft.prepared)
     session["current_phase"] = "outline"
     _, prompt = multi_turn._build_phase_prompt(draft.prepared, session)
-    assert "approached_part" not in prompt
+    assert name not in prompt
 
 
 def test_draft_equal_reachability_context_and_schema_expressiveness(observations, tmp_path):
@@ -880,3 +882,37 @@ def test_composition_takes_the_recorded_interface_and_the_current_contracts():
     assert outcome["controllable"] is False and outcome["after_sec"] == {"$evidence": "job.processing_time_sec"}
     assert outcome["params"] == {"result": {}} and outcome["required_params"] == ["result"]
     assert "output_schema" not in outcome and "description" not in outcome
+
+
+@pytest.mark.parametrize("draft_id, outline, shown", [("draft_1", [{"outline_id": "R1"}], True),
+                                                      ("draft_2", [{"outline_id": "R1"}], False),
+                                                      ("draft_1", [{"outline_id": "R2"}], False)])
+def test_a_loaded_draft_shows_its_finished_composition_without_a_model_call(tmp_path, monkeypatch, draft_id, outline, shown):
+    from cais_spade_llm.recovery_framework import primitive_composition
+
+    monkeypatch.setattr(primitive_composition, "composition_readiness", lambda source: {"ready": True})
+    finished, unfinished = tmp_path / "composition_a", tmp_path / "composition_b"
+    finished.mkdir()
+    unfinished.mkdir()
+    program = [{"outline_id": "R1", "primitive_steps": [{"primitive": "move_to_named_pose", "params": {}}]}]
+    (finished / "composition.json").write_text(json.dumps({
+        "source_outline_draft": "draft_1", "accepted_outline_prefix": [{"outline_id": "R1"}],
+        "accepted_primitive_program": program, "composition_feasibility": "FEASIBLE"}), encoding="utf-8")
+    draft = SimpleNamespace(record={"run_id": draft_id, "llm_settings": {}})
+    source = {"multi_turn_session_state": {"accepted_outline_prefix": outline}}
+    state = primitive_composition.DraftComposition(draft, {}, source, root=tmp_path).snapshot()
+    assert state["primitives"] == (program if shown else [])
+    assert state["primitive_status"] == ("completed" if shown else "ready")
+    assert state.get("composition_path") == (str(finished / "composition.json") if shown else None)
+    # The attempt's turn records stay reachable, and another attempt stays possible.
+    assert state.get("primitive_artifact_directory") == (str(finished / "recovery_primitves") if shown else None)
+    assert state["can_generate_composition"] is True
+
+
+def test_a_checked_draft_is_named_by_its_time_model_settings_and_size():
+    from cais_spade_llm.ui.components.part_slippage_recovery import checked_draft_label
+
+    label = checked_draft_label({"created_at": "2026-10-31T03:39:25+00:00", "model": "claude-opus-5-5",
+                                 "reasoning_effort": "medium", "safety_rules_to_llm": "hidden",
+                                 "single_pass_outline": True, "events": 5, "run_id": "draft_1"})
+    assert label.endswith("claude-opus-5-5 medium · rules hidden · single-pass · 5 events · draft_1")

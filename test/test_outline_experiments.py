@@ -473,12 +473,15 @@ def test_a_batch_saved_under_an_earlier_configuration_name_keeps_its_rejections(
 def test_a_row_says_not_recorded_for_what_its_records_lack(tmp_path):
     directory = tmp_path / "draft_x"
     directory.mkdir()
-    (directory / "draft.json").write_text(json.dumps({"status": "draft", "transition_trace": [{}], "usage": []}))
+    (directory / "draft.json").write_text(json.dumps({"status": "draft", "transition_trace": [{}], "usage": [],
+                                                      "provider_calls": 2, "provider_requests": 3}))
     row = outline_experiments.attempt_row({"attempt_id": "attempt_001", "scenario": SCENARIO,
                                            "configuration": "LLM, incremental", "repetition": 1,
                                            "status": "finished"}, directory)
     assert (row["outcome"], row["tokens"], row["outline_length"], row["rewrites"]) == (
         "not audited", "not recorded", 1, "–")
+    # A retried call shows as more requests than calls.
+    assert (row["provider_calls"], row["provider_requests"]) == (2, 3)
 
 
 def test_audit_missing_audits_finished_attempts_once_their_inputs_still_match(observations, tmp_path, monkeypatch,

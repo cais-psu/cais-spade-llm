@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
+import math
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -82,6 +83,10 @@ def composition_grounding_context(*, session: dict, prepared: dict, task: dict) 
         resource, _ = composition_start_views(session=session, prepared=prepared,
                                              task={"resource_jid": jid})
         resources[jid] = {**deepcopy(entry), **resource, "snapshot": deepcopy(resource)}
+        if entry.get("resource_type") == "kmr":
+            from cais_spade_llm.recovery_framework.kmr_recovery import kmr_docks
+
+            resources[jid]["docks"] = kmr_docks(((entry.get("resource_evidence") or {}).get("inputs") or {}).get("scene") or {})
         # Step templates are served from code under /capability_decompositions. The template fields a
         # capture recorded inside its DES model can be stale, so this served copy drops them; the owner
         # check reads the prepared model, which keeps them.
@@ -104,7 +109,14 @@ def composition_grounding_context(*, session: dict, prepared: dict, task: dict) 
     for row in [*session.get("composition_prefix", []), *session.get("accepted_primitive_program", [])]:
         evidence = row.get("composition_validation", {})
         if evidence.get("feasibility_status") == "FEASIBLE" and "resource_evidence" in evidence:
-            resources[row["resource_jid"]]["resource_evidence"] = deepcopy(evidence["resource_evidence"])
+            resources[row["resource_jid"]]["resource_evidence"] = {
+                **resources[row["resource_jid"]].get("resource_evidence", {}), **deepcopy(evidence["resource_evidence"])}
+            # A part an accepted program put down is there for every resource, not only the one that placed it.
+            for part, observed in (evidence["resource_evidence"].get("observed_parts") or {}).items():
+                if (observed.get("source") or {}).get("kind") == "projected":
+                    for current in resources.values():
+                        if isinstance(current.get("resource_evidence"), dict):
+                            current["resource_evidence"].setdefault("observed_parts", {})[part] = deepcopy(observed)
     return context
 
 
@@ -150,9 +162,22 @@ def _declared_value(field: str, declaration: dict, resource: dict, part: dict) -
         return contracts._read_initial(field, declaration.get("scope", "resource"), resource, part)
     source = contracts._read_initial(declaration["effect"], "resource", resource, part)
     fields = declaration.get("fields") or []
+    if isinstance(source, list) and len(source) == 7:
+        # A mobile base's pose is recorded as position and quaternion, which its planar fields are read back from.
+        x, y, z, qx, qy, qz, qw = source
+        source = {"x": x, "y": y, "z": z, "yaw": math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))}
     if not isinstance(source, dict) or not fields or any(name not in source for name in fields):
         return contracts._MISSING
     return {name: deepcopy(source[name]) for name in fields}
+
+
+def _same_value(value: Any, stated: Any) -> bool:
+    """Compare a value with what is stated; a yaw read back from a quaternion holds up to rounding and full turns."""
+    if isinstance(value, dict) and isinstance(stated, dict) and "yaw" in value and "yaw" in stated:
+        difference = value["yaw"] - stated["yaw"]
+        return (abs(math.atan2(math.sin(difference), math.cos(difference))) <= 1e-9
+                and contracts._equal({**value, "yaw": 0}, {**stated, "yaw": 0}))
+    return contracts._equal(value, stated)
 
 
 def _on_declared_fields(declaration: dict, value: Any) -> Any:
@@ -201,6 +226,7 @@ def validate_recovery_primitive_composition(
     preview_primitive: Callable[..., dict] | None = None,
     project_completion: Callable[..., dict] | None = None,
     captured_snapshot: dict | None = None,
+    recorded_facts: dict | None = None,
 ) -> dict:
     """Check the exact authored order without execution or goal-state substitution.
 
@@ -216,6 +242,8 @@ def validate_recovery_primitive_composition(
         preview_primitive: Owner calculation of required data-producing outputs.
         project_completion: Owner proof of additional complete-program effects.
         captured_snapshot: The owner's state in the capture, before any recovery program.
+        recorded_facts: Owner facts the prefix lacks, for the check to start from. The evidence binds the
+            prefix itself, which is what ``composition_program_error`` restores.
 
     Returns:
         FEASIBLE, INFEASIBLE, or NEEDS_CONTEXT with a bound step trace. Passing
@@ -233,6 +261,7 @@ def validate_recovery_primitive_composition(
         "trace": [], "findings": [], "derived_end_state": {},
         "execution_authorized": False, "cca_status": "not_checked",
     }
+    recovery_snapshot = {**recovery_snapshot, **deepcopy(recorded_facts or {})}
 
     def finish(status: str, reason: str, *, index: int | None = None) -> dict:
         result.update(feasibility_status=status, allowed=status == "FEASIBLE", reason=reason)
@@ -284,7 +313,7 @@ def validate_recovery_primitive_composition(
         if actual is contracts._MISSING:
             return finish("NEEDS_CONTEXT", f"Starting fact {field!r} is missing")
         stated = _on_declared_fields(declaration, expected)
-        if not contracts._equal(actual, stated):
+        if not _same_value(actual, stated):
             captured = (_declared_value(field, declaration, captured_snapshot, part_context)
                         if "effect" in declaration and isinstance(captured_snapshot, dict) else contracts._MISSING)
             # The outline carries a resource's captured pose until one of its events states another, while a
@@ -399,6 +428,16 @@ def validate_recovery_primitive_composition(
             return finish("NEEDS_CONTEXT", f"{name}: declared effects are missing", index=index)
         previous = deepcopy(state)
         effects = {**entry["effects"], **(entry.get("product_effects") or {})}
+        # A step-bound effect takes what an earlier step calculated, one value for each part; the owner's completion
+        # reads it from the trace.
+        for field, effect in list(effects.items()):
+            if isinstance(effect, dict) and "set_from_step" in effect:
+                source = effect["set_from_step"]
+                earlier = next((done for done in result["trace"] if done["primitive"] == source["primitive"]), {})
+                if source["output"] not in earlier.get("preview_output", {}):
+                    return finish("INFEASIBLE", f"{name}: {field} needs an earlier {source['primitive']} step", index=index)
+                row.setdefault("step_effects", {})[field] = deepcopy(earlier["preview_output"][source["output"]])
+                del effects[field]
         state, error = contracts._apply(effects, state, bound, declarations)
         if error:
             return finish("NEEDS_CONTEXT", error, index=index)
@@ -446,7 +485,7 @@ def validate_recovery_primitive_composition(
             value = stated
         if value is contracts._MISSING:
             return finish("NEEDS_CONTEXT", f"The composition has no supported effect for {field!r}")
-        if not contracts._equal(value, stated):
+        if not _same_value(value, stated):
             result["derived_end_state"][field] = deepcopy(value)
             return finish("INFEASIBLE", f"Postcondition {field!r}: achieved {value!r}, required {stated!r}")
         result["derived_end_state"][field] = deepcopy(expected)

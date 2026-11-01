@@ -80,7 +80,9 @@ def sequence():
               selected_program="square", current_process=None,
               processCompleted=[{"process": "trim", "result": "square"}]),
         event("unload", "arm", "KET4_Square_4mm", resource_state="ready", held_part=None, part_location="Conveyor"),
-        event("restore", "arm", "RGOCG4-50_Round_4mm", resource_state="ready", held_part=None, part_location="M2"),
+        # A place states its own change: nothing writes the machine's record for it.
+        {**event("restore", "arm", "RGOCG4-50_Round_4mm", resource_state="ready", held_part=None, part_location="M2"),
+         "neighbor_end_state": {"machine": {"part_name": "RGOCG4-50_Round_4mm", "resource_state": "loaded"}}},
     ]
 
 
@@ -106,7 +108,8 @@ def test_real_multi_turn_retrieval_and_six_events_bypass_all_admission(captured,
     assert draft.record["provider_calls"] == provider.await_count == 9
     assert execute.await_count >= 6
     assert draft.record["nominal_handoff"]["complete"] is True
-    assert draft.record["nominal_handoff"]["assumptions"]
+    # The events state every change, so the handoff reads the resumed entry from them and assumes nothing.
+    assert draft.record["nominal_handoff"]["assumptions"] == []
     assert captured == before
     assert "/resources/machine/snapshot" in draft.record["retrievals"]
     assert "checks" not in draft.record
@@ -164,6 +167,9 @@ def test_nothing_checks_the_llm_reply_or_its_chosen_event(captured):
 
 def test_handoff_requires_replaced_work_and_restored_part(captured):
     prepared, _ = outline_draft._inputs(captured)
+    for model_event in prepared["recovery_resources"]["machine"]["recovery_des_model"]["events"]:
+        model_event["product_effects"] = {"processCompleted": [{"process": "trim", "result": {"set_from_param": "result"}}]}
+    multi_turn_diagnostic.declare_derived_conditions(prepared, {})
     session = multi_turn.build_multi_turn_session_seed(prepared)
     assert multi_turn_diagnostic.handoff(session, prepared)["complete"] is False
     for row in sequence()[:-1]:
@@ -276,6 +282,14 @@ def shared_cell(tmp_path):
 def _apply(rows, session, prepared):
     for row in rows:
         task = multi_turn_diagnostic.event_record(row, session, prepared)
+        multi_turn_diagnostic.apply_tentative_effects(task, session, prepared)
+        session.setdefault("accepted_outline_prefix", []).append(task)
+
+
+def _apply_nominal(rows, session, prepared):
+    """Apply steps as the declared model's, which code completes; a proposed event gets none of that."""
+    for row in rows:
+        task = {**multi_turn_diagnostic.event_record(row, session, prepared), "candidate_source": "nominal_connection"}
         multi_turn_diagnostic.apply_tentative_effects(task, session, prepared)
         session.setdefault("accepted_outline_prefix", []).append(task)
 
@@ -1241,7 +1255,7 @@ def test_a_new_state_name_does_not_clear_a_reported_fault(shared_cell, tmp_path)
         assert ("arm_b" in multi_turn_diagnostic.faulted_resources(session, prepared)) is faulted, state
 
 
-def test_custody_is_never_enforced_and_a_part_placed_elsewhere_is_released(shared_cell, tmp_path):
+def test_custody_is_never_enforced_and_code_releases_no_part_the_event_keeps(shared_cell, tmp_path):
     planner = SimpleNamespace(product_agent=SimpleNamespace())
     prepared, session = _draft(shared_cell, tmp_path / "second_part")
     take = event("take", "arm_a", "gear", resource_state="picked", held_part="gear", part_state="in_gripper",
@@ -1251,21 +1265,21 @@ def test_custody_is_never_enforced_and_a_part_placed_elsewhere_is_released(share
     # Nothing judges the LLM's event: arm_a takes the gear while it still holds the peg, and no note is kept.
     assert decision == "need_next_task" and [row["event_name"] for row in session["accepted_outline_prefix"]] == ["take"]
     assert "custody_notes" not in json.dumps(audit)
-    # Placing a held part elsewhere releases it, even when the end state omits held_part.
+    # With no check on, an event stands as written: a place that omits held_part leaves the holder holding.
     prepared, session = _draft(shared_cell, tmp_path / "released")
     set_down = event("set_down", "arm_a", "peg", resource_state="idle", part_state="ready", part_location="buffer")
     decision, _ = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=planner, response={"thought": "t", "candidate_events": [set_down]}))
-    assert decision == "need_next_task" and session["symbolic_resources"]["arm_a"]["held_part"] is None
-    # Each changed variable records who set it: the LLM's end state, then what code derived from it.
+    assert decision == "need_next_task" and session["symbolic_resources"]["arm_a"]["held_part"] == "peg"
+    # Each changed variable records who set it, and code sets none of them.
     changes = session["accepted_outline_prefix"][-1]["condition_changes"]
     assert [(row["entity"], row["variable"], row["value"], row["by"]) for row in changes] == [
         ("arm_a", "resource_state", "idle", "LLM"), ("peg", "part_state", "ready", "LLM"),
-        ("peg", "part_location", "buffer", "LLM"), ("arm_a", "held_part", None, "code"), ("peg", "held_by", None, "code")]
-    assert changes[3]["reason"] == "peg was placed elsewhere"
-    # The part no longer records its former holder either, so the prompt states where it lies.
+        ("peg", "part_location", "buffer", "LLM")]
+    # Stated, the release is the part's too, so the prompt states where it lies.
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
 
+    _apply([event("let_go", "arm_a", "peg", held_part=None)], session, prepared)
     assert facts._part_text("peg", prepared, session, facts.resource_names(prepared)) == "at buffer"
 
 
@@ -1283,11 +1297,11 @@ def test_a_resource_that_takes_a_part_holds_it_whatever_location_it_states(share
         part_row = session["symbolic_parts"][part]
         assert (part_row["part_holder_resource_jid"], part_row["current_holder_resource_jid"]) == ("arm_b", "arm_b")
         assert facts._part_text(part, prepared, session, facts.resource_names(prepared)).endswith("held by arm_b")
-        # Only a former holder is released; the taker's own holding is the LLM's value, not code's.
-        holding = [(row["entity"], row["variable"], row["value"], row.get("reason"))
-                   for row in session["accepted_outline_prefix"][-1]["condition_changes"]
-                   if row["by"] == "code" and row["variable"] in ("held_part", "held_by")]
-        assert holding == ([(holder_before, "held_part", None, f"{part} is now held by arm_b")] if holder_before else [])
+        # A former holder is the event's to state: code releases nothing.
+        changes = session["accepted_outline_prefix"][-1]["condition_changes"]
+        assert not [row for row in changes if row["by"] == "code"]
+        if holder_before:
+            assert session["symbolic_resources"][holder_before]["held_part"] == part
 
 
 def _belt_cell(tmp_path, *, belt_state="failed"):
@@ -1514,7 +1528,7 @@ def test_a_process_record_is_a_part_condition(captured):
     part = multi_turn_context.resolve_outline_context(prepared, {**session, "outline_diagnostic_bypass": True},
                                                       "/parts/KET4_Square_4mm/state_variables")
     assert part["value"]["processCompleted"]["scope"] == "part" and part["values_rule"]
-    _apply([event("trimmed", "machine", "KET4_Square_4mm", resource_state="completed",
+    _apply([event("trimmed", "machine", "KET4_Square_4mm", resource_state="completed", current_process=None,
                   processCompleted=[{"process": "trim", "result": "square"}])], session, prepared)
     names = facts.resource_names(prepared)
     assert facts._part_text("KET4_Square_4mm", prepared, session, names).endswith("; processes: trim → square completed")
@@ -1532,19 +1546,17 @@ def test_a_stated_pose_moves_a_resource_out_of_a_shared_area(shared_cell, tmp_pa
             "containing_regions"]
 
     assert regions() == ["cell"]
-    # arm_b never changed its location, but its stated pose now lies outside the cell.
-    _apply([event("clear_by_pose", "arm_b", None, resource_state="idle", pose={"x": 3.0, "y": 3.0, "z": 1.2})],
-           session, prepared)
+    # arm_b's stated pose now lies outside the cell, and the event says so: code adds no location.
+    _apply([event("clear_by_pose", "arm_b", None, resource_state="idle", resource_location=None,
+                  pose={"x": 3.0, "y": 3.0, "z": 1.2})], session, prepared)
     assert regions() == []
-    # Code keeps the location consistent with the stated pose and says why.
-    assert [(row["variable"], row["value"], row["by"], row.get("reason"))
+    assert [(row["variable"], row["value"], row["by"])
             for row in session["accepted_outline_prefix"][-1]["condition_changes"]] == [
-        ("resource_state", "idle", "LLM", None), ("pose", {"x": 3.0, "y": 3.0, "z": 1.2}, "LLM", None),
-        ("resource_location", None, "code", "no named place's recorded area contains the stated pose")]
+        ("resource_state", "idle", "LLM"), ("resource_location", None, "LLM"), ("pose", {"x": 3.0, "y": 3.0, "z": 1.2}, "LLM")]
+    # A stated pose alone changes no location.
     _apply([event("return_by_pose", "arm_b", None, resource_state="idle", pose={"x": 0.0, "y": 0.1, "z": 1.2})],
            session, prepared)
-    assert session["symbolic_resources"]["arm_b"]["resource_location"] == "cell"
-    assert session["accepted_outline_prefix"][-1]["condition_changes"][-1]["reason"] == "the stated pose is inside cell"
+    assert session["symbolic_resources"]["arm_b"]["resource_location"] is None
 
 
 def _pose_draft(shared_cell, tmp_path):
@@ -1570,31 +1582,144 @@ def test_a_first_stated_pose_starts_from_the_recorded_pose(shared_cell, tmp_path
     assert "pose" not in task["expected_start_state"] and "diagnostic_assumptions" not in task
 
 
-def test_a_pose_an_earlier_event_stated_is_never_shown_as_measured(shared_cell, tmp_path):
+def test_a_pose_is_not_stated_once_an_event_moves_its_resource_without_one(shared_cell, tmp_path):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
         multi_turn_outline_facts as facts,
     )
 
     prepared, session = _pose_draft(shared_cell, tmp_path)
     names = facts.resource_names(prepared)
-    # Moved by its location only, a resource keeps the pose the capture measured, marked as left behind.
+    # Moved by its location only, a resource's measured pose no longer says where it is.
     _apply([event("clear", "arm_b", None, resource_state="idle", resource_location="home")], session, prepared)
-    assert "; last measured pose (0.000, 0.000, 1.200), inside cell; " in facts._resource_row("arm_b", prepared, session, names)
-    # A pose an event stated stays the LLM's value, also once a later location change leaves it behind.
-    _apply([event("reach", "arm_a", None, resource_state="picked", pose={"x": 0.1, "y": 0.0, "z": 1.3})], session, prepared)
+    row = facts._resource_row("arm_b", prepared, session, names)
+    assert "; pose not stated; " in row and "1.200" not in row
+    # A stated pose is where it is, until a later move leaves it behind.
+    _apply([event("reach", "arm_a", None, resource_state="picked", resource_location=None, pose={"x": 0.1, "y": 0.0, "z": 1.3})],
+           session, prepared)
     assert "; pose (0.100, 0.000, 1.300), inside cell; " in facts._resource_row("arm_a", prepared, session, names)
     _apply([event("back", "arm_a", None, resource_state="picked", resource_location="buffer")], session, prepared)
     row = facts._resource_row("arm_a", prepared, session, names)
-    assert "; last stated pose (0.100, 0.000, 1.300), inside cell; " in row and "measured" not in row
+    assert "; pose not stated; " in row and "1.300" not in row
+    # The next stated pose does not start from a pose the outline no longer knows, and is known again.
+    _apply([event("lift", "arm_a", None, resource_state="picked", pose={"x": 0.1, "y": 0.0, "z": 1.35})], session, prepared)
+    assert "pose" not in session["accepted_outline_prefix"][-1]["expected_start_state"]
+    assert "; pose (0.100, 0.000, 1.350), inside cell; " in facts._resource_row("arm_a", prepared, session, names)
 
 
-@pytest.mark.parametrize("states_release", [True, False])
-def test_a_part_keeps_a_stated_pose_only_while_the_stating_resource_holds_it(shared_cell, tmp_path, states_release):
+def test_an_event_that_keeps_its_resource_in_place_keeps_its_pose(shared_cell, tmp_path):
     prepared, session = _pose_draft(shared_cell, tmp_path)
-    release = {"held_part": None} if states_release else {}
+    _apply([event("settle", "arm_b", None, resource_state="idle", resource_location="station")], session, prepared)
+    assert session["symbolic_resources"]["arm_b"]["current_pose"]["z"] == 1.2
+    assert "pose" not in session["diagnostic_unknown_owner_fields"].get("arm_b", [])
+
+
+@pytest.mark.parametrize("locates_resource", [False, True])
+@pytest.mark.parametrize("part_at, end", [
+    (None, {"held_part": "gear", "part_location": "arm_b"}), ("buffer", {"held_part": "gear", "part_location": "arm_b"}),
+    ("arm_a", {"held_part": "gear", "part_location": "arm_b"}), ("arm_b", {"held_part": None, "part_location": "buffer"}),
+    ("arm_b", {"held_part": None, "part_location": "conveyor"})])
+def test_an_event_that_states_no_location_leaves_it_as_it_was(shared_cell, tmp_path, locates_resource, part_at, end):
+    prepared, session = _pose_draft(shared_cell, tmp_path)
+    variables = session["recovery_des_models"]["arm_b"]["state_variables"]
+    variables["resource_location"]["domain"] = [None, "station", "buffer"]
+    variables["pose"]["locates_resource"] = locates_resource
+    session["symbolic_parts"]["gear"]["part_location"] = part_at
+    session["symbolic_resources"]["arm_b"]["held_part"] = "gear" if part_at == "arm_b" else None
+    _apply([event("work", "arm_b", "gear", resource_state="done", **end)], session, prepared)
+    row = session["symbolic_resources"]["arm_b"]
+    # The pose has been left behind, so it holds no value; the location is the event's to state.
+    assert row["resource_location"] == "station" and "current_pose" not in row
+    assert not [change for change in session["accepted_outline_prefix"][-1]["condition_changes"] if change["by"] == "code"]
+
+
+@pytest.mark.parametrize("row", [
+    event("take", "arm_b", "gear", resource_state="picked", held_part="gear", part_location="arm_b"),
+    event("put", "arm_a", "peg", resource_state="placed", part_location="buffer"),
+    event("reach", "arm_b", None, resource_state="idle", pose={"x": 3.0, "y": 3.0, "z": 1.2}),
+    event("home", "arm_b", None, resource_location="home"),
+    event("done", "arm_a", "peg", processCompleted=[{"process": "trim", "result": "square"}])], ids=lambda row: row["event_name"])
+def test_code_writes_no_value_a_recovery_event_leaves_out(shared_cell, tmp_path, row):
+    # AGENTS.md, "No hidden rules in recovery events". The second names hold the same stated fact, or mark a pose
+    # left behind; none is a value the event did not state.
+    same_fact = {"current_state", "current_location", "occupancy", "pose", "current_pose", "current_pose_source",
+                 "part_holder_resource_jid", "current_holder_resource_jid", "observed_pose", "observed_pose_current",
+                 "last_observed_pose", "projected_pose"}
+    prepared, session = _pose_draft(shared_cell, tmp_path)
+    before = deepcopy(session["symbolic_resources"]), deepcopy(session["symbolic_parts"])
+    _apply([deepcopy(row)], session, prepared)
+    after = session["symbolic_resources"], session["symbolic_parts"]
+    changed = {name for old, new in zip(before, after, strict=True) for entity in {*old, *new}
+               for name in {*old.get(entity, {}), *new.get(entity, {})}
+               if old.get(entity, {}).get(name) != new.get(entity, {}).get(name)}
+    assert changed <= set(row["expected_end_state"]) | same_fact
+    assert {change["by"] for change in session["accepted_outline_prefix"][-1]["condition_changes"]} == {"LLM"}
+
+
+@pytest.mark.parametrize("part_was_at", ["arm_a", "ur5e-1", "M1 staging tray"])
+def test_a_part_at_no_declared_location_of_the_taker_says_nothing_about_where_it_stands(shared_cell, tmp_path, part_was_at):
+    # Another resource that held the part, by JID or by the name a capture records, or a tray outside its values.
+    prepared, session = _pose_draft(shared_cell, tmp_path)
+    session["recovery_des_models"]["arm_b"]["state_variables"]["resource_location"]["domain"] = ["station", "buffer"]
+    session["symbolic_parts"]["gear"]["part_location"] = part_was_at
+    _apply([event("take", "arm_b", "gear", resource_state="picked", held_part="gear", part_location="arm_b")], session, prepared)
+    assert session["symbolic_resources"]["arm_b"]["resource_location"] == "station"
+
+
+def test_restating_where_a_part_already_is_leaves_its_resource_where_it_stands(shared_cell, tmp_path):
+    prepared, session = _pose_draft(shared_cell, tmp_path)
+    session["recovery_des_models"]["arm_b"]["state_variables"]["resource_location"]["domain"] = ["station", "buffer"]
+    session["symbolic_parts"]["gear"]["part_location"] = "buffer"
+    _apply([event("note", "arm_b", "gear", resource_state="idle", part_location="buffer")], session, prepared)
+    assert session["symbolic_resources"]["arm_b"]["resource_location"] == "station"
+
+
+def test_dropping_a_pose_adds_no_row_a_saved_draft_lacks_and_a_stated_value_of_any_shape_does_not_stop_it(shared_cell, tmp_path):
+    # Composition and the audit compare these rows with the saved draft's on replay, so a new row orphans retained results.
+    prepared, session = _pose_draft(shared_cell, tmp_path)
+    _apply([event("clear", "arm_b", None, resource_state="idle", resource_location={"x": 0.1, "y": 0.2})], session, prepared)
+    changes = session["accepted_outline_prefix"][-1]["condition_changes"]
+    assert [row["variable"] for row in changes if row["variable"] == "pose"] == []
+    assert session["diagnostic_unknown_owner_fields"]["arm_b"] == ["pose"]
+
+
+def test_a_resource_restating_its_hold_by_jid_stays_where_it_is(shared_cell, tmp_path):
+    # The capture names the holder; the event states it by JID, which is the same resource, so nothing moved.
+    prepared, session = _pose_draft(shared_cell, tmp_path)
+    prepared["observation_jids"] = {"arm_a_name": "arm_a"}
+    session["symbolic_parts"]["peg"]["part_location"] = "arm_a_name"
+    _apply([event("hold", "arm_a", "peg", resource_state="picked", part_location="arm_a")], session, prepared)
+    assert session["symbolic_resources"]["arm_a"]["current_pose"]["z"] == 1.3
+
+
+def test_lookups_stop_serving_the_captured_pose_once_a_resource_moved(shared_cell, tmp_path):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_context as context
+
+    prepared, session = _pose_draft(shared_cell, tmp_path)
+    assert "current_pose" in context.public_resource_snapshot(prepared, session, "arm_b")
+    _apply([event("clear", "arm_b", None, resource_state="idle", resource_location="home")], session, prepared)
+    snapshot = context.public_resource_snapshot(prepared, session, "arm_b")
+    assert "current_pose" not in snapshot and snapshot["pose"] == multi_turn_diagnostic.NOT_STATED
+
+
+def test_the_geometry_lookup_drops_the_captured_base_pose_of_a_base_that_moved(shared_cell, tmp_path):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_context as context
+
+    prepared, session = _pose_draft(shared_cell, tmp_path)
+    prepared["observation_jids"] = {"arm_b": "arm_b"}
+    prepared["diagnostic_scene_geometry"] = {"mobile_bases": {"arm_b": {"base_pose_xy_yaw": [0.0, 0.0, 0.0], "footprint": [1, 1]}}}
+    assert "base_pose_xy_yaw" in context._geometry_now(prepared, session)["mobile_bases"]["arm_b"]
+    _apply([event("clear", "arm_b", None, resource_state="idle", resource_location="home")], session, prepared)
+    assert context._geometry_now(prepared, session)["mobile_bases"]["arm_b"] == {"footprint": [1, 1]}
+    # A later stated pose is the base's own, not the captured one, so that stays hidden.
+    _apply([event("park", "arm_b", None, resource_state="idle", pose={"x": 3.0, "y": 3.0, "z": 1.2})], session, prepared)
+    assert context._geometry_now(prepared, session)["mobile_bases"]["arm_b"] == {"footprint": [1, 1]}
+
+
+def test_a_part_keeps_a_stated_pose_only_while_the_stating_resource_holds_it(shared_cell, tmp_path):
+    prepared, session = _pose_draft(shared_cell, tmp_path)
     # The stated pose is the arm's own after it sets the peg down, not where the peg rests.
     _apply([event("set_down", "arm_a", "peg", resource_state="placed", part_state="ready", part_location="buffer",
-                  pose={"x": 1.0, "y": 0.0, "z": 1.5}, **release)], session, prepared)
+                  pose={"x": 1.0, "y": 0.0, "z": 1.5}, held_part=None)], session, prepared)
     peg = session["symbolic_parts"]["peg"]
     assert session["symbolic_resources"]["arm_a"]["held_part"] is None
     assert peg["projected_pose"] is None and peg["observed_pose_current"] is False
@@ -1625,13 +1750,12 @@ def test_a_planar_pose_is_not_placed_in_an_area_bounded_in_height(shared_cell, t
            session, prepared)
     row = facts._resource_row("mobile", prepared, session, facts.resource_names(prepared))
     assert "; pose (0.000, 0.100, yaw 0.000);" in row and "inside" not in row
-    assert [change["value"] for change in session["accepted_outline_prefix"][-1]["condition_changes"]
-            if change["variable"] == "resource_location"] == [None]
+    assert multi_turn_diagnostic._place_of({"x": 0.0, "y": 0.1, "yaw": 0.0}, prepared) is None
     relations = multi_turn_context.resolve_outline_context(prepared, session, "/resources/mobile/pose_relations")["value"]
     assert relations["containing_regions"] == [] and "mobile" in relations["not_evaluated"]
 
 
-def test_a_place_a_part_enters_has_only_its_slots_for_that_part_and_its_state_unknown(tmp_path):
+def test_a_place_a_nominal_step_enters_has_only_its_slots_for_that_part_and_its_state_unknown(tmp_path):
     record, specs = _belt_cell(tmp_path)
     buffer = record["prepared_recovery_request"]["recovery_resources"]["buffer"]
     buffer["recovery_des_model"]["state_variables"].update(
@@ -1640,9 +1764,9 @@ def test_a_place_a_part_enters_has_only_its_slots_for_that_part_and_its_state_un
     buffer["recovery_snapshot"]["job_state"] = "idle"
     prepared = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts").prepared
     session = multi_turn.build_multi_turn_session_seed(prepared)
-    _apply([event("peg_to_buffer", "arm_a", "peg", resource_state="placed", held_part=None, part_state="ready",
-                  part_location="buffer")], session, prepared)
-    # The event does not state how the buffer changed, so only what could record the peg is unknown.
+    _apply_nominal([event("peg_to_buffer", "arm_a", "peg", resource_state="placed", held_part=None, part_state="ready",
+                          part_location="buffer")], session, prepared)
+    # The step does not state how the buffer changed, so only what could record the peg is unknown.
     assert [(row["variable"], row["value"], row["by"], row["reason"])
             for row in session["accepted_outline_prefix"][-1]["condition_changes"] if row["entity"] == "buffer"] == [
         ("resource_state", "unknown", "code", "peg arrived there; its own change was not stated"),
@@ -1667,8 +1791,8 @@ def test_a_part_s_own_entry_on_a_place_reads_not_stated_until_the_event_states_i
         "part_location.<part name>: none (values loading_position_1, loading_position_2)")
     load = event("peg_on_belt", "arm_a", "peg", resource_state="placed", held_part=None, part_state="ready",
                  part_location="belt")
-    _apply([load], unstated, prepared)
-    _apply([{**load, "neighbor_end_state": {"belt": {"part_location.peg": "loading_position_1"}}}], stated, prepared)
+    _apply_nominal([load], unstated, prepared)
+    _apply_nominal([{**load, "neighbor_end_state": {"belt": {"part_location.peg": "loading_position_1"}}}], stated, prepared)
     # Unstated, the peg's own entry reads "not stated" instead of keeping its old empty value.
     assert "part_location.peg" in unstated["diagnostic_unknown_owner_fields"]["belt"]
     assert "part_location.<part name>: peg not stated" in facts._resource_row("belt", prepared, unstated, names)
@@ -1716,8 +1840,8 @@ def test_a_resource_lookup_states_current_values_and_what_events_left_unstated(t
                                 "pose": {"x": 3.0, "y": 0.0, "z": 1.3}}
     accept(event("peg_to_buffer", "arm_a", "peg", resource_state="placed", held_part=None, part_state="ready",
                  part_location="buffer", resource_location="buffer"))
-    # The buffer's own change was not stated, and a move by location alone leaves the pose unstated.
-    assert current("buffer") == {"resource_state": "not stated", "zone_1_part": "not stated"}
+    # The buffer's own change was not stated, so it stays as it was; a move by location alone leaves the pose unstated.
+    assert current("buffer") == {"resource_state": "idle", "zone_1_part": None}
     assert current("arm_a") == {"resource_state": "placed", "resource_location": "buffer", "held_part": None,
                                 "pose": "not stated"}
     accept(event("lift", "arm_a", None, resource_state="idle", pose={"x": 3.0, "y": 0.5, "z": 1.4}))
@@ -1739,6 +1863,10 @@ def test_a_snapshot_reads_not_stated_for_what_an_accepted_event_left_unstated(tm
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
         response={"thought": "Set the peg down.", "candidate_events": [set_down], "selected_candidate_index": 0}))
     assert decision != "need_revision" and "buffer" in session["derived_resource_snapshots"]
+    # A recovery event's unstated values stay as they were; only what is marked unknown reads "not stated".
+    snapshot = multi_turn_context.resolve_outline_context(prepared, session, "/resources/buffer/snapshot")["value"]
+    assert (snapshot["resource_state"], snapshot["zone_1_part"]) == ("idle", None)
+    session["diagnostic_unknown_owner_fields"]["buffer"] = ["resource_state", "zone_1_part"]
     snapshot = multi_turn_context.resolve_outline_context(prepared, session, "/resources/buffer/snapshot")["value"]
     assert (snapshot["resource_state"], snapshot["zone_1_part"]) == ("not stated", "not stated")
 
@@ -1761,8 +1889,8 @@ def test_a_place_inside_a_resource_changes_only_the_owner_record_its_events_decl
     assert "staging_part null (buffer tray)" in facts._resource_row("buffer", prepared, unstated, names)
     to_tray = event("peg_to_tray", "arm_a", "peg", resource_state="placed", held_part=None, part_state="ready",
                     part_location="buffer tray")
-    _apply([to_tray], unstated, prepared)
-    _apply([{**to_tray, "neighbor_end_state": {"buffer": {"staging_part": "peg"}}}], stated, prepared)
+    _apply_nominal([to_tray], unstated, prepared)
+    _apply_nominal([{**to_tray, "neighbor_end_state": {"buffer": {"staging_part": "peg"}}}], stated, prepared)
     # Only the tray's record is not stated; the rest of the buffer stays as it was.
     assert [(row["variable"], row["value"]) for row in unstated["accepted_outline_prefix"][-1]["condition_changes"]
             if row["entity"] == "buffer"] == [("staging_part", "unknown")]
@@ -1772,7 +1900,7 @@ def test_a_place_inside_a_resource_changes_only_the_owner_record_its_events_decl
     assert not stated.get("diagnostic_unknown_owner_fields", {}).get("buffer")
     # Naming the buffer states its change, so values left out stay as they are, as the rule says.
     named = multi_turn.build_multi_turn_session_seed(prepared)
-    _apply([{**to_tray, "neighbor_end_state": {"buffer": {"resource_state": "idle"}}}], named, prepared)
+    _apply_nominal([{**to_tray, "neighbor_end_state": {"buffer": {"resource_state": "idle"}}}], named, prepared)
     assert not named.get("diagnostic_unknown_owner_fields", {}).get("buffer")
 
 
@@ -1840,18 +1968,16 @@ def test_a_stated_holding_change_on_another_resource_is_also_the_parts(shared_ce
     assert (session["symbolic_resources"]["arm_a"]["held_part"], session["symbolic_resources"]["arm_b"]["held_part"]) == (
         "peg", None)
     assert part["part_holder_resource_jid"] == part["current_holder_resource_jid"] == "arm_a"
-    # A stated taker stays the holder even when the part is given no location; only the giver is released.
+    # A stated taker stays the holder even when the part is given no location; the giver's release is the event's.
     prepared, session = _draft(shared_cell, tmp_path / "no_location")
     give = {**event("give", "arm_a", "peg", resource_state="idle", part_location=None),
             "neighbor_end_state": {"arm_b": {"held_part": "peg"}}}
     _apply([give], session, prepared)
     part = session["symbolic_parts"]["peg"]
     assert (session["symbolic_resources"]["arm_a"]["held_part"], session["symbolic_resources"]["arm_b"]["held_part"]) == (
-        None, "peg")
+        "peg", "peg")
     assert part["part_holder_resource_jid"] == part["current_holder_resource_jid"] == "arm_b"
-    assert [(row["entity"], row["variable"], row["value"], row.get("reason"))
-            for row in session["accepted_outline_prefix"][-1]["condition_changes"] if row["by"] == "code"] == [
-        ("arm_a", "held_part", None, "peg is now held by arm_b")]
+    assert not [row for row in session["accepted_outline_prefix"][-1]["condition_changes"] if row["by"] == "code"]
 
 
 def test_the_draft_table_lists_each_end_state_value_and_marks_what_code_added():

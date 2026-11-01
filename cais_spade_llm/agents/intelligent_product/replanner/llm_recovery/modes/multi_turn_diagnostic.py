@@ -316,23 +316,38 @@ def _derived(entity: str, variable: str, value: Any, reason: str) -> dict:
     return {"entity": entity, "variable": variable, "value": deepcopy(value), "by": "code", "reason": reason}
 
 
-def _locate_by_pose(task: dict, session: dict, prepared: dict) -> list[dict]:
-    """Keep a resource's projected location consistent with the pose its event states."""
+def _apply_stated_pose(task: dict, session: dict) -> None:
+    """Record the pose an event states as where its resource is now; position checks read it as its pose."""
     pose = task["expected_end_state"].get("pose")
-    if not isinstance(pose, dict):
-        return []
-    # A stated pose is where the resource is now; position checks read it as its pose.
-    row = session.setdefault("symbolic_resources", {}).setdefault(task["resource_jid"], {})
-    row.update(current_pose=deepcopy(pose), current_pose_source="projected_state")
-    if "resource_location" in task["expected_end_state"]:
-        return []
-    place = _place_of(pose, prepared)
-    if row.get("resource_location") == place:
-        return []
-    row.update(resource_location=place, current_location=place)
-    row.setdefault("occupancy", {})["location"] = place
-    return [_derived(task["resource_jid"], "resource_location", place,
-                     f"the stated pose is inside {place}" if place else "no named place's recorded area contains the stated pose")]
+    if isinstance(pose, dict):
+        row = session.setdefault("symbolic_resources", {}).setdefault(task["resource_jid"], {})
+        row.update(current_pose=deepcopy(pose), current_pose_source="projected_state")
+
+
+def _moved_without_pose(task: dict, session: dict, prepared: dict) -> None:
+    """Mark a resource's pose not stated when its event moves it and states none.
+
+    A pick, a place or a move by name ends where its calculation ends, which the outline does not know. The old
+    pose would read as a position the resource has left, so no value stands in its place.
+    """
+    jid, end, start = task["resource_jid"], task["expected_end_state"], task.get("expected_start_state") or {}
+    variables = session.get("recovery_des_models", {}).get(jid, {}).get("state_variables", {})
+    row = session.get("symbolic_resources", {}).get(jid)
+    names = {value: name for name, value in (prepared.get("observation_jids") or {}).items()}
+
+    def named(value: Any) -> Any:
+        # A value the LLM stated unchecked can be any JSON value.
+        return names.get(value, value) if isinstance(value, str) else value
+
+    moved = any(name in end and named(end[name]) != named(start.get(name))
+                for name in ("resource_location", "held_part", "part_location"))
+    if row is None or "pose" not in variables or "pose" in end or not moved:
+        return
+    for name in ("pose", "current_pose", "current_pose_source"):
+        row.pop(name, None)
+    unknown = session.setdefault("diagnostic_unknown_owner_fields", {}).setdefault(jid, [])
+    if "pose" not in unknown:
+        unknown.append("pose")
 
 
 def _apply_neighbor_end_state(task: dict, session: dict) -> list[dict]:
@@ -614,7 +629,8 @@ def _claim_interrupted_work(task: dict, session: dict, prepared: dict) -> None:
             "outline_id": task["outline_id"], "resource_jid": task["resource_jid"],
             "basis": ("unvalidated proposed outcome matching recorded task effects" if event
                       else "unvalidated proposed part location matching the recorded task destination")}
-        if event is None:
+        # A recovery event's ledger is what it states; a nominal step's is its declared model's.
+        if event is None or task.get("candidate_source") != "nominal_connection":
             continue
         product = session.get("symbolic_parts", {}).get(part_name, {})
         for key, values in event.get("product_effects", {}).items():
@@ -626,44 +642,54 @@ def _claim_interrupted_work(task: dict, session: dict, prepared: dict) -> None:
                 existing.extend(row for row in claims if row not in existing)
 
 
+def _nominal_step_consequences(task: dict, session: dict, prepared: dict, before: Any) -> list[dict]:
+    """Complete a nominal step, which is the declared model's and not a proposal.
+
+    A part it places elsewhere loses its holder, a place the part leaves or enters gets unknown values unless the
+    step states them, a completed process ends, and the owner's fixed bookkeeping is carried.
+    """
+    part_name = task.get("part_name")
+    changes = _finish_completed_process(task, session)
+    after = session.get("symbolic_parts", {}).get(part_name, {}).get("part_location")
+    if part_name and "part_location" in task["expected_end_state"]:
+        changes += _release_holders(task, session, prepared, after)
+    if before != after:
+        changes += _mark_places_unknown(task, session, prepared, before, after)
+    _carry_owner_bookkeeping(task, session)
+    return changes
+
+
 def apply_tentative_effects(task: dict, session: dict, prepared: dict) -> None:
     """Apply an accepted event to the projected state and record who set each changed variable.
 
-    The event's end state, and what it states in ``neighbor_end_state`` for other resources its part's
-    move changes, are applied as written. Code then derives only consequences of them:
-    - a stated pose without a location change sets the location to the named place containing it;
-    - a part placed elsewhere loses its holder, unless the event states who takes it;
-    - the event's part keeps the stated pose as its projected pose only while the event's resource
-      holds it, since that pose is the resource's own;
-    - a place a part leaves or enters gets unknown values for its state and its variables that can
-      hold the part, unless the event states how that place changed;
-    - a stated ledger entry that completes the part's unfinished process ends that process, as the
-      model's own completion does, and a stated process status changes the job record of the machine
-      that holds the part's job;
-    - interrupted work whose outcome now holds (its declared outcome, or its part resting at the
-      task's destination) is claimed.
-    Every changed variable is recorded on the event in ``condition_changes`` with ``by`` set to
-    ``LLM``, ``model`` (a nominal step) or ``code`` and, for code, the reason.
+    The event's end state, and what it states in ``neighbor_end_state`` for other resources its part's move
+    changes, are applied as written, and nothing else is: code never decides a value of a proposed event, so a
+    value it leaves out stays as it was, and the checks refuse it when that is wrong (AGENTS.md, "No hidden rules
+    in recovery events"). What follows keeps stated facts together and decides no value:
+    - a stated pose is the resource's position, and a stated ``held_part`` is also the part's holder;
+    - a stated process status is also the job record of the machine that holds the part's job;
+    - a pose the event leaves behind is marked not stated, because the resource or part has left it;
+    - interrupted work whose outcome now holds is claimed, for the handoff record.
+    A nominal step is completed from its declared model (``_nominal_step_consequences``).
+
+    Every changed variable is recorded on the event in ``condition_changes`` with ``by`` set to ``LLM``,
+    ``model`` (a nominal step) or ``code`` and, for code, the reason. A pose left not stated holds no value, so it
+    is listed in ``diagnostic_unknown_owner_fields`` instead.
     """
     from . import multi_turn
 
-    part_name = task.get("part_name")
-    before = session.get("symbolic_parts", {}).get(part_name, {}).get("part_location")
+    before = session.get("symbolic_parts", {}).get(task.get("part_name"), {}).get("part_location")
     multi_turn._apply_task_effects_to_symbolic_state(task, session)
-    changes = [*_event_changes(task, session), *_apply_neighbor_end_state(task, session),
-               *_locate_by_pose(task, session, prepared)]
-    changes += _finish_completed_process(task, session)
+    changes = [*_event_changes(task, session), *_apply_neighbor_end_state(task, session)]
+    _apply_stated_pose(task, session)
+    _moved_without_pose(task, session, prepared)
     _project_machine_jobs(task, session, prepared)
     unknown = session.get("diagnostic_unknown_owner_fields", {}).get(task["resource_jid"], [])
     session.setdefault("diagnostic_unknown_owner_fields", {})[task["resource_jid"]] = [
         name for name in unknown if name not in task["expected_end_state"]]
-    after = session.get("symbolic_parts", {}).get(part_name, {}).get("part_location")
-    if part_name and "part_location" in task["expected_end_state"]:
-        changes += _release_holders(task, session, prepared, after)
+    if task.get("candidate_source") == "nominal_connection":
+        changes += _nominal_step_consequences(task, session, prepared, before)
     _clear_pose_of_unheld_part(task, session)
-    if before != after:
-        changes += _mark_places_unknown(task, session, prepared, before, after)
-    _carry_owner_bookkeeping(task, session)
     _claim_interrupted_work(task, session, prepared)
     task["condition_changes"] = changes
 

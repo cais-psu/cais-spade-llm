@@ -61,22 +61,30 @@ def _destination_geometry(evidence: dict, destination: str, part: str) -> dict |
     if not isinstance(node, dict):
         return None
     poses = [node[name] for name in ("pickup_pose", "workholding_pose", "completed_product_pose") if name in node]
+    height = geometry.get("parts", {}).get("heights_m", {}).get(part)
+    reference = {"target_point": "part_origin", "surface_role": "support"}
+    if not poses and _number(node.get("surface_height")) and _number(height):
+        # A belt has no one spot: the loading position the event names gives the origin (_stated_zone_origin).
+        return {"destination_location": destination, "part_height_m": height, "target_origin_pose": None,
+                "support_surface_height": node["surface_height"], "target_reference": reference}
     if len(poses) != 1 or not isinstance(poses[0], list) or len(poses[0]) < 3 or not all(_number(v) for v in poses[0][:3]):
         return None
-    height = geometry.get("parts", {}).get("heights_m", {}).get(part)
     if not _number(height):
         return None
+    # A machine's workholding is recorded at the height a part rests on it; other parts of its body lie under it too.
+    surface = node["surface_height"] if "surface_height" in node else poses[0][2] if "workholding_pose" in node else None
     return {"destination_location": destination, "part_height_m": height,
             "target_origin_pose": dict(zip(("x", "y", "z"), poses[0][:3])),
-            **({"support_surface_height": node["surface_height"]} if "surface_height" in node else {}),
-            "target_reference": {"target_point": "part_origin", "surface_role": "support"}}
+            **({"support_surface_height": surface} if surface is not None else {}),
+            "target_reference": reference}
 
 
 def _stated_zone_origin(task: dict, destination: str, resource_evidence: dict, physical_evidence: dict) -> dict | None:
     """Return the recorded pose of the destination zone the event puts its part in, if it names exactly one.
 
     The event names the zone through the destination's own ``zone_<n>_part`` slot, the slot that receives a
-    part placed on that zone; the zone's recorded pose is the place target's origin.
+    part placed on that zone; the zone's recorded pose is the place target's origin. A belt's loading position
+    is named the same way, through the part's ``part_location.<part>``.
     """
     part = task.get("part_name")
     scene = (resource_evidence.get("inputs") or {}).get("scene") or {}
@@ -86,7 +94,11 @@ def _stated_zone_origin(task: dict, destination: str, resource_evidence: dict, p
     stated = (task.get("neighbor_end_state") or {}).get(jid) or {}
     named = [number for number, pose in zones.items() if stated.get(f"zone_{number}_part") == part
              and isinstance(pose, list) and len(pose) >= 3 and all(_number(value) for value in pose[:3])]
-    return dict(zip(("x", "y", "z"), zones[named[0]][:3])) if part is not None and len(named) == 1 else None
+    if part is not None and len(named) == 1:
+        return dict(zip(("x", "y", "z"), zones[named[0]][:3]))
+    loading = ((physical_evidence.get("environment_models") or {}).get(destination) or {}).get("assignments", {}).get("loading_positions")
+    rows = [row for row in (loading or {}).values() if row.get("loading_position") == stated.get(f"part_location.{part}")]
+    return dict(zip(("x", "y", "z"), rows[0]["pose"][:3])) if part is not None and len(rows) == 1 else None
 
 
 def _receiving_geometry_source(destination: str, physical_evidence: dict) -> dict:

@@ -526,6 +526,46 @@ def _resource_type_for_resource(
     )
 
 
+def _job_composition_guidance(prepared_recovery_request: dict[str, Any], resource_jid: str) -> str:
+    """Say where a machine's job primitives find ``job_id``, which no snapshot shows; empty for other resources."""
+    names = {str(row.get("name")) for row in _primitive_catalog_for_resource(prepared_recovery_request, resource_jid)}
+    if not names & {"pause_job", "resume_job", "stop_job"}:
+        return ""
+    return (
+        f"A job primitive's job_id is a key of /resources/{resource_jid}/resource_evidence/processing_observations/jobs; "
+        "active_job in that record names the running job, and a paused job keeps its key. "
+    )
+
+
+def _transport_composition_guidance(prepared_recovery_request: dict[str, Any], resource_jid: str) -> str:
+    """Say that a transport program binds no distance; empty for other resources."""
+    names = {str(row.get("name")) for row in _primitive_catalog_for_resource(prepared_recovery_request, resource_jid)}
+    if "compute_transport_targets" not in names:
+        return ""
+    return (
+        "A transport program is detect_parts, compute_transport_targets, then move_relative, with no parameters: "
+        "compute_transport_targets calculates where the parts arrive from the locations the event states. "
+    )
+
+
+def _kmr_composition_guidance(resource_jid: str) -> str:
+    """Say how a KMR program binds what the KMR's decompositions name by ``$state`` and ``$ref``."""
+    return (
+        "For this KMR, adapt its capability decompositions; their $state and $ref values name what a program binds. "
+        "compute_pick_targets and compute_place_targets publish their calculated poses under "
+        "event_facts.pick_targets.<part> and event_facts.place_targets.<part>, by the names the decompositions use "
+        "(target, approach, lift, lift_waypoints, retreat, transport, withdraw_waypoints); bind "
+        "move_cartesian.target to one of these lists. "
+        "compute_pick_targets needs no parameters. compute_place_targets reads the place from the event's "
+        "part_location and the zone it names, so omit part_pose. "
+        f"Bind its transform to /resources/{resource_jid}/resource_evidence/attachment/grasp_transform, "
+        "and move_base's too while the KMR holds a part. move_base takes [x, y, yaw]: the event's stated pose, or "
+        f"the place's dock from /resources/{resource_jid}/docks/<place>. Custody completion requires reaching the "
+        "calculated target, then grasp_part or release_part, then a next motion that reaches the calculated "
+        "retreat. "
+    )
+
+
 def _capability_decomposition_for_resource(
     *,
     prepared_recovery_request: dict[str, Any],
@@ -2227,6 +2267,10 @@ async def generate_primitive_batch_with_llm_agent(
                 "the fields a parameter binds to; the whole record is too large and is listed by field. "
                 "Missing facts require need_context; they are different from explicit null. "
                 "Calculated event_facts are available only after their producing step. "
+                + _job_composition_guidance(prepared_recovery_request, resource_jid)
+                + _transport_composition_guidance(prepared_recovery_request, resource_jid)
+                + (_kmr_composition_guidance(resource_jid) if _resource_type_for_resource(
+                    prepared_recovery_request, resource_jid) == "kmr" else
                 "For robot targets, prefer recorded owner inputs with part_name, and destination_location "
                 "for compute_place_targets. In this composition path, the owner reads recorded geometry "
                 "and observed poses internally: omit product_geometry, target_pose, and target_pose_source "
@@ -2241,8 +2285,8 @@ async def generate_primitive_batch_with_llm_agent(
                 "reaching target_pose, grasp_part or release_part, then retreat_pose. Only a place into the part's "
                 "assembly_slot (the location in /parts/<name>/target) binds release_part.assembly_slot: slot_x, "
                 "slot_y, part_height, board_top_z, place_part_origin_z (as part_origin_z), and destination_location "
-                "from the calculated place targets. Any other destination has no slot fields, so omit assembly_slot. "
-                "Validation findings identify the step or missing postcondition to revise. "
+                "from the calculated place targets. Any other destination has no slot fields, so omit assembly_slot. ")
+                + "Validation findings identify the step or missing postcondition to revise. "
                 "This is composition for review; no execution is authorized."
             )
         feedback = prepared_recovery_request.get("recovery_feedback")

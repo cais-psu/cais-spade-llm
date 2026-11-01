@@ -60,6 +60,180 @@ def test_placement_target_capability_keeps_recorded_custody_constraints(owner_co
 
 
 
+def _held_kmr(owner_context, part):
+    owner = owner_for(owner_context, 'KMR')
+    evidence = environment_owner_evidence(owner)
+    names = owner_context.inputs['scene']['KMR']['arm_joint_names']
+    snapshot = {**environment_owner_snapshot(owner), 'held_part': part, 'joint_names': names, 'joint_positions': [0.] * 7,
+        'current_pose': [0., 0., 1.16, 1., 0., 0., 0.], 'base_pose': [-3.3, 1.3, 0., 0., 0., .7071068, .7071068],
+        'resource_location': None,
+        'continuous_motion_configuration': {'joints': [{'name': name, 'position_bounds': [-3., 3.]} for name in names]}}
+    transform = [0., 0., .025, 1., 0., 0., 0.]
+    evidence['attachment'] = {'attached': True, 'held_part': part, 'grasp_transform': transform}
+    return owner, evidence, snapshot, transform
+
+
+def test_a_release_away_from_a_dock_puts_the_part_at_its_stated_pose(owner_context):
+    from cais_spade_llm.recovery_framework.geometry import compose
+    from cais_spade_llm.recovery_framework.kmr_recovery import check_kmr_primitive_capability
+
+    part = 'KET4_Square_4mm'
+    owner, evidence, snapshot, transform = _held_kmr(owner_context, part)
+    pose = [-2.6, 1.1, 1.0, 0., 0., 0., 1.]
+    task = {'resource_jid': owner.jid, 'part_name': part}
+    result = check_kmr_primitive_capability(primitive='compute_place_targets', params={'transform': transform, 'part_pose': pose},
+        task=task, recovery_snapshot=snapshot, resource_evidence=evidence)
+    assert result['feasibility_status'] == 'FEASIBLE', result
+    targets = result['evidence']['calculated_targets']
+    assert compose(targets['target'], transform) == pytest.approx(pose)
+    # The approach and retreat stay at the carrying height, whatever the spot's own height.
+    config = evidence['inputs']['scene']['KMR']['task_execution']
+    carrying = config['cartesian_waypoints']['transport_tcp_position_in_base_frame_m'][2]
+    assert targets['approach'][2] == targets['retreat'][2] == carrying
+    # With neither a pose nor a stated place it has nowhere to put the part.
+    missing = check_kmr_primitive_capability(primitive='compute_place_targets', params={'transform': transform},
+        task=task, recovery_snapshot=snapshot, resource_evidence=evidence)
+    assert missing['feasibility_status'] == 'NEEDS_CONTEXT', missing
+
+
+def test_the_kmr_heights_the_ra_checks_are_the_ones_its_targets_use(owner_context):
+    from cais_spade_llm.recovery_framework.kmr_recovery import (
+        pick_heights, pick_targets, release_heights, transfer_heights,
+    )
+
+    scene = owner_context.inputs['scene']
+    config = scene['KMR']['task_execution']
+    carrying = config['cartesian_waypoints']['transport_tcp_position_in_base_frame_m'][2]
+    grasp = config['grasp_height_m']
+    # A low spot stays at the carrying height, and the 7 cm lift only counts above it.
+    assert release_heights(scene, 0.67) == {'approach': carrying, 'retreat': carrying}
+    high = release_heights(scene, 1.2)
+    assert high['approach'] == pytest.approx(1.2 + config['minimum_pick_lift_m']) and high['retreat'] == high['approach']
+    assert transfer_heights(scene, 'place', None, None, 1.0) == [carrying]
+    part = 'KET4_Square_4mm'
+    base = [-5.47, 1.1, 0., 0., 0., 1., 0.]
+    down = config['pick_orientation_xyzw']
+    picked = pick_targets(scene, part, [-4.6, 1.1, 1.0, 0., 0., 0., 1.], [-5.5, 1.1, 1.16, *down], base, location=None)
+    assert transfer_heights(scene, 'pick', part, None, 1.0) == pytest.approx(
+        sorted([picked['approach'][2], picked['lift_waypoints'][0][2]], reverse=True))
+    # A calibrated spot's own clearance counts.
+    calibrated = scene['Storage']['KMR_pick_approach_clearance_m'][part]
+    assert pick_heights(scene, part, 'Storage', 0.67)['approach'] == pytest.approx(0.67 + calibrated)
+    assert transfer_heights(scene, 'pick', part, 'Storage', 0.645)[0] == pytest.approx(0.645 + grasp + max(
+        calibrated, config['minimum_pick_lift_m']))
+
+
+def test_a_pick_off_a_tray_reads_the_observed_part_and_a_stated_workholding_stays_checked(owner_context):
+    from cais_spade_llm.recovery_framework.kmr_recovery import check_kmr_primitive_capability
+
+    part = 'KET4_Square_4mm'
+    owner, evidence, snapshot, _ = _held_kmr(owner_context, None)
+    evidence.pop('attachment')
+    # An arm's projected place records the pose by its named fields.
+    placed = dict(zip(('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'), [-4.6, 1.1, 1.0, 0., 0., 0., 1.], strict=True))
+    evidence['observed_parts'] = {part: {'current_pose': placed}}
+    snapshot['base_pose'] = [-5.47, 1.1, 0., 0., 0., 1., 0.]
+    task = {'resource_jid': owner.jid, 'part_name': part, 'expected_start_state': {'part_location': 'M1 staging tray'}}
+    picked = check_kmr_primitive_capability(primitive='compute_pick_targets', params={}, task=task,
+        recovery_snapshot=snapshot, resource_evidence=evidence)
+    assert picked['feasibility_status'] == 'FEASIBLE', picked
+    config = evidence['inputs']['scene']['KMR']['task_execution']
+    assert picked['evidence']['calculated_targets']['target'][2] == pytest.approx(1.0 + config['grasp_height_m'])
+    # At a machine's dock the same part, away from the workholding it starts at, is refused as before.
+    dock = next(row for row in evidence['inputs']['scene']['machines'] if row['resource_id'] == 'M1')['KMR_docking_pose']
+    snapshot.update(resource_location='M1', base_pose=[dock[0], dock[1], 0., 0., 0., .7071068, .7071068])
+    task['expected_start_state']['part_location'] = 'M1'
+    refused = check_kmr_primitive_capability(primitive='compute_pick_targets', params={}, task=task,
+        recovery_snapshot=snapshot, resource_evidence=evidence)
+    assert refused['feasibility_status'] == 'INFEASIBLE'
+    assert refused['reason'] == 'Recorded part pose differs from the requested workholding location'
+
+
+def test_a_pick_or_place_after_a_base_move_in_one_program_reads_where_the_base_now_stands(owner_context):
+    from cais_spade_llm.recovery_framework.kmr_recovery import _standing_at, kmr_place_at
+
+    scene = owner_context.inputs['scene']
+    dock = next(row for row in scene['machines'] if row['resource_id'] == 'M2')['KMR_docking_pose']
+    on_dock = [dock[0], dock[1], 0., 0., 0., math.sin(dock[5] / 2), math.cos(dock[5] / 2)]
+    evidence = {'inputs': {'scene': scene}}
+    # The event started at Storage; the base has since driven to M2's dock.
+    assert _standing_at({'resource_location': 'Storage', 'base_pose': on_dock}, evidence) == 'M2'
+    # Facing the wrong way it is on no dock, and without a recorded base the location is all there is.
+    assert kmr_place_at(scene, [dock[0], dock[1], 0., 0., 0., 0., 1.]) is None
+    assert _standing_at({'resource_location': 'Storage'}, evidence) == 'Storage'
+
+
+def test_a_belt_takes_a_part_only_as_its_runtime_does(owner_context):
+    from cais_spade_llm.resources.robot.recovery_composition import receive_placed_part
+
+    evidence = environment_owner_evidence(owner_for(owner_context, 'KMR'))
+    part = 'KET4_Square_4mm'
+    model = evidence['environment_models']['Conveyor']
+    row = next(row for row in model['assignments']['loading_positions'].values()
+               if row['loading_position'] == 'loading_position_2')
+    physical = {'jids': {'Conveyor': 'belt', 'ur5e-2': 'arm'}, 'environment_models': evidence['environment_models'],
+                'environment_valuation': deepcopy(evidence['environment_valuation'])}
+
+    def place(values=None, at=row, **belt):
+        physical['environment_valuation']['Conveyor'].update(values or {})
+        projected = {}
+        placed = receive_placed_part(part, 'Conveyor', dict(zip('xy', at['pose'], strict=False)), acting_jid='arm',
+            grounding_context={'resources': {'belt': {'resource_state': 'idle', 'availability': 'available', **belt}}},
+            physical_evidence=physical, projected_resources=projected)
+        return placed, projected
+
+    placed, projected = place()
+    assert placed['location'] == 'Conveyor', placed
+    assert projected['belt'][f'part_location.{part}'] == 'loading_position_2'
+    assert projected['belt'][f'part_order.{part}'] == 0
+    # A place between the loading positions is not one of them.
+    assert 'failure' in place(at={'pose': [row['pose'][0] + .3, row['pose'][1]]})[0]
+    assert place(resource_state='running')[0]['failure'] == 'Conveyor cannot receive a part in its recorded state'
+    assert place(availability='unavailable')[0]['status'] == 'INFEASIBLE'
+    assert place({'loading_reserved_by': 'ur5e-1'})[0]['failure'] == 'Conveyor cannot receive a part in its recorded state'
+    assert 'failure' not in place({'loading_reserved_by': 'ur5e-2'})[0]
+
+
+def test_a_place_reads_a_machine_s_workholding_height_and_a_belt_s_named_position(owner_context):
+    from cais_spade_llm.resources.robot.recovery_capability import _destination_geometry, _stated_zone_origin
+
+    evidence = environment_owner_evidence(owner_for(owner_context, 'KMR'))
+    part = 'KET4_Square_4mm'
+    m2 = next(row for row in evidence['inputs']['scene']['machines'] if row['resource_id'] == 'M2')
+    assert _destination_geometry(evidence, 'M2', part)['support_surface_height'] == m2['workholding_pose'][2]
+    belt = _destination_geometry(evidence, 'Conveyor', part)
+    assert belt['support_surface_height'] == evidence['inputs']['scene']['Conveyor']['surface_height']
+    # The belt has no one spot until the event names a loading position.
+    assert belt['target_origin_pose'] is None
+    physical = {'jids': {'Conveyor': 'belt'}, 'environment_models': evidence['environment_models']}
+    named = {'part_name': part, 'neighbor_end_state': {'belt': {f'part_location.{part}': 'loading_position_2'}}}
+    x, y, z = _stated_zone_origin(named, 'Conveyor', evidence, physical).values()
+    assert (x, y) == tuple(m2['conveyor_loading_pose'][:2]) and z == pytest.approx(m2['conveyor_loading_pose'][2])
+    assert _stated_zone_origin({'part_name': part}, 'Conveyor', evidence, physical) is None
+
+
+def test_the_kmr_arm_reaches_from_where_the_base_now_stands():
+    from cais_spade_llm.recovery_framework.kmr_recovery import _pose, check_kmr_primitive_capability
+    from cais_spade_llm.recovery_framework.recovery_observations import read_observations
+
+    observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
+                                         'capture_b7dea70c1db74e1e9e98849380c09655/observations.json'))
+    jid = observations['jids']['KMR']
+    evidence = deepcopy(observations['prepared_recovery_request']['recovery_resources'][jid]['resource_evidence'])
+    target = [-4.13, 1.82, 1.155, 1., 0., 0., 0.]
+
+    def reach(base):
+        snapshot = {'held_part': None, 'base_pose': base}
+        return check_kmr_primitive_capability(primitive='move_cartesian', params={'target': target},
+            task={'resource_jid': jid}, recovery_snapshot=snapshot, resource_evidence=evidence)
+
+    dock = [-4.7, 2.2, 0., 0., 0., .7071068, .7071068]
+    assert _pose(dock)
+    assert reach(dock)['feasibility_status'] == 'FEASIBLE'
+    # From the captured base at Storage, the same spot at M1 is out of the arm's reach.
+    assert reach(evidence['snapshot']['base_pose'])['feasibility_status'] != 'FEASIBLE'
+
+
 def test_an_empty_belt_keeps_its_movement_and_each_resource_keeps_the_shared_events_it_takes_part_in(owner_context):
     def descriptor(rid):
         owner = owner_for(owner_context, rid)
@@ -598,3 +772,132 @@ def test_released_part_receiver_comes_from_its_settled_position(pose, receiver):
     conveyor = build_nominal_resource_des_models(scene)["Conveyor"]
     assert observed_receiver(scene, conveyor, "KET4_Square_4mm", pose) == receiver
     assert observed_receiver(scene, None, "KET4_Square_4mm", [-3.0, 0.5, 1.015]) is None
+
+
+PART, OTHER = 'KET4_Square_4mm', 'RGOCG4-50_Round_4mm'
+
+
+def _belt(owner_context, **locations):
+    """Return the Conveyor's evidence with parts on it, the leading part first, and its loading positions."""
+    evidence = environment_owner_evidence(owner_for(owner_context, 'Conveyor'))
+    model, scene = evidence['environment_models']['Conveyor'], evidence['inputs']['scene']
+    loading = [machine['conveyor_loading_pose'][0] for machine in scene['machines']]
+    positions = {'loading_position_1': loading[0], 'loading_position_2': loading[1],
+                 'after loading_position_1': sum(loading) / 2}
+    values = evidence['environment_valuation']['Conveyor']
+    evidence['observed_parts'] = {}
+    for rank, (key, location) in enumerate(locations.items()):
+        name = {'part': PART, 'other': OTHER}[key]
+        values[f'part_location.{name}'], values[f'part_order.{name}'] = location, rank
+        evidence['observed_parts'][name] = {'current_pose': {'x': positions[location], 'y': .5, 'z': 1.015}}
+    return evidence, model, loading
+
+
+def _transport_step(evidence, targets, primitive, stated, part=PART):
+    from cais_spade_llm.recovery_framework.transport_composition import advance_transport_program
+
+    return advance_transport_program(evidence, targets, task={'part_name': part, 'expected_end_state': stated},
+                                     primitive=primitive, recovery_snapshot={})
+
+
+def test_a_belt_move_ends_where_the_event_states_and_moves_the_part_there(owner_context):
+    from cais_spade_llm.recovery_framework.transport_composition import (
+        preview_transport_output, project_transport_completion,
+    )
+
+    evidence, _, loading = _belt(owner_context, part='loading_position_1')
+    stated, targets = {f'part_location.{PART}': 'loading_position_2', 'resource_state': 'idle'}, {}
+    assert _transport_step(evidence, targets, 'detect_parts', stated) is None
+    assert _transport_step(evidence, targets, 'compute_transport_targets', stated) is None
+    output = preview_transport_output(targets, primitive='compute_transport_targets')
+    assert output['event_fact_key'] == 'transport_targets'
+    assert output['output']['target_x'][PART] == pytest.approx(loading[1])
+    assert output['output']['displacement'] == pytest.approx(loading[1] - loading[0])
+    result = project_transport_completion(task={'part_name': PART, 'expected_end_state': stated},
+        trace=[{'primitive': 'move_relative', 'step_effects': {'part_pose.x': output['output']['target_x']}}],
+        projected_snapshot={f'part_location.{PART}': 'loading_position_1'}, part_context={'observed_pose': {'x': loading[0]}},
+        grounding_context={}, targets=targets, resource_evidence=evidence)
+    assert result['projected_snapshot'][f'part_location.{PART}'] == 'loading_position_2'
+    assert result['projected_part_context']['observed_pose']['x'] == pytest.approx(loading[1])
+    row = result['resource_evidence']['observed_parts'][PART]
+    assert row['current_pose']['x'] == pytest.approx(loading[1]) and row['source']['kind'] == 'projected'
+
+
+def test_a_belt_program_without_its_move_writes_no_location(owner_context):
+    from cais_spade_llm.recovery_framework.transport_composition import project_transport_completion
+
+    evidence, _, _ = _belt(owner_context, part='loading_position_1')
+    start = {f'part_location.{PART}': 'loading_position_1'}
+    result = project_transport_completion(task={'part_name': PART}, trace=[{'primitive': 'detect_parts'}],
+        projected_snapshot=start, part_context={}, grounding_context={}, targets={}, resource_evidence=evidence)
+    assert result['projected_snapshot'] == start and 'resource_evidence' not in result
+
+
+def test_a_belt_move_refuses_a_resident_the_event_leaves_out(owner_context):
+    evidence, _, _ = _belt(owner_context, other='after loading_position_1', part='loading_position_1')
+    stated, targets = {f'part_location.{PART}': 'loading_position_2'}, {}
+    assert _transport_step(evidence, targets, 'detect_parts', stated) is None
+    refusal = _transport_step(evidence, targets, 'compute_transport_targets', stated)
+    assert OTHER in refusal and 'states no part_location' in refusal
+    assert 'compute_transport_targets' not in targets
+
+
+@pytest.mark.parametrize('start,stated,reason', [
+    ('loading_position_2', 'loading_position_1', 'upstream'),
+    ('loading_position_1', 'loading_position_1', 'clear occupied'),
+    ('loading_position_1', None, 'leaving the belt'),
+])
+def test_a_belt_move_the_belt_cannot_make_is_refused(owner_context, start, stated, reason):
+    evidence, _, _ = _belt(owner_context, part=start)
+    end, targets = {f'part_location.{PART}': stated}, {}
+    assert _transport_step(evidence, targets, 'detect_parts', end) is None
+    assert reason in _transport_step(evidence, targets, 'compute_transport_targets', end)
+
+
+def test_a_transport_calculates_only_from_parts_it_observed(owner_context):
+    evidence, _, _ = _belt(owner_context, part='loading_position_1')
+    stated = {f'part_location.{PART}': 'loading_position_2'}
+    assert _transport_step(evidence, {}, 'compute_transport_targets', stated) == (
+        'compute_transport_targets needs the observed parts')
+    evidence['observed_parts'] = {}
+    assert 'no recorded position' in _transport_step(evidence, {}, 'detect_parts', stated)
+
+
+@pytest.mark.parametrize('params,snapshot,status,reason', [
+    ({'speed_mps': .5}, {}, 'FEASIBLE', 'Declared transport primitive'),
+    ({'speed_mps': 99.}, {}, 'INFEASIBLE', 'Transport speed'),
+    ({}, {'loading_reserved_by': 'ur5e-1'}, 'INFEASIBLE', 'cannot advance'),
+    ({}, {'resource_state': 'moving'}, 'INFEASIBLE', 'cannot advance'),
+])
+def test_a_transport_step_is_checked_under_its_advance_event(owner_context, params, snapshot, status, reason):
+    from cais_spade_llm.recovery_framework.transport_composition import check_transport_primitive
+
+    evidence, _, _ = _belt(owner_context, part='loading_position_1')
+    checked = check_transport_primitive(primitive='move_relative', params=params, task={'part_name': PART},
+                                        recovery_snapshot=snapshot, resource_evidence=evidence)
+    assert checked[0] == status and reason in checked[1]
+
+
+def _buffer(owner_context, zone=1):
+    evidence = environment_owner_evidence(owner_for(owner_context, 'Buffer For Machined parts'))
+    evidence['environment_valuation']['Buffer For Machined parts'].update({f'zone_{zone}_part': PART})
+    slot = evidence['inputs']['scene']['Buffer For Machined parts']['slot_poses']
+    evidence['observed_parts'] = {PART: {'current_pose': {'x': slot[zone - 1][0], 'y': .5, 'z': 1.017}}}
+    return evidence, slot
+
+
+def test_a_buffer_move_takes_the_next_zone_the_event_states(owner_context):
+    evidence, slot = _buffer(owner_context)
+    stated, targets = {'zone_1_part': None, 'zone_2_part': PART}, {}
+    assert _transport_step(evidence, targets, 'detect_parts', stated) is None
+    assert _transport_step(evidence, targets, 'compute_transport_targets', stated) is None
+    assert targets['compute_transport_targets']['target_x'][PART] == pytest.approx(slot[1][0])
+    assert targets['compute_transport_targets']['end_state'] == stated
+
+
+def test_a_buffer_move_refuses_a_zone_the_event_leaves_out(owner_context):
+    evidence, _ = _buffer(owner_context)
+    stated, targets = {'zone_2_part': PART}, {}
+    assert _transport_step(evidence, targets, 'detect_parts', stated) is None
+    assert 'zone_1_part' in _transport_step(evidence, targets, 'compute_transport_targets', stated)
+

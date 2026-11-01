@@ -412,6 +412,9 @@ def public_resource_snapshot(prepared: dict, session: dict, jid: str) -> dict:
         snapshot["field_sources"] = {key: source for key, source in sources.items() if key in snapshot}
         return snapshot
     result = {**entry.get("recovery_snapshot", {}), **resources.get(jid, {})}
+    # A resource moved without a stated pose is no longer at the pose the capture recorded.
+    if "pose" in session.get("diagnostic_unknown_owner_fields", {}).get(jid, []):
+        fields -= {"current_pose", "current_pose_source", "current_pose_captured_at"}
     return _fields(result, fields)
 
 
@@ -663,6 +666,21 @@ def _pose_relations_fact(prepared: dict, session: dict, kind: str, name: str) ->
                                           prepared.get("diagnostic_reach", {}), movers)}
 
 
+def _geometry_now(prepared: dict, session: dict) -> dict:
+    """Return the scene geometry without the captured base pose of a mobile base that has moved since."""
+    geometry = prepared.get("diagnostic_scene_geometry", {})
+    if "mobile_bases" not in geometry:
+        return geometry
+    unknown = session.get("diagnostic_unknown_owner_fields", {})
+    rows, captured = session.get("symbolic_resources", {}), session.get("base_symbolic_resources", {})
+    moved = {name for name, jid in (prepared.get("observation_jids") or {}).items()
+             if "pose" in unknown.get(jid, [])
+             or rows.get(jid, {}).get("current_pose") != captured.get(jid, {}).get("current_pose")}
+    return {**geometry, "mobile_bases": {name: {key: value for key, value in row.items()
+                                                if not (name in moved and key == "base_pose_xy_yaw")}
+                                         for name, row in geometry["mobile_bases"].items()}}
+
+
 def _diagnostic_fact(prepared: dict, session: dict, ref: str) -> dict:
     """Serve a diagnostic-mode declaration, or a pose relation derived from declarations."""
     if not is_diagnostic_ref(ref):
@@ -683,7 +701,7 @@ def _diagnostic_fact(prepared: dict, session: dict, ref: str) -> dict:
         interpretation = "name(parameters; ? marks optional ones)"
     else:
         value = {"safety_rules": prepared.get("prompt_safety_rules", []), "regions": prepared.get("diagnostic_regions", {}),
-                 "geometry": prepared.get("diagnostic_scene_geometry", {})}[segments[1]]
+                 "geometry": _geometry_now(prepared, session)}[segments[1]]
         if len(segments) == 3:
             value = (next((row for row in value if row.get("id") == segments[2]), None) if isinstance(value, list)
                      else value.get(segments[2]))

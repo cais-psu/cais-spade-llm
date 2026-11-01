@@ -108,6 +108,12 @@ name the section or equation it implements. If it maps to none, ask the user fir
   - Delayed completion needs a definition in the paper: a machine's job completes after the remaining
     processing time, $(1-\text{processing fraction})\times\text{processing time}$, with the part's
     `processCompleted`, as the machine's observed, uncontrollable `complete_job` outcome while running.
+  - A value the event leaves out stays as it was; code writes none (user, October 31). Where a capability check, a
+    stated pose or a stated ledger entry finds that value changed, the event is rejected with that fact and the LLM
+    states it. Algorithm 1 goes from stated values only, so this rejection needs a sentence in the paper.
+  - A mobile base is checked from the pose the event states or the dock of the place it names. Only an event that
+    leaves it at no named place opens the search for a free base: that base is a parameter $\theta$ of Eq. 12, which
+    the RA finds and the LLM never writes (user, October 31).
   - Candidates are checked in the LLM's order and the first feasible one is applied
     ($R_{\text{neural}}\cap R_{\text{feasible}}$). Facts return as feedback only when every candidate
     fails.
@@ -428,6 +434,10 @@ Edits still to write into the paper from earlier reviews are recorded above: the
   PA. With validation off, code only projects state and records results.
 - **No failure-type, resource-type or scenario logic.** Faults are unexpected but observable (A.1).
   Facts come from measurements and declarations, stated the same way for every resource.
+- **No hidden rules in recovery events (user decision, 2026-10-31).** Code never decides, fills in,
+  defaults or corrects a value of a proposed event. The LLM proposes every value; RA and CCA validation
+  only accept or refuse it, and a value left out is refused with the fact, never derived. What the code
+  still does against this is listed in IMPLEMENTATION_PLAN.md, "Hidden rules still in the code".
 - **No derivation kinds (user decision, 2026-10-30).** Do not sort end-state fields into kinds such as
   free, unchanged, place or bookkeeping, and never let a field pass because of its kind. RA validation and
   primitive composition work from the declared state variables and primitive effects. The RA's condition

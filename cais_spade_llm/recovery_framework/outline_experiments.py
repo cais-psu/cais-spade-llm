@@ -63,7 +63,7 @@ ROW_COLUMNS = (
     "attempt_id", "scenario", "configuration", "repetition", "status", "outcome", "failing_stage",
     "first_failing_event", "draft_status", "stop_cause", "outline_length", "handoff_complete",
     *(f"rejections_{check}" for check in REJECTION_CHECKS), "revisions", "rewrites", "lookups", "lookup_turns",
-    "provider_calls", "tokens", "prompt_tokens", "completion_tokens", "reasoning_tokens", "elapsed_seconds",
+    "provider_calls", "provider_requests", "tokens", "prompt_tokens", "completion_tokens", "reasoning_tokens", "elapsed_seconds",
     "audit_seconds", "model", "reasoning_effort", "message", "draft_path",
 )
 
@@ -246,6 +246,7 @@ def attempt_row(attempt: dict, directory: Path | None) -> dict:
         if validated and record.get("single_pass_outline") else "–",
         lookups=len(record.get("retrievals") or []), lookup_turns=decisions.get("need_context", 0),
         provider_calls=record.get("provider_calls", NOT_RECORDED),
+        provider_requests=record.get("provider_requests", NOT_RECORDED),
         tokens=sum(int(entry.get("total_tokens") or 0) for entry in usage) if usage else NOT_RECORDED,
         prompt_tokens=sum(int(entry.get("prompt_tokens") or 0) for entry in usage) if usage else NOT_RECORDED,
         completion_tokens=sum(int(entry.get("completion_tokens") or 0) for entry in usage) if usage else NOT_RECORDED,

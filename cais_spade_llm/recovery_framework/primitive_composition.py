@@ -3,6 +3,7 @@ from __future__ import annotations
 """Readiness and immutable source handling for Recovery UI composition attempts."""
 
 import asyncio
+import json
 import logging
 import shutil
 import threading
@@ -285,6 +286,32 @@ def _composition_physical_evidence(observations: dict, prepared: dict) -> dict:
     return physical
 
 
+def _saved_composition(root: Path, source: dict, run_id: str) -> dict:
+    """Return the state of a draft's latest finished composition, so reviewing it needs no model call.
+
+    Only a completed attempt writes ``composition.json``. An attempt whose outline differs from the one the draft
+    replays to now was composed from another planning state, so it is not this draft's result.
+
+    Args:
+        root: Directory holding the attempts' records.
+        source: The replayed composition source.
+        run_id: The draft's identifier.
+
+    Returns:
+        The composition state to show, or an empty dict.
+    """
+    outline = source["multi_turn_session_state"].get("accepted_outline_prefix")
+    for path in sorted(root.glob("composition_*/composition.json"), key=lambda item: item.stat().st_mtime_ns, reverse=True):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record.get("source_outline_draft") == run_id and record.get("accepted_outline_prefix") == outline:
+            return {"primitive_status": "completed", "primitives": record["accepted_primitive_program"],
+                    "composition_feasibility": record["composition_feasibility"], "composition_validation_version": 1,
+                    "composition_directory": str(path.parent), "composition_path": str(path),
+                    "primitive_artifact_directory": str(path.parent / "recovery_primitves"),
+                    "message": "Saved composition loaded for review; no model was called."}
+    return {}
+
+
 class DraftComposition:
     """Compose primitives for a loaded checked outline draft, offline and for review; nothing executes."""
 
@@ -314,6 +341,8 @@ class DraftComposition:
         self._attempt = 0
         self._state = {"primitive_status": "ready" if self._readiness["ready"] else "unavailable",
                        "primitives": [], "composition_findings": [], "composition_feasibility": "not_checked"}
+        if source:
+            self._state.update(_saved_composition(root, source, draft.record["run_id"]))
 
     @property
     def running(self) -> bool:

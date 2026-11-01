@@ -54,7 +54,7 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
             recovery_snapshot=recovery_snapshot, physical_input=physical_input)
         evidence = deepcopy(preparation.get("calculated_resource_evidence", evidence))
 
-    hold, picks = None, {}
+    hold, advance, picks = None, None, {}
 
     def capability(**values) -> dict:
         if hold is not None and values["primitive"] == "compute_place_targets":
@@ -68,6 +68,11 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
         record = (checked.get("evidence") or {}).get("projected_processing_observations")
         if checked.get("feasibility_status") == "FEASIBLE" and isinstance(record, dict):
             evidence["processing_observations"] = deepcopy(record)
+        if advance is not None and checked.get("feasibility_status") == "FEASIBLE":
+            refusal = advance(primitive=values["primitive"], params=values["params"],
+                              recovery_snapshot=values["recovery_snapshot"], checked=checked)
+            if refusal:
+                return {"feasibility_status": "INFEASIBLE", "allowed": False, "reason": refusal}
         return checked
 
     preview, completion = None, None
@@ -94,6 +99,33 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
             return project_composition_completion(**values, primitive_catalog=catalog,
                 resource_evidence=evidence, physical_evidence=physical,
                 locate_pose=lambda pose, stated=None: _locate(pose, prepared, stated))
+    elif entry.get("resource_type") == "kmr":
+        from cais_spade_llm.recovery_framework.kmr_composition import (
+            advance_kmr_program, preview_kmr_output, project_kmr_completion,
+        )
+
+        def advance(**values) -> str | None:
+            return advance_kmr_program(evidence, picks, task=task, **values)
+
+        def preview(**values) -> dict:
+            return preview_kmr_output(picks, task=task, **values)
+
+        def completion(**values) -> dict:
+            return project_kmr_completion(**values, targets=picks, resource_evidence=evidence, physical_evidence=physical)
+    elif isinstance(((evidence.get("inputs") or {}).get("scene") or {}).get(evidence.get("resource_id"), {}).get(
+            "simulation_transport"), dict):
+        from cais_spade_llm.recovery_framework.transport_composition import (
+            advance_transport_program, preview_transport_output, project_transport_completion,
+        )
+
+        def advance(**values) -> str | None:
+            return advance_transport_program(evidence, picks, task=task, **values)
+
+        def preview(**values) -> dict:
+            return preview_transport_output(picks, **values)
+
+        def completion(**values) -> dict:
+            return project_transport_completion(**values, targets=picks, resource_evidence=evidence)
     elif isinstance(evidence.get("processing_observations"), dict) and _scene_machine(evidence) is not None:
 
         def completion(*, task: dict, trace: list, projected_snapshot: dict, part_context: dict, **_unused) -> dict:
@@ -109,15 +141,14 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
     # A fact the owner's primitives declare but the composition prefix lacks starts from the owner's recorded
     # evidence, which its own capability check already reads; a recorded fact never replaces a projected one.
     recorded = evidence.get("snapshot") if isinstance(evidence.get("snapshot"), dict) else {}
-    start = deepcopy(recovery_snapshot)
-    start.update({field: deepcopy(recorded[field]) for row in catalog if isinstance(row, dict)
-                  for key in ("preconditions", "capability_constraints", "effects")
-                  for field in (row.get(key) or {}) if field not in start and field in recorded})
+    recorded_facts = {field: deepcopy(recorded[field]) for row in catalog if isinstance(row, dict)
+                      for key in ("preconditions", "capability_constraints", "effects")
+                      for field in (row.get(key) or {}) if field not in recovery_snapshot and field in recorded}
     return validate_recovery_primitive_composition(task=task, primitive_steps=primitive_steps,
-        recovery_des_model=model, recovery_snapshot=start, part_context=part_context,
+        recovery_des_model=model, recovery_snapshot=recovery_snapshot, part_context=part_context,
         grounding_context=grounding_context, primitive_catalog=catalog,
         validate_primitive=capability, preview_primitive=preview, project_completion=completion,
-        captured_snapshot=entry.get("recovery_snapshot"))
+        captured_snapshot=entry.get("recovery_snapshot"), recorded_facts=recorded_facts)
 
 
 def _locate(pose: dict, prepared: dict, stated: str | None = None) -> str | None:

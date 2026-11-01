@@ -759,16 +759,6 @@ def _shown_values(resource_jids: list[str], part_names: list[str], session: dict
     return {"resources": resources, "parts": parts}
 
 
-def _placements(jid: str, session: dict) -> list[str]:
-    """Return how each accepted event that moved a resource placed it, in order: by "pose" or by "location"."""
-    placements = []
-    for task in session.get("accepted_outline_prefix", []):
-        end = task.get("expected_end_state") or {}
-        if task.get("resource_jid") == jid and ("pose" in end or "resource_location" in end):
-            placements.append("pose" if "pose" in end else "location")
-    return placements
-
-
 def current_values(jid: str, declarations: dict, session: dict) -> dict:
     """Return the current value of each resource-scoped variable, as the Resources section states it.
 
@@ -780,16 +770,14 @@ def current_values(jid: str, declarations: dict, session: dict) -> dict:
     Returns:
         Each resource-scoped variable's projected value. A value an accepted event changed without
         stating it is "not stated". ``pose`` is declared from the resource's current pose, so it reads
-        that pose in its declared fields; once an event moves the resource by a location change
-        alone, its pose is not stated.
+        that pose in its declared fields; once an event moves the resource without stating one, its
+        pose is not stated.
     """
     from . import multi_turn_outline_generation as generation
     from .multi_turn_diagnostic import NOT_STATED
 
     row = session.get("symbolic_resources", {}).get(jid, {})
     not_stated = set(session.get("diagnostic_unknown_owner_fields", {}).get(jid, []))
-    if _placements(jid, session)[-1:] == ["location"]:
-        not_stated.add("pose")
     values = {}
     for name, declaration in declarations.items():
         if declaration.get("scope", "resource") != "resource":
@@ -829,16 +817,13 @@ def _resource_row(jid: str, prepared: dict, session: dict, names: dict[str, str]
         values = list(dict.fromkeys(value for name, declaration in declarations.items() if name.startswith(prefix + ".")
                                     for value in declaration.get("domain") or [] if isinstance(value, str) and value not in parts))
         items.append(f"{prefix}.<part name>: {', '.join(keys) or 'none'}" + (f" (values {', '.join(values)})" if values else ""))
+    from .multi_turn_diagnostic import NOT_STATED, machine_jobs
+
     if _pose(row.get("current_pose")):
-        # The latest event that moved the resource decides: a stated pose is where it is, a location
-        # change leaves the last pose behind, which an earlier event stated or the capture measured.
-        placements = _placements(jid, session)
         area = _area_text(row["current_pose"], prepared)
-        label = "pose"
-        if placements[-1:] == ["location"]:
-            label = "last stated pose" if "pose" in placements else "last measured pose"
-        items.append(f"{label} {_pose(row['current_pose'])}" + (f", {area}" if area else ""))
-    from .multi_turn_diagnostic import machine_jobs
+        items.append(f"pose {_pose(row['current_pose'])}" + (f", {area}" if area else ""))
+    elif "pose" in session.get("diagnostic_unknown_owner_fields", {}).get(jid, []):
+        items.append(f"pose {NOT_STATED}")
 
     # Each job by its part, so a paused job stays in view while another part is processed.
     if jobs := machine_jobs(jid, session, prepared):

@@ -61,7 +61,8 @@ workspace.
 
 Read `AGENTS.md` before changing code. It is the source for project coding rules:
 keep changes scoped, preserve project terms exactly as written, avoid generic
-canonical rewrites, keep `SystemBridge` as the UI-to-runtime surface unless the
+canonical rewrites, never let code decide or fill in a value of a proposed
+recovery event, keep `SystemBridge` as the UI-to-runtime surface unless the
 user asks otherwise, and write clean human-readable code.
 
 @AGENTS.md

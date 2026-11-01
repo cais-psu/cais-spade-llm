@@ -120,6 +120,32 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   declared effect of the acting resource's primitives makes it, or one of the
   event's capability checks finds it.
 
+## No hidden rules in recovery events
+
+- Code never decides, fills in, defaults or corrects a value of a proposed
+  recovery event (user decision, 2026-10-31). The LLM proposes every value;
+  RA and CCA only accept or refuse what it states.
+- A value the event leaves out is not derived. When leaving it out would make
+  the projected state wrong, refuse the event with the fact and let the LLM
+  state it, as the `part_location` refusal does.
+- A value the LLM cannot calculate is still its proposal. A check may use
+  geometry and declared models to verify a stated value; it never supplies or
+  writes that value.
+- Do not add a fallback, default, derivation or name rule to
+  `apply_tentative_effects`, to anything it calls, or to a check. This holds
+  when a review finding, a refused run or a stranded resource seems to call for
+  one: the answer is a refusal the LLM can act on. Do not copy such a rule into
+  primitive composition either.
+- A check may look for whether something exists: Eq. 12 asks for a parameter
+  that works, and the LLM never writes parameters. It writes nothing, and what
+  it finds never stands in for a value the event should state.
+- The rules that were removed and the few writes that stay, with the reason
+  each one decides no value, are in
+  [IMPLEMENTATION_PLAN.md](<writing/Journal Paper 2 (recovery framework)/IMPLEMENTATION_PLAN.md>)
+  under "No hidden rules in recovery events". Do not add to what stays. A
+  change to `expected_start_state` or `condition_changes` stops saved outlines
+  loading, so check that before freezing code for a run.
+
 ## Comments and docstrings
 
 - Let readable code carry the simple cases.

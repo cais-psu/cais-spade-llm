@@ -1,5 +1,113 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## No hidden rules in recovery events — October 31, 2026 — standing rule
+
+**Request (user).** "are there more hidden rules like this in proposing recovery events? do not ever do this. record
+it everywhere". Code never decides, fills in, defaults or corrects a value of a proposed recovery event. The LLM
+proposes every value; RA and CCA only accept or refuse it. A value left out is refused with the fact, never derived.
+The rule is in `AGENTS.md`, `CLAUDE.md`, `PAPER_FRAMEWORK.md` (scope guard), the docstrings of
+`apply_tentative_effects` and `ra_feasibility`, and memory.
+
+**Hidden rules removed (October 31; user: "Yes I need to remove them even it the outline and composition does not come
+out right"; uncommitted).** A proposed event's stated values are applied as written, and nothing else is. Where a value
+left out is wrong, the RA's new `unstated_found` refuses the event with the fact and the LLM states it. Nominal steps are
+the declared model's, not proposals, so `_nominal_step_consequences` still completes them.
+
+| Code | What it did with a value the event left out | Now |
+|---|---|---|
+| `_moved_without_pose`, location part | wrote `resource_location` from the part's place, or null | gone; "the pick check finds ur5e-3's resource_location null, and the event leaves resource_location home" |
+| `_base_location` (added October 31) | wrote a mobile base's location from names | gone; same refusal, from the base the check used |
+| `_locate_by_pose` | wrote `resource_location` from a stated pose | gone; `_apply_stated_pose` keeps the stated pose only; "the stated pose puts X at Y, and the event leaves resource_location Z" |
+| `_mark_places_unknown` | marked a place's own values unknown | nominal steps only; "the pick check finds M1's part_name null, and the event leaves part_name P" |
+| `_release_holders` | wrote null to a former holder's `held_part` | nominal steps only; same refusal |
+| `_finish_completed_process` | wrote null to `current_process` | nominal steps only; "the stated processCompleted completes P's current_process, and the event leaves current_process ..." |
+| `_carry_owner_bookkeeping` | wrote private `active_job` | nominal steps only |
+| `_claim_interrupted_work`, ledger write | added entries to the part's ledger | nominal steps only; the claim for the handoff record stays |
+
+Stayed, because each decides no value. A guard test, `test_code_writes_no_value_a_recovery_event_leaves_out`, fails if a
+proposed event ever gets a code-written value, and its list of names holds exactly these:
+
+| Code | Why it stays |
+|---|---|
+| holder fields in `_apply_task_effects_to_symbolic_state`, `_apply_neighbor_end_state` | a stated `held_part` is also the part's holder: one stated fact in two fields |
+| `_project_machine_jobs` | copies the stated process to the machine's job record the prompt shows |
+| `_moved_without_pose` (pose part), `_clear_pose_of_unheld_part` | marks a pose not stated, which holds no value. Keeping the old pose would state a position the resource has left, and the pose rule refuses a stated pose where a calculation gives it |
+| `_event_with_jids` | spells a stated name as its JID |
+| `_apply_candidates` | the paper's method: "Candidates are checked in the LLM's order and the first feasible one is applied" |
+| `reach_area`, `base_candidates` | Eq. 12 is existential and "The RA later finds the primitive parameters $\theta$ (Eq. 12); the LLM never writes them". My audit listed this as a hidden rule; that was wrong. It writes nothing |
+
+Not in these tables: `nominal_connection` adds declared nominal steps after the LLM declares completion, recorded `by`
+`model`. They are not recovery events.
+
+Mobile base (`_Check.event_bases`): a stated pose is that base, and a named place is its dock. With the location left out,
+the base stays where it stands. Only an event that states no named place, or a resource already at none with no known
+base, opens the search for a free base, docks first; a dock the search lands on is the location the check finds. So a
+stated `null` is how the LLM says the base moves off a dock, and a stated place with no dock is refused ("KMR has no dock
+at Conveyor"). The RA compares a stated location with what the check finds, also when it restates the old one; a stated
+named pose stays exempt, since a pick and then home in one event is valid.
+
+The prompt did not change. It already says "variables you leave out stay as they are", which is now true.
+
+Results on the final code: all 67 drafts replay with no errors. Three pass RA and CCA safety, down from 9 (`5836a16f`,
+`ccf4b54c`, `60687eb9`); 17 changed outcome, most to "unresolved" for a value left out or a KMR base that does not reach.
+With all three checks on, `5836a16f` and `ccf4b54c` load. `43f9531d` (event 3) and `995e9c70` (event 5) do not, so no
+Part slippage or ur5e-1 outline loads until a re-run, which needs the user's go. Records stay. The Recovery UI in tmux
+`recovery_ui` runs the 00:08 code until someone restarts it. Tests: touched suites pass; of 3,405 tests in the 39
+recovery, CCA, outline and environment files, 147 fail, and 147 of 147 are not caused by this: 146 fail the same way on
+stash `b8e57d6`, and one needed a `writing/` file my test copy leaves out, and passes with it. `check_retained.py` and the
+replay script are in `/home/jongh/recovery_review_1030`.
+
+Composition's writes of this shape, in `project_composition_completion` (`resources/robot/recovery_composition.py`),
+are gone (user go, October 31; uncommitted). For a value the event leaves out it writes nothing. A stated location takes
+where the program ends (the part's place or null on a pick, the destination on a place, the declared value on a named
+move) and the postcondition compares them, so a wrong stated value is refused; `placed` holds only when the event names
+it. A program that moves the robot with the location left out is refused with the fact.
+
+Still open, both from `_locate`'s bounds being too tight to tell a hover from a move away: a plain move that restates its
+location is not checked (`test_a_restated_location_the_robot_keeps_holds_without_locating_its_pose`), and, by reading, a
+hover at the robot's own place with the location left out is refused.
+
+`43f9531d` event 3 now has to state `resource_location: null`. With that one edit its accepted programs compose 5 of 5
+offline (hand replay on edited events, no model run). As saved, `43f9531d` (event 3) and `995e9c70` (event 5) no longer
+load, so `composition_7400ac67…` stops loading too; its record stays. `5836a16f` and `ccf4b54c` load and still stop at
+event 4.
+
+**First outline with no hidden rules (October 31 11:12–11:13, queue item 35, user: "Try part slippage again with opus
+5.5").** `batch_20261031T151213Z_157fd2`, Framework, single-pass, Part slippage, Opus 5.5 medium, frozen at `f61ce76`.
+Draft `a632aa8228a64bbb8fcd59924559ce83`: complete, audit passed with no replay mismatch, hand-off complete, loads for
+composition with all three checks on. 5 events, 4 calls, 8 lookups, 27,809 tokens, 57 s, 2 rewrites. No event has a value
+written by code. ur5e-4 home; ur5e-3 parks KET4 in Buffer zone 1, picks gear_small, places it on the board, takes KET4
+back. The LLM states every location itself: its first refusal was CCA's order rule (KET4 may enter the board only after
+gear_small), its second the new "the stated pose puts ur5e-3 at null, and the event leaves resource_location Buffer For
+Machined parts", and the final outline states no pose and `resource_location: null` on the pick. This is the Part
+slippage outline now; it has no composition yet, and composing it needs the user's go. It is in the experiment records
+only, not in `outline_drafts`, so the Recovery UI does not list it yet.
+
+**The other three scenarios (October 31 11:52–12:41, queue item 36, user: "Do other 3 scenarios").**
+`batch_20261031T155224Z_d79417`, Framework, single-pass, Opus 5.5 medium, 40 turns, frozen at `f61ce76`. No event of the
+two passing outlines has a value written by code; both load for composition with all three checks on.
+
+| Scenario | Draft | Outcome | Events | Calls | Tokens | Time | Rewrites |
+|---|---|---|---|---|---|---|---|
+| Conveyor breakdown | `d402ae2d8b7c42f9904cb6985f80f7cf` | passed | 7 | 5 | 66,738 | 130 s | 2 |
+| ur5e-1 breakdown | `8d537a0739f44dde92c7e9b8fb20895a` | passed | 9 | 21 | 347,299 | 511 s | 17 |
+| Machining | `9b30a713fc434e5da8f57841ddd5c3fe` | `did_not_finish`, 40-turn budget | - | 40 | 609,564 | 2,100 s | 37 |
+
+- Conveyor is the first complete outline on the current checks: ur5e-1 stages KET4 on the M1 tray and goes home, the KMR
+  takes it from a stated base (-5.47, 1.1) to a stated base (-1.12, 1.3), puts it in Buffer zone 1 and returns to Storage.
+  The earlier run's grid search found no base for zone 1; this stated base reaches it. It sits 1 cm from
+  (-1.11, 1.29), which that run saw refused for overlapping the Assembly Station, so its margin is thin.
+- ur5e-1: the KMR takes KET4 from M1 to the M2 tray from a stated base (-3.275, 1.4), then ur5e-2 moves it to the
+  Conveyor. 8 of the 17 refusals are the M2 dock not reaching the tray and 7 are the stated pose against the location,
+  so the new refusals cost rewrites here.
+- Machining stalled on one thing. The KMR stands at no named place in that capture, so nonblocking refused 9 complete
+  17-event outlines: "KMR cannot carry on normal production from where it is". The model added the KMR's return as event 1,
+  where CCA safety refuses it, because M2's job could then finish on its own before KET4; it never tried the return last,
+  which is what `5836a16f` does (event 16). The refusals are true; this is a run outcome, not a code fault.
+- Retained now: Part slippage `a632aa82`, ur5e-1 `8d537a07`, Conveyor `d402ae2d`, Machining `5836a16f` and `ccf4b54c`.
+  Older drafts stay. ur5e-1 and Conveyor need KMR pick and place in composition, and their KMR approach and retreat are
+  not checked. Composing any of these needs the user's go.
+
 ## Study 1 settings for the paper runs — October 29, 2026 — ready, not run (uncommitted)
 
 **Request (user).** Rules in the prompt for the informed settings, neutral names (single-pass may beat
@@ -269,6 +377,66 @@ compose primitives from them.
         composable. Open (user decision; RA side, the other chat's file): a stated robot `pose` in a pick or place end
         state must equal the pose the event's geometry ends at (the calculated retreat_pose), or the outline should not
         state it. The draft would then need a new outline.
+        Offline check of the other chat's pose rule (October 30, hand programs, no model call): with the robot pose
+        removed from events 3-5, all 6 Part slippage events compose, provided event 3 states `part_location` as the
+        JID (the RA also accepts `ur5e-3`, which composition refuses). Still broken or open: a stated pose after a
+        pick following an earlier stated pose ("Starting fact 'pose' conflicts"; the projection must drop pose after a
+        pick or place); ur5e release at an unnamed spot (no calculation path; RA height window under 0.01 mm); ur5e
+        part-free move to a named place other than home (no target without a literal); resource_location stays stale
+        after a pick from an unnamed spot. KMR: no pick, place or stated-pose program composes, dock or not: no
+        event_facts, no part_location or resource_location completion, `_declared_value` cannot read the list
+        `base_pose`, `place_targets` requires a dock, the RA witness is not handed on, KMR evidence keeps stale part
+        poses, and a bare grasp or a release in the air passes when part_location is not stated (fixes 5 and 7).
+        KMR worked example (October 30, offline, synthetic held state, hand program, hooks only in a scratch script; no
+        primitive changed, no model call): the belt release that ran live on October 15, base (-3.0, -0.36, -pi/2), part
+        (-3.0, 0.40, 1.015), passes 7 of 7 through the real validator, receiver `('Conveyor', 'after loading_position_1')`
+        from `observed_receiver`; today's owner check stops at step 2 ("KMR is not docked"). The hooks: read list
+        `base_pose` on x, y, yaw; judge arm reach from the current base (the check's chain root stays at the captured
+        base); publish KMR calculations as event_facts through the `part_pose` path; a KMR completion that requires
+        target and retreat and takes the part's location from where it rests. M2 staging tray by the KMR: the RA accepts
+        it (one work point), but no free base reaches the 1.16 approach and retreat (356 candidates; best anchor distance
+        0.65 m, versus 0.51 m at the belt; the bases that would work overlap `ur5e-2 work area`). The same pipeline
+        refuses it at step 3. With a stronger search (40 random seeds, 1 cm steps) the highest gripper height over the
+        tray is z 1.15 at (-3.25, 1.35, pi/2) and z 1.09 at the 0.1 m grid's closest base, so the KMR misses the calculated
+        1.16 by 1 cm at nearly full stretch; the minimum lift alone would be z 1.095. Reach only, no path or collision
+        check. ur5e-2, M2's `handling_robot`, reaches the tray at every height tested and composed that place by hand.
+        Open (user decision; other chat's file): the RA's KMR reach should cover the approach and retreat poses from
+        `release_targets`; the 0.1 m grid turned the earlier NEEDS_CONTEXT into an acceptance on the release point alone.
+        Composing from lookups: arms so far yes (Opus 4.7 composed events 1-2; its event 3 pick was right). KMR no: no
+        lookup gives `part_pose`, the templates show only the dock path with `$state`/`$ref` values a program cannot bind,
+        the `compute_place_targets` card lists target, approach, retreat, destination and before_turn but not transport
+        or waypoints, and the composition prompt's target wording is arm-only.
+        `part_pose` for the KMR (October 30, offline scratch calculation): the values are recorded, only the step is
+        missing. Nominal dock places read the machine's fixture; `part_pose` came from no-validation event params; the
+        arms' `_destination_geometry` is not used by the KMR check and has no Conveyor entry. Event destination to recorded
+        spot (`staging_pose`, `workholding_pose`, zone `pose`, loading-position region centre plus `surface_height`, Storage
+        slot) round-trips through `observed_receiver` for all nine destinations tried. KMR reach of approach, target and
+        transport, 10 nearest free bases: yes for M1, M2, Conveyor loading positions 1 and 2 and Storage; no for both
+        staging trays and Buffer zones 1 and 4. A mid-belt spot such as October 15's (-3.0, 0.40) has no recorded point, and
+        a KMR `pose` is its base, so the outline cannot state one. After the other chat's fixes (uncommitted), `d491e1fd`
+        no longer replays (event 3 refused, as intended). Composition now mirrors the projection's pick-location rule
+        (user go; `robot/recovery_composition.py`, uncommitted): a stated location wins; otherwise a part at no named
+        place gives null, the part's place gives that place when it is in the robot's `resource_location` domain, and
+        anything else, such as a holder by JID or name, keeps the location. With no stated pose on events 3-5, all 6
+        Part slippage events compose by hand on the current checks.
+        **Part slippage composed end to end (October 30-31; user go; Opus 5.5 medium; retained result).** Outline
+        `draft_43f9531d6df94a17be2d9534b814ec16` (experiment batch `batch_20261031T033918Z_2a4861`, copied to
+        `outline_drafts` so the Recovery UI lists it), composition `composition_7400ac67400344d3a48a472fe8a4a8b8`: 5 of 5
+        events, each accepted on the model's first program, no rejections, 12 calls, 355,979 tokens, 563 s. Programs
+        bind only calculated `event_facts`. Not established: CCA of the composed trace, collisions and paths, Gazebo
+        execution. The Recovery UI shows it: Load now restores a draft's finished composition with no model call when
+        the replay gives the same outline (`primitive_composition._saved_composition`), and the page's missing
+        `datetime` import, which crashed it for any capture with checked drafts, is fixed. To look at: the check
+        requires release at `target_pose` (pre-insert), while the nominal program seats to `insert_pose` first.
+        Lookup size is open, by the user's choice, until composition work is done: `recovery_des_model` is about 83% of
+        each program-writing call's served context, and no program bound a value from it.
+        Failed attempts deleted after diagnosis (October 31): `composition_076ff11f…` (Part slippage `d491e1fd`, Opus
+        4.7, queue item 27, event 1 of 6; cause and fixes above), `composition_a6df5828…` (same draft, queue item 29,
+        events 1-2 of 6; event 3's stated end pose, closed by the outline pose rule) and `composition_5f8157a7…`
+        (Machining `5836a16f`, Opus 4.7, queue item 27, stopped on event 1's `job_id`, below; next step: fix 6). Their
+        drafts stay in `batch_20261030T065217Z_4db0aa`. Deletion list:
+        `recapture_v2_20261015/failed_compositions_20261031_deletion_list.json`. The four attempts marked kept above
+        stay.
       - Machining event 1 (`pause_job` on M2): the model bound `job_id` to the part name; the job id
         (`environment_23`) is only in `/resources/<M2>/resource_evidence/processing_observations/active_job`, which no
         prompt text, contract card or snapshot points to (M2's snapshot shows `active_work` null). It asked for
@@ -277,6 +445,128 @@ compose primitives from them.
       finding could list the calculated fields that exist; the composition prompt's assembly-slot sentence could say
       it applies only to an `assembly_slot` place target; the `pause_job`/`resume_job`/`stop_job` card could name the
       job record path for `job_id` (fix 6, curated lookups). Re-running needs the user's go (the go was "once").
+    - **KMR composition, the legacy way (October 31; user go; uncommitted; no paid run yet).** The LLM reads the KMR's
+      nominal functions and adapts them. New `recovery_framework/kmr_composition.py`: each accepted step carries the
+      tool pose, base and joints forward, a base move carries the arm with it, a transfer must happen at the owner's
+      calculated target, and completion gives custody and the receiving slot. Calculated targets are saved in
+      `event_facts.pick_targets.<part>` and `.place_targets.<part>` under the nominal names. There is no exact retreat
+      for the KMR, only a motion away. Nothing is written for a value left out: a stated location is compared with the
+      dock the base reached, and a move with the location left out is refused with the fact. `kmr_recovery.py`:
+      `compute_place_targets` reads the place from the event's `part_location` through the arms' own geometry, so no
+      `part_pose` lookup is needed; arm reach follows the current base; picks work away from a calibrated spot. Stated
+      KMR `pose` reads back from the recorded quaternion, up to rounding and full turns. A part an accepted program
+      put down is now seen by every resource, which fixes the second-robot pick for this path. `/resources/<KMR>/docks`
+      is a lookup. The composition prompt has a KMR paragraph; the arm prompt is unchanged. No primitive declaration
+      changed.
+      Two bugs only the real loop showed: the evidence fingerprint included facts added to the prefix (now
+      `recorded_facts`), and every event stored the KMR's whole evidence, which ran the 7 GB machine out of memory (now
+      only what changed).
+      The LLM chooses no height (user decision, October 31; "How do I have llm not propose 7cm"). It points at the
+      calculated approach and retreat, and the KMR must reach the calculated retreat exactly, as the arms must. A
+      `clearance` pose was added and removed the same day. Do not change the height rule in `release_targets`: at
+      Storage it keeps the approach at z 1.16 against 0.74 for release + 7 cm, and all nominal KMR places use it.
+      **RA approach and retreat (user go, October 31; uncommitted).** `reach_area` takes `transfer` and, for a mobile
+      resource, requires the owner's own heights (`kmr_recovery.transfer_heights`) from the same base as the spot,
+      inside the base search. Arms are not covered: their heights come from the pick's context, which an outline does
+      not have, so composition checks them. No base reaches z 1.16 over the M2 tray or Buffer zone 1 (234 and 213
+      candidates tried), so `draft_8d537a07` (event 5), `draft_995e9c70` (event 5) and `draft_d402ae2d` (event 6) no
+      longer load; their records stay. `a632aa82`, `5836a16f` and `ccf4b54c` load with all three checks on. An
+      independent review (7 agents, 1.57M tokens, read-only) found no RA blocker.
+      **ur5e-1 composed end to end (October 31; user go; Opus 5.5 medium; retained result).** Outline
+      `draft_6e1992fd19514c13887962ffab06639f` (`batch_20261031T220148Z_211393`, 16 events, 15 calls, 250,215 tokens, no
+      code-written value). Since the KMR reaches M2's fixture but not its tray, the LLM pauses M2's job, moves RGOCG4
+      to the tray, hands KET4 through M2 to ur5e-2 for the Conveyor, then reloads RGOCG4 and resumes. Composition
+      `composition_5d5fc46ceb89408580b39effa233d5c2`: all 16 events, 37 calls, 674,640 tokens, 1,789 s. Events 4, 9 and 16
+      were rejected once for an extra `part_name`, and the model fixed them. Every pose binds a calculated value.
+      Built for it: tool pose after a named move from the recorded joints (`_named_pose`), machine slot height from
+      `workholding_pose`, the Conveyor place (`_destination_geometry`, `_stated_zone_origin`, `_load_onto_belt`, which
+      refuses a belt that is not idle and available or is reserved for another resource), the job record path in the
+      prompt for job primitives. Not established: CCA of the composed trace, collisions and paths, Gazebo execution, a
+      KMR pick away from Storage in Gazebo. Event 9 goes to the target with no approach step, as the nominal
+      `place_release` reads; composition does not require one. Reviewer findings left for later are in
+      `/home/jongh/recovery_review_1030/composition_parity_20261031/kmr_review_result.json`.
+      **Composition prompt caching (November 1; user request "Can you also cache opus like you did for gpt?"; code in
+      place, no model call has used it).** The ur5e-1 composition read 0 of its 643,573 input tokens from cache: nothing
+      marked the composition prompt, and event-specific text came before the fixed text, so calls shared only 2-6k
+      characters. `_render_primitive_generation_prompt` now states the fixed resource text first, then
+      `Served Context: resource model`, then the event's served context, then the changing sections. No wording changed
+      except the new header; the outline prompt is untouched. `_cached_user_content` marks up to three cache points
+      there (`_STABLE_SEAMS`). Estimate from the 37 recorded prompts rebuilt in the new order, on the recorded call times
+      with the 5-minute cache: 364,143 tokens read, 193,220 written, 86,210 uncached. This is not a measurement: the first
+      Opus composition on this code reports the real `cache_read_input_tokens`. `recovery_des_model` was 496,687 of the
+      input tokens, in 11 calls. A replay through the real loop did not finish in 1,700 s and gave no number. Opus 5.5
+      outlines already read from cache (ur5e-1 outline: 122,205 tokens). Snapshot `wt_nov1` predates this change;
+      `wt_conv` has it.
+      **Belt advance in composition (November 1; user go "ok fix it"; no model calls; uncommitted).** A belt event stopped
+      earlier than the October 31 review recorded, at `detect_parts`: `advance_conveyor` declares only `resource_state`,
+      because the runtime binds where each resident ends (`next_locations`), so `derive_primitive_union` found no event
+      for a stated `part_location.<part>`. No primitive and no declaration changed. New
+      `recovery_framework/transport_composition.py`, on the KMR pattern: `check_transport_primitive` reads the guards of
+      the resource's own `advance_conveyor` or `advance_part` and takes over the speed limit and the resident geometry
+      check; `advance_transport_program` keeps what `detect_parts` observed and calculates with the runner's
+      `_shared_displacement` after `conveyor_advance_parameters` accepts the move; `project_transport_completion` moves
+      each part's x. `validate_recovery_primitive_composition` reads the declared `set_from_step` effect, so
+      `move_relative` needs an earlier `compute_transport_targets`. The prompt gets one sentence for transports. Under the
+      hidden-rules section: the destinations are the event's; a resident the event leaves out is refused, because the belt
+      moves it too; a program with no move writes no location; Buffer takes both zones from its declared `advance_part`
+      and the event has to state them. A part leaving the belt for Buffer For Machined parts is refused: no program is
+      composed for it yet. Hand programs through real composition, no model call: `draft_5836a16f` events 1-8 and
+      `draft_ccf4b54c` events 1-7 pass, including ur5e-2's pick where the belt left the part.
+      **Next stop, not fixed: `start_job` (`draft_5836a16f` event 9, `draft_ccf4b54c` event 8), `NEEDS_CONTEXT:
+      part_name`.** `MachineJobs` reads `part_name`, `correct_part_present` and `robot_access_clear` from the observation.
+      A new job has none, and `_machine_access_projection` runs only for projected physical evidence, which composition
+      does not build. `resume_job` passed in ur5e-1 only because a paused job keeps its observations.
+    - **Composition against the outline rules (read-only review, October 31; no model calls, no code changed).**
+      Prompted by the outline chat's rule changes and its findings A and B. Evidence:
+      `/home/jongh/recovery_review_1030/composition_parity_20261031/` (`parity_result.json` holds all 27 findings and
+      the KMR copy list; scripts under `parity_review/`). 5 findings were re-run by a second reviewer, marked "re-run"
+      below; the other 22 rest on one reviewer.
+      - Load with all three checks on, as `composition_readiness` requires: `draft_43f9531d`, `draft_995e9c70`,
+        `draft_5836a16f` and `draft_ccf4b54c` reproduce. `draft_60687eb9` and `draft_b1ecbb8d` are refused by
+        nonblocking; the outline chat's "still load" came from `check_retained.py`, which runs it off. No Conveyor
+        breakdown draft loads.
+      - Location after a pick, a place and a one-event pick-and-place agrees on both sides, and `draft_43f9531d`
+        matches on every event. A destination outside the robot's location domain is refused by the place branch
+        while the outline keeps the location; no real destination reaches that today.
+      - Machining stops (`draft_5836a16f`, `draft_ccf4b54c`), in order. Event 4: every robot place on the Conveyor
+        stops at `compute_place_targets` (re-run). A fix needs three sites: a belt target in `_destination_geometry`,
+        the stated slot in `calculate_recovery_place_target`, and a belt custody path in
+        `project_composition_completion` that writes `loading_position_N`. Next, the belt advance stops at
+        `compute_transport_targets`. Next, a machine slot place stops on three stacked support faces (re-run):
+        reading the machine's recorded `workholding_pose` z as `support_surface_height` in `_destination_geometry`
+        fixes it in memory with no new declaration. Next, resume after a reload: a stated `loaded` contradicts the
+        paused job at `environment_recovery.py` lines 536-538 (re-run).
+      - ur5e-1 stops (`draft_995e9c70`, 10 events). Event 1 composes by hand; events 2-6 need KMR completion (fix 5 and
+        7). Event 7 is a plain ur5e-2 move stating `M2 staging tray`, the shape `_locate` in
+        `recovery_composition_owner.py` refuses on a hover pose (re-run on `draft_b1ecbb8d` event 1): it tests the wrist
+        against bounds drawn around the surface, and Exit and 3D Printing Station have no region. Testing x and y only
+        clears it but drops the only height limit, so that fix is not ready. Event 9 is the Conveyor place above.
+      - Finding A, `resource_state`. `grasp_part` declares `picked` and `release_part` `idle`; the place branch of
+        `project_composition_completion` then writes `place_insert`'s declared `placed` over that, whatever the event
+        states. Hits: `draft_ccf4b54c` event 7 (behind event 4), and a place that states `idle`, as `draft_b1ecbb8d`
+        event 5 does. Recommended, awaiting the user's go: write `place_insert`'s `resource_state` only when the event
+        states that value. In memory the accepted composition stays 5 of 5 with equal fingerprints. The outline chat's
+        proposal, setting the value back from `recovery_snapshot`, makes composition's state false and its evidence
+        contradict itself. An unstated place from a carried `picked` stays refused after the guard; that refusal is
+        true. Under the October 31 rule ("No hidden rules in recovery events") the answer to the value left out is an
+        RA refusal with the fact, not code filling it in.
+      - Finding B is real but narrow: only a hold from the capture restated by name, stopped at the postcondition; 0
+        of 917 saved events. Left alone.
+      - KMR. Two rows of the outline's `_base_location` disagree with the RA's own witness: a tray place gives M2 with
+        the witness 1.082 m off M2's dock (`draft_995e9c70` event 5), and a pick from another gripper keeps Storage with
+        the witness on M1's dock. Under the October 31 rule the KMR path copies neither `_moved_without_pose` nor
+        `_base_location`, nor the place branch's `placed` write: it checks the location the event states. In
+        `parity_result.json`, the `kmr_must_copy` rows that derive a location and the review's `pick` overlay, which
+        would add a derived location write, are void.
+      - Single-reviewer items to look at when composition reaches them: a program ending in the named home move
+        leaves composition at home while an event stating only `idle` leaves the outline elsewhere (`draft_60687eb9`
+        event 1), and nothing compares the two end states on unstated fields, so nonblocking proves the outline's
+        state, not the composed one; after a named move no pick target can be calculated, because
+        `move_to_named_pose` leaves `current_pose` unknown; a second robot's pick reads the part's capture pose, not
+        where an accepted place left it (re-run; hand-written outline only); a machine event that leaves
+        `current_process` unstated; a grasp stated only as `resource_state: picked` still reaches the `part_location`
+        start stop (0 saved events). One RA rule, that an event states every declared variable its primitive changes,
+        would close three of these, at the cost of refusing `draft_60687eb9` event 1 and `draft_b1ecbb8d` event 3.
     - **Receiving geometry gaps (found October 30, not fixed).** Event 3 (ur5e-2: the round RGOCG4 onto the M2
       staging tray) stops at "Supported placement requires recorded rigid box geometry" (the support calculation
       needs a box; round parts are not boxes). Event 4 (ur5e-1: KET4 onto the Conveyor) stops at "The proposed
@@ -1308,13 +1598,135 @@ value; otherwise it is refused with the fact. No primitive declaration changed, 
     - Verification: 726 pass across the 11 touched suites; the 6 `test_nominal_resource_des` failures also occur
       without these changes. Replay of 64 drafts on the code before the review fixes: no errors, 12 pass RA + CCA
       safety. The replay on the final code was cut off by a session restart and must be rerun before any batch.
-  - Open (October 30): outline `pose`. It is not calculated: the LLM copies recorded numbers and adds offsets, code
-    stores them (`_locate_by_pose`), and the RA checks reach only. `d491e1fd` events 3-5 state part heights as wrist
-    poses (fingertips 0.218 m below). Proposed, awaiting the composition chat and the user: `pose` is stated only
-    when nothing else says where (not on a pick, nor at a named place; kept for a release or a move at an unnamed
-    spot), plus a fingertip check on stated poses and the "last stated/measured pose" label after a pick or place.
-    `d491e1fd` without those three poses passes RA, CCA safety and nonblocking; composition not tried. Queue item 28
-    (Framework, incremental x 4 scenarios, Opus 4.7, once) is on hold for this.
+  - Second round of fixes (October 30, user: "just apply the fixes"; uncommitted, not yet run with an LLM):
+    - Outline `pose` is not calculated: the LLM copies recorded numbers and adds offsets, code stores them
+      (`_locate_by_pose`), and the RA only checked reach, so `d491e1fd` events 3-5 stated part heights as wrist poses
+      (fingertips 0.218 m below the wrist).
+    - RA `pose_from_calculation`: a stated pose is refused where the acting resource's declared calculation gives the
+      target: an arm's pick (`compute_pick_targets`, part position known), an arm's place at a place with recorded
+      geometry (`compute_place_targets`), a named posture, a mobile base at a dock. Everywhere else `pose` stays. The
+      rule follows the composition chat's review; it reads declarations only, no scenario, part or robot name.
+    - RA `gripper_blocked`: a stated arm pose may not put the gripper (wrist to fingertips) or a held part whose grasp
+      is recorded through a recorded shape. Exact boxes refuse; shapes known by bounds leave it unresolved. The held
+      part's box stops the recorded contact layer above its bottom, so a flush part is not refused. Not covered:
+      moves inside a composed program, and a tilted held part is judged by its axis-aligned box.
+    - Projection `_moved_without_pose`: a move that states no pose leaves `pose` not stated (no stale value in the
+      prompt, lookups or `expected_start_state`; this replaces the "last stated/measured pose" labels). A pick that
+      states no location: a stated location wins; null if the part was at no named place; the part's place if it is a
+      declared value of the resource's `resource_location`; otherwise unchanged. Composition mirrors this rule.
+    - `product_location` is dropped from the outline stage's declarations with `approached_part`: it is the finished
+      product's location on the Exit's model, and no recovery primitive sets it.
+    - `llm_agent`: a call whose connection failed gets at least 3 tries, also with `max_attempts=1`; other errors keep
+      the one-attempt rule. `provider_requests` in the draft and Experiments row counts every try. The tokens of a
+      lost try are not recorded.
+    - A zero or non-finite stated quaternion is NEEDS_CONTEXT instead of raising.
+    - Independent review: stopped by the 22:34 reboot with 3 of 4 reviewers done and no skeptic verdicts. Their bugs in
+      this work are fixed (KMR move refused for where its named part sits; unknown place turned INFEASIBLE; holder
+      recorded by name read as a place; KMR tray pick writing a value outside its domain; lookups still serving the
+      captured pose; flush held part refused; refusal text not stating a fact). The projection reviewer never
+      reported; its checks were redone by hand on a real capture.
+    - Retained outlines after these fixes: Machining `af6f05b5` and `5836a16f` pass; Part slippage `fc27a784`,
+      `d0af11b3` and `d491e1fd` are refused at event 3; Conveyor `1457af1c` at event 5; ur5e-1 `fc6db689` at event 1.
+      None was deleted; each stays until a verified replacement loads. Part slippage needs a new outline (the user
+      gave the composition chat a go for one, Framework single-pass, Opus 4.7, then composition).
+  - First run on these fixes (October 30 23:23–23:28, queue item 30): `batch_20261031T032356Z_f5518b`, Framework,
+    single-pass, Part slippage, Opus 4.7 medium, frozen at stash commit `5f5cb3d`. Draft `e965628d…`: `draft_incomplete`
+    on turn 14 (14 calls, 109,902 tokens, 8 lookups, 10 rewrites; 4 RA, 5 physical, 2 CCA safety refusals). Not an LLM
+    failure: the reply was a valid `need_context` after one sentence of text, and `_parse_structured_json_text` returned
+    the first JSON value in it, the list `[0.971, 1.121]`. Fixed: it now skips anything but an object (test built from
+    that reply). The plan was right (KET4 to the Buffer, ur5e-4 home, ur5e-3 picks and places gear_small), and the
+    refusals taught the fingertip offset. Two things slowed it: turn 13 misread "and the event also states pose" and
+    kept a pick pose, so the refusal now reads "<x> gives <robot>'s target, so this event takes no pose; it states
+    {...}"; and it read `pose_relations` `envelopes.z_range_m`, which is in the part's frame, as a limit on the wrist.
+    The envelope wording is unchanged (prompt freeze). Next step: re-run on the user's go; composition waits for a
+    complete draft. The record stays (experiment records are never deleted).
+  - Second run (October 30 23:39–23:40, queue item 31, user: "try with opus 5.5"): `batch_20261031T033918Z_2a4861`,
+    Framework, single-pass, Part slippage, Opus 5.5 medium, frozen at stash commit `081dfbd` (with the reader fix and
+    the reworded pose refusal). Draft `43f9531d…`: complete, audit passed, nonblocking NONBLOCKING, hand-off complete;
+    5 events, 4 calls, 11 lookups, 34,271 tokens, 59 s, 1 rewrite, 1 RA refusal. No event states a pose: ur5e-4 home,
+    ur5e-3 parks KET4 in Buffer zone 4, picks gear_small, places it on the board, takes KET4 back. This is the new Part
+    slippage outline; the composition chat composes it once with Opus 5.5.
+  - Final review of this work (October 30-31, `wf_79259b8f-438`; uncommitted). Nine findings held up and are fixed.
+    The Conveyor run (queue item 33) started before them:
+    - Retry correction: `anthropic` 1.17.0 is built on `httpx2`, and a reply cut off mid-stream raises `httpx2` errors
+      unwrapped, so the "at least 3 tries" above did not reach Claude's dropped streams (the test faked `httpx`). The
+      Claude guard now names `httpx2.TransportError`; `openai` 1.109.1 uses `httpx`, so the GPT guard keeps that. With
+      the real SDK against a local server that drops the stream, the call now answers on the second send.
+    - `pose_from_calculation`: only a place sends a KMR to the stated `part_location`, so restating where a part
+      already is keeps the pose; a pick from a place with no recorded geometry stays unresolved instead of "takes no
+      pose", since nothing calculates that target; a hand-off into a gripper gets no such refusal.
+    - `gripper_blocked`: the held box skipped the event's named part instead of the held part (`overlaps(moving=...)`).
+    - `_moved_without_pose`: a place that states no location takes the destination when it is a declared value of
+      `resource_location`, which is what composition does; a stated value that is not a string no longer crashes it.
+    - `/geometry` still served a moved mobile base's captured `base_pose_xy_yaw`; `_geometry_now` drops it.
+    - Refuted by the skeptics: the test-gap items, the mirror of a stated location, the RA orientation fallback.
+  - Third run (October 30-31 23:43–00:28, queue item 33, user: "can you tehn do conveyor breakdown next"):
+    `batch_20261031T034340Z_98efff`, Framework, single-pass, Conveyor breakdown, Opus 5.5 medium, frozen at `081dfbd`.
+    Draft `7259d04a…`: `did_not_finish` at the 40-turn budget (40 calls, 680,859 tokens, 44 min, 17 lookups, 36
+    rewrites; 21 RA and 16 physical refusals, no CCA refusal). No code fault: ur5e-1 parks KET4 on the M1 staging tray
+    and the KMR carries it toward the Buffer for ur5e-3. 20 of 37 refusals are "no candidate base pose gave KMR a
+    configuration at Buffer For Machined parts zone_1_part", and the model kept moving the base, not the destination.
+    Furthest refusal: event 7 of 10. The record stays. There is still no complete Conveyor outline on the current code.
+  - Load check and final independent check (October 31, before the ur5e-1 run):
+    - `replay_checked_draft` and `_saved_composition` compare `expected_start_state` and `condition_changes` with the
+      saved draft. A `pose` row I had added to `condition_changes` stopped `draft_43f9531d` and its composition from
+      loading, so it is gone: a pose left not stated stays in `diagnostic_unknown_owner_fields`. A test guards this.
+      Any change to those two fields orphans retained results, so run this load check before freezing code for a run.
+    - Decided: the place rule stays, so Machining `af6f05b5` is now review-only. Its event 7 puts KET4 into M2 and its
+      saved state keeps ur5e-2 at the M2 staging tray, while the rule and composition's `place_insert` give M2. Machining
+      `5836a16f` and `ccf4b54c` still load. `af6f05b5` and its kept attempt `composition_1ea7da0b…` stay.
+    - `wf_52ac4586-732`: 11 findings; the six most severe each went to a skeptic who had to reproduce it: 5 confirmed,
+      1 refuted. The provider and records reviewer found nothing. Fixed:
+      - `pose_from_calculation`: for a KMR place, a stated `part_location` wins over the slot's owner, so a base stated
+        for a tray is not refused with "M2 gives KMR's target" (no orientation reaches the tray from the M2 dock).
+      - `unstated_part_location`: a pick that states `held_part` but no `part_location` is refused too. Unstated, the
+        part stayed at its old place: composition stopped at the next start check, and a later release wiped that
+        place's record. Opus 4.7 left it out of 25 of 38 picks, Opus 5.5 out of none.
+      - `_base_location`: a mobile base (declared `pose.locates_resource`) working at a place outside its
+        `resource_location` stands at no named place, unless the part goes into a slot of a resource it does name;
+        another resource's gripper says nothing. Before, the KMR stayed at a dock it had left, 1.82 m from the work
+        point, and the nonblocking check passed a false hand-off. Composition must copy this when it builds the KMR
+        completion path.
+      - `_geometry_now` also hides the captured base pose after a stated-pose move.
+      - Not sent to a skeptic, proved by test: a `neighbor_end_state` that is not resources with values is refused; it
+        used to raise and end the attempt. No saved event has this shape.
+    - Told to the composition chat, not changed here: a robot event that leaves `resource_state` unstated stops
+      composition at the next start check; a restated hold by name fails its exact compare (0 of 907 saved events);
+      the Conveyor receiving geometry gap. The chat's review corrected the first: `place_insert` writes `placed` over
+      `release_part`'s `idle` whatever the event states, so the fix proposed here is withdrawn; see "Composition against
+      the outline rules" above. Left as they are: a KMR pose exactly on a dock with no stated location passes (no saved
+      draft has it); a text pose with every check off keeps the captured pose (the RA refuses it).
+    - Results: touched suites 482 passed, 1 old failure; all 66 drafts replay with no errors and the same 9 pass; one
+      draft already refused at event 1 now gets the `part_location` refusal. `draft_43f9531d` and
+      `composition_7400ac67…` load with no differences. Frozen for the ur5e-1 run at stash commit `b8e57d6`.
+  - Fourth run (October 31 02:31–02:33, queue item 34, user: "after conveyor breakdown , also run ur5e-1 breakdown"):
+    `batch_20261031T063111Z_acb749`, Framework, single-pass, ur5e-1 breakdown, Opus 5.5 medium, frozen at `b8e57d6`.
+    Draft `995e9c702830454493e3145abe2d2f1d`: complete, audit passed with no replay mismatch, nonblocking and hand-off
+    complete, and it loads for composition; 10 events, 4 calls, 12 lookups, 38,329 tokens, 104 s, 1 rewrite after 1 CCA
+    refusal (KMR in M1.side_a with ur5e-1 not yet clear; the rewrite sends ur5e-1 home first), no RA refusal. ur5e-1
+    home; KMR takes KET4 from M1 to the M2 staging tray and goes back to Storage; ur5e-2 moves it to the Conveyor and
+    goes home. This replaces `fc6db689` as the ur5e-1 breakdown outline. `fc6db689`, which no longer replays, stays
+    until the replacement has a composition. Not composable yet: it needs a KMR pick and a KMR tray place, and the M2
+    tray rests on the open KMR approach and retreat item below. It is in the experiment records only, not in
+    `outline_drafts`, so the Recovery UI does not list it yet.
+  - Correction and open point after the composition chat's review (October 31):
+    - The load check above ran with nonblocking off, but `composition_readiness` needs all three checks. With all
+      three on, `43f9531d`, `995e9c70`, `5836a16f` and `ccf4b54c` load (checked here too). The older ur5e-1 drafts
+      `60687eb9` and `b1ecbb8d` do not: the declared completion is refused, the same on `081dfbd` and the final code,
+      so these fixes did not cause it. `check_retained.py` now runs all three.
+    - Open, to settle with the KMR approach and retreat item: `_base_location` gives two values the RA's witness
+      contradicts. A tray place keeps M2 although the witness is 1.082 m off M2's dock (`995e9c70` event 5, witness
+      (-3.3, 1.3)), and a pick from another gripper keeps the old location although the witness is on M1's dock.
+      Superseded recommendation: taking the location from the witness is still code deciding it, so the user rejected
+      it ("this is a rule that is hard coded. why cant llm propose it"). See "No hidden rules in recovery events" at
+      the top: the LLM states the location and the RA only compares it. Not built; `995e9c70` event 5 leaves the
+      location out, so that outline needs a re-run either way. Composition will not copy these two values.
+    - Still accepted, 0 saved events: a grasp stated only as `resource_state: picked`, and `part_location` stated as
+      the resource itself with no `held_part`. Both stop later in composition. Left as they are.
+  - Open, for the user: the RA's KMR place check proves only the release point. With the 0.1 m grid the M2 tray is
+    accepted, but the composition chat found no base reaches the calculated approach and retreat at z 1.16 (best z 1.15
+    at (-3.25, 1.35, pi/2), reach only). Checking those poses in `reach_area` would refuse the tray and send the
+    outline to ur5e-2. Not built; asked of the user.
   - Known limit: the KMR cannot set a part down at an unnamed spot, because its `pose` is its base (`pose_place`
     leaves it unresolved). No saved outline needs it: all 30 KMR releases name a place, and the 7 others that name
     none are 4 gripper moves with no part and 3 named slots. Recommended to the user to leave it as is; handling it

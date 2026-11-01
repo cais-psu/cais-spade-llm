@@ -134,9 +134,11 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
         variables = row["recovery_des_model"].get("state_variables", {})
         if "active_job" in variables:
             variables["active_job"]["private"] = True
-        # Only the KMR's nominal Storage pick sets approached_part and no recovery primitive does, so the outline
-        # stage does not declare it (user decision, 2026-10-30). Its recorded value stays for the checks.
-        variables.pop("approached_part", None)
+        # Only normal production sets approached_part (the KMR's Storage pick) and product_location (the finished
+        # product's way to the Exit) and no recovery primitive does, so the outline stage does not declare them
+        # (user decision, 2026-10-30). Their recorded values stay for the checks.
+        for name in ("approached_part", "product_location"):
+            variables.pop(name, None)
         for declaration in variables.values():
             if "active_job" in declaration.get("description", ""):
                 declaration.pop("description")
@@ -432,6 +434,8 @@ class OutlineDraft:
                 if key not in {"messages", "system", "response_format", "tools"}}
             self.record["usage"] = []
             requests = sorted(self.directory.glob("recovery_outline/requests/*/*_request.json"))
+            # Every try is a request: a call whose connection failed sends more than one.
+            self.record["provider_requests"] = len(requests)
             self.record["llm_turns"] = [{"turn": r["turn"], "stage": r["stage"],
                 "request": str(path.relative_to(self.directory))}
                 for path in requests for r in [json.loads(path.read_text(encoding="utf-8"))]]

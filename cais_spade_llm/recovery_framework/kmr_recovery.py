@@ -14,6 +14,7 @@ from cais_spade_llm.resources.kinematic_reach import (  # noqa: F401
 from cais_spade_llm.resources.kinematic_reach import (
     bounded_joint_search as _calculate_cartesian_joints,
 )
+from cais_spade_llm.resources.kinematic_reach import pose_matrix, with_root
 
 
 def _vector(value, length: int) -> bool:
@@ -23,6 +24,35 @@ def _vector(value, length: int) -> bool:
 
 def _pose(value) -> bool:
     return _vector(value, 7) and math.isclose(sum(item * item for item in value[3:]), 1., abs_tol=1e-5)
+
+
+def _pose_list(value):
+    """Return a pose as ``[x, y, z, qx, qy, qz, qw]``, whether recorded so or projected by its named fields."""
+    if isinstance(value, dict):
+        return [value.get(axis) for axis in ('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw')]
+    return value
+
+
+def kmr_docks(scene: dict) -> dict[str, list[float]]:
+    """Return the KMR's declared docks as ``[x, y, yaw]``, by the place each belongs to."""
+    rows = {**scene, **{row.get('resource_id'): row for row in scene.get('machines', [])}}
+    return {name: [row['KMR_docking_pose'][0], row['KMR_docking_pose'][1], row['KMR_docking_pose'][5]]
+            for name, row in rows.items() if isinstance(row, dict) and _vector(row.get('KMR_docking_pose'), 6)}
+
+
+def kmr_place_at(scene: dict, base_pose: list) -> str | None:
+    """Name the place whose declared dock a base stands on, for a part's own dock too; None when it stands on none."""
+    from cais_spade_llm.recovery_framework.kmr_gazebo import _at_dock
+
+    rows = {**scene, **{row.get('resource_id'): row for row in scene.get('machines', [])}}
+    for name, row in rows.items():
+        if not isinstance(row, dict):
+            continue
+        docks = [dock for dock in (row.get('KMR_docking_pose'), *(row.get('KMR_pick_docking_poses') or {}).values())
+                 if isinstance(dock, list)]
+        if any(_at_dock(base_pose, dock) for dock in docks):
+            return name
+    return None
 
 
 def recorded_scene_payloads(observations: dict, scene_capture: dict) -> dict:
@@ -158,9 +188,40 @@ def pickup_docking_pose(scene: dict, location: str, part: str) -> list:
     return [dock[0], dock[1], dock[5]]
 
 
+def pick_heights(scene: dict, part: str | None, location: str | None, target_z: float) -> dict[str, float]:
+    """Return the tool heights a pick at ``target_z`` comes in at and first lifts to."""
+    config = scene['KMR']['task_execution']
+    rows = {**scene, **{row.get('resource_id'): row for row in scene.get('machines', [])}}
+    calibrated = (rows.get(location) or {}).get('KMR_pick_approach_clearance_m') or {}
+    return {'approach': target_z + calibrated.get(part, config['approach_clearance_m']),
+            'clearance': target_z + config['minimum_pick_lift_m']}
+
+
+def release_heights(scene: dict, target_z: float) -> dict[str, float]:
+    """Return the tool heights a release at ``target_z`` comes in and leaves at.
+
+    The arm stays at its carrying height until it is over the spot, which a low one such as a Storage slot needs.
+    """
+    config = scene['KMR']['task_execution']
+    approach = max(target_z + config['minimum_pick_lift_m'],
+                   config['cartesian_waypoints']['transport_tcp_position_in_base_frame_m'][2])
+    return {'approach': approach, 'retreat': max(target_z + config['release_offsets_m'][0][2], approach)}
+
+
+def transfer_heights(scene: dict, transfer: str, part: str | None, place: str | None, part_z: float) -> list[float]:
+    """Return the tool heights above a part at ``part_z`` that a ``pick`` or ``place`` of it needs, highest first."""
+    target_z = part_z + scene['KMR']['task_execution']['grasp_height_m']
+    heights = pick_heights(scene, part, place, target_z) if transfer == 'pick' else release_heights(scene, target_z)
+    return sorted(set(heights.values()), reverse=True)
+
+
 def pick_targets(scene: dict, part: str, observed: list, current_pose: list,
-                 base_pose: list, initial: list | None = None, *, location: str = 'Storage') -> dict:
-    """Calculate pickup targets from the same facts used by the execution owner."""
+                 base_pose: list, initial: list | None = None, *, location: str | None = 'Storage') -> dict:
+    """Calculate pickup targets from the same facts used by the execution owner.
+
+    With no ``location``, the part lies somewhere the KMR has no calibration or dock for, such as a staging tray,
+    and the targets come from its observed pose alone.
+    """
     from cais_spade_llm.recovery_framework.kmr_gazebo import _nearest_pick_orientation
 
     if not all(_pose(value) for value in (observed, current_pose, base_pose)):
@@ -168,7 +229,7 @@ def pick_targets(scene: dict, part: str, observed: list, current_pose: list,
     if initial is not None and (not _pose(initial) or math.dist(observed[:3], initial[:3]) > .01):
         raise ValueError('Storage part moved before target computation')
     config = scene['KMR']['task_execution']
-    source, _ = recorded_location(scene, location)
+    source = {} if location is None else recorded_location(scene, location)[0]
     calibrated = ('KMR_pick_orientations_xyzw', 'KMR_pick_approach_clearance_m', 'KMR_pick_arm_configurations')
     if any(field in source for field in calibrated):
         choices = source['KMR_pick_orientations_xyzw'][part]
@@ -177,13 +238,14 @@ def pick_targets(scene: dict, part: str, observed: list, current_pose: list,
     else:
         # These are owner-calculated targets, not inherited geometric proof.
         # Incomplete location-specific calibration must not use this branch.
-        fixture = source['workholding_pose']
-        tolerance = config['position_tolerance_m']
-        if not _vector(fixture, 6) or not _vector([tolerance], 1) or tolerance <= 0:
-            raise KeyError('Recorded workholding pose and position tolerance')
-        if math.dist(observed[:3], fixture[:3]) > tolerance:
-            raise ValueError('Recorded part pose differs from the requested workholding location')
-        pickup_docking_pose(scene, location, part)
+        if location is not None:
+            fixture = source['workholding_pose']
+            tolerance = config['position_tolerance_m']
+            if not _vector(fixture, 6) or not _vector([tolerance], 1) or tolerance <= 0:
+                raise KeyError('Recorded workholding pose and position tolerance')
+            if math.dist(observed[:3], fixture[:3]) > tolerance:
+                raise ValueError('Recorded part pose differs from the requested workholding location')
+            pickup_docking_pose(scene, location, part)
         choices = [config['pick_orientation_xyzw']]
         clearance_m = config['approach_clearance_m']
         seed = config['ik_seed_configurations'][0]
@@ -192,10 +254,11 @@ def pick_targets(scene: dict, part: str, observed: list, current_pose: list,
     orientation = _nearest_pick_orientation(current_pose[3:], choices, config['orientation_tolerance_rad'])
     target = [*observed[:3], *orientation]
     target[2] += config['grasp_height_m']
+    heights = pick_heights(scene, part, location, target[2])
     approach = target.copy()
-    approach[2] += clearance_m
+    approach[2] = heights['approach']
     clearance = target.copy()
-    clearance[2] += config['minimum_pick_lift_m']
+    clearance[2] = heights['clearance']
     lift = transport_pose(scene, base_pose, target)
     if lift[2] < clearance[2]:
         raise ValueError('Saved KMR carrying height does not clear the picked part')
@@ -253,19 +316,63 @@ def release_targets(scene: dict, transform: list, current_pose: list, base_pose:
     target = compose(destination, inverse(transform))
     if rotate(target[3:], [0., 0., 1.])[2] > -.999:
         raise ValueError('KMR placement requires a downward-facing grasp')
+    heights = release_heights(scene, target[2])
     approach = target.copy()
-    approach[2] = max(target[2] + config['minimum_pick_lift_m'],
-                      config['cartesian_waypoints']['transport_tcp_position_in_base_frame_m'][2])
+    approach[2] = heights['approach']
     retreat = target.copy()
-    retreat[2] = max(target[2] + config['release_offsets_m'][0][2], approach[2])
+    retreat[2] = heights['retreat']
     transport = transport_pose(scene, base_pose, current_pose)
     return {'target': target, 'approach': approach, 'retreat': retreat, 'destination': destination,
             'transfer_waypoints': transfer_waypoints(scene, base_pose, current_pose, approach),
             'transport': transport, 'withdraw_waypoints': transfer_waypoints(scene, base_pose, retreat, transport)}
 
 
+def _standing_at(state: dict, evidence: dict) -> str | None:
+    """Name where the base stands now, which a base move earlier in the same program has changed."""
+    base = state.get('base_pose')
+    if _pose(base):
+        return kmr_place_at(evidence.get('inputs', {}).get('scene', {}), base)
+    return state.get('resource_location')
+
+
+def _release_pose(params: dict, task: dict, state: dict, transform: list, resource_evidence: dict,
+                  physical_evidence: dict | None) -> list | None:
+    """Return the world pose a release puts the held part at, or None for the dock's own recorded fixture.
+
+    An explicit ``part_pose`` is that pose; with no quaternion the part keeps the orientation the grasp holds it
+    at. Otherwise the event's stated ``part_location`` names the place, and, as for an arm, the recorded geometry
+    of that place gives the pose, in the zone the event names.
+
+    Raises:
+        KeyError, ValueError, TypeError, IndexError: The recorded geometry does not give one supported pose.
+    """
+    from cais_spade_llm.resources.robot.recovery_capability import (
+        _destination_geometry,
+        _stated_zone_origin,
+        _support_place_pose,
+    )
+
+    explicit = params.get('part_pose')
+    if explicit is not None:
+        if not isinstance(explicit, list) or not (_vector(explicit, 3) or _vector(explicit, 7)):
+            raise ValueError('KMR part_pose needs finite x, y, z and an optional quaternion')
+        return explicit if len(explicit) == 7 else [*explicit, *compose(state['current_pose'], transform)[3:]]
+    destination = (task.get('expected_end_state') or {}).get('part_location')
+    if not physical_evidence or not isinstance(destination, str) or destination == _standing_at(state, resource_evidence):
+        return None
+    target = _destination_geometry(resource_evidence, destination, task.get('part_name'))
+    if target is None:
+        raise KeyError('placement geometry of ' + destination)
+    zone = _stated_zone_origin(task, destination, resource_evidence, physical_evidence)
+    if zone is not None:
+        target['target_origin_pose'] = zone
+    return _support_place_pose(part=task.get('part_name'), destination=destination, target=target,
+                               physical_evidence=physical_evidence)['part_pose']
+
+
 def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
-                                   recovery_snapshot: dict, resource_evidence: dict) -> dict:
+                                   recovery_snapshot: dict, resource_evidence: dict,
+                                   physical_evidence: dict | None = None) -> dict:
     """Check KMR capabilities without planning, transport, or live observations."""
     from cais_spade_llm.resources.environment_recovery import _result
 
@@ -318,9 +425,17 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
         if state['held_part'] != part or params.get('transform') != transform:
             return answer('INFEASIBLE', 'KMR placement conflicts with recorded part custody or attachment')
         try:
-            machine, source = recorded_location(scene, state['resource_location'])
-            targets = place_targets(scene, machine, transform, state['current_pose'], state['base_pose'],
-                                    machine.get('workholding_pose'), part_name=part)
+            destination = _release_pose(params, task, state, transform, evidence, physical_evidence)
+        except (KeyError, ValueError, TypeError, IndexError) as exc:
+            return missing('KMR placement calculation lacks recorded input: ' + str(exc), 'inputs/scene', 'snapshot')
+        try:
+            if destination is not None:
+                source = task.get('expected_end_state', {}).get('part_location', 'part_pose')
+                targets = release_targets(scene, transform, state['current_pose'], state['base_pose'], destination)
+            else:
+                machine, source = recorded_location(scene, _standing_at(state, evidence))
+                targets = place_targets(scene, machine, transform, state['current_pose'], state['base_pose'],
+                                        machine.get('workholding_pose'), part_name=part)
         except KeyError as exc:
             return missing('KMR placement calculation lacks recorded input: ' + str(exc), 'inputs/scene', 'snapshot')
         except ValueError as exc:
@@ -331,7 +446,7 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
         if part is None:
             return missing('The originating part binding is required', 'state/part_name')
         recorded = evidence.get('observed_parts', {}).get(part, {})
-        pose = recorded.get('observed_pose', recorded.get('current_pose'))
+        pose = _pose_list(recorded.get('observed_pose', recorded.get('current_pose')))
         if not _pose(pose):
             return missing('Recorded KMR part observation is unavailable', 'observed_parts/' + part)
         if primitive in {'grasp_part', 'attach_part'}:
@@ -341,9 +456,10 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
                 return answer('INFEASIBLE', 'KMR already holds a conflicting part')
         if primitive == 'compute_pick_targets':
             try:
-                location = recorded.get('resource_location', state.get('resource_location'))
-                if not isinstance(location, str):
-                    return missing('KMR pickup requires an exact recorded location', 'snapshot/resource_location')
+                location = recorded.get('resource_location', _standing_at(state, evidence))
+                # A part the event starts from elsewhere, such as a tray beside the dock, is at no calibrated spot.
+                if not isinstance(location, str) or (task.get('expected_start_state') or {}).get('part_location', location) != location:
+                    location = None
                 targets = pick_targets(scene, part, pose, state['current_pose'], state['base_pose'], params.get('initial'), location=location)
             except KeyError as exc:
                 return missing('KMR pickup calculation lacks recorded input: ' + str(exc), 'snapshot', 'inputs/scene/Storage')
@@ -416,6 +532,11 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
         from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms, representative_pose
         from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
 
+        # The recorded chain stands where the base was captured; an accepted move_base has left it since.
+        base = state.get('base_pose')
+        if _pose(base) and 'root_xyz' in config and (list(base[:3]) != list(config['root_xyz'])
+                                                     or list(base[3:]) != list(config.get('root_quaternion', []))):
+            config = with_root(config, pose_matrix(base))
         candidates = [joints]
         if params.get('seed') is not None:
             candidates.append(params['seed'])

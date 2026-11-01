@@ -8,7 +8,11 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import anthropic
+import httpx
+import httpx2
 import jsonschema
+import openai
 import pytest
 
 from cais_spade_llm.agents.shared_information import llm_agent
@@ -48,6 +52,39 @@ def test_single_attempt_disables_sdk_and_application_retries(tmp_path, monkeypat
     options.assert_called_once_with(max_retries=0)
     create.assert_called_once()
     assert len(list(tmp_path.glob("requests/*/*_request.json"))) == 1
+
+
+def test_a_reply_after_text_with_a_number_range_is_read_as_its_object():
+    # A real reply: a sentence holding [0.971, 1.121], then the object, which the first bracket used to hide.
+    reply = ('so a tool pose at z=1.121 (max of z_range [0.971, 1.121]) puts fingertips at z=0.903.\n\n```json\n'
+             '{"thought": "t", "decision": "need_context", "context_requests": ["/geometry"]}\n```')
+    assert llm_agent._parse_structured_json_text(reply) == {
+        "thought": "t", "decision": "need_context", "context_requests": ["/geometry"]}
+
+
+_REQUEST = httpx.Request("POST", "https://api.example")
+
+
+@pytest.mark.parametrize("failure", [openai.APIConnectionError(request=_REQUEST), httpx.ConnectError("no route")])
+@pytest.mark.parametrize("drops, sent, answered", [(1, 2, True), (2, 3, True), (3, 3, False)])
+def test_a_gpt_call_that_got_no_answer_is_tried_again_with_one_attempt(tmp_path, monkeypatch, failure, drops, sent, answered):
+    create = Mock(side_effect=[failure] * drops + [_response('{"thought": "t"}')])
+    limited = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(llm_agent, "_client", SimpleNamespace(with_options=Mock(return_value=limited)))
+    monkeypatch.setattr(llm_agent.time, "sleep", lambda _: None)
+
+    async def ask():
+        with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
+            return await _agent().ask_llm_structured("draft", response_format={"name": "draft", "schema": {}},
+                include_agent_instructions=False, max_tool_rounds=0, max_attempts=1)
+
+    if answered:
+        assert asyncio.run(ask()) == {"thought": "t"}
+    else:
+        with pytest.raises(RuntimeError, match=type(failure).__name__):
+            asyncio.run(ask())
+    assert create.call_count == sent
+    assert len(list(tmp_path.glob("requests/*/*_request.json"))) == sent
 
 
 def test_primitive_subturn_preserves_records_without_copying_the_saved_scene(tmp_path):
@@ -450,6 +487,77 @@ def test_claude_prompt_is_split_before_its_first_changing_section_for_the_cache(
     assert content[0] == {"type": "text", "text": "Task and Role\nPlan.\n\nKnowledge Base\n- /parts",
                           "cache_control": {"type": "ephemeral"}}
     assert content[1]["text"].startswith("\n\nValidation Feedback\n") and "cache_control" not in content[1]
+
+
+def _dropping_claude_client(calls, failure, failures):
+    class Stream:
+        def __enter__(self):
+            if len(calls) <= failures:
+                raise failure
+            return SimpleNamespace(get_final_message=lambda: _claude_message(json.dumps({"thought": "t"})))
+
+        def __exit__(self, *exc):
+            return False
+
+    def stream(**kwargs):
+        calls.append(kwargs)
+        return Stream()
+
+    client = SimpleNamespace(messages=SimpleNamespace(stream=stream))
+    client.with_options = Mock(return_value=client)
+    return client
+
+
+# The Anthropic SDK's transport is httpx2, and a reply cut off mid-stream raises its errors unwrapped.
+@pytest.mark.parametrize("failure", [httpx2.RemoteProtocolError("peer closed connection"), httpx2.ReadTimeout("read timed out"),
+                                     anthropic.APIConnectionError(request=_REQUEST)])
+@pytest.mark.parametrize("drops, sent, answered", [(1, 2, True), (2, 3, True), (3, 3, False)])
+def test_a_claude_call_that_got_no_answer_is_tried_again_with_one_attempt(tmp_path, monkeypatch, failure, drops, sent, answered):
+    calls = []
+    client = _dropping_claude_client(calls, failure, drops)
+    monkeypatch.setattr(llm_agent, "_claude_client", lambda: client)
+    monkeypatch.setattr(llm_agent.time, "sleep", lambda _: None)
+    borrower = SimpleNamespace(model="claude-opus-4-7", reasoning_effort="medium", instructions="")
+
+    def ask():
+        with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
+            return asyncio.run(llm_agent.LlmAgent.ask_llm_structured(borrower, "draft", include_agent_instructions=False,
+                response_format={"name": "outline", "schema": {}}, max_attempts=1))
+
+    if answered:
+        assert ask() == {"thought": "t"}
+    else:
+        with pytest.raises(RuntimeError, match=type(failure).__name__):
+            ask()
+    assert len(calls) == sent
+    assert len(list(tmp_path.glob("requests/*/*_request.json"))) == sent
+    # One attempt stays one attempt for everything else: the SDK does not retry on its own.
+    client.with_options.assert_called_once_with(max_retries=0)
+
+
+def test_more_application_attempts_are_kept_for_a_call_that_got_no_answer(tmp_path, monkeypatch):
+    calls = []
+    client = _dropping_claude_client(calls, httpx2.RemoteProtocolError("peer closed connection"), 4)
+    monkeypatch.setattr(llm_agent, "_claude_client", lambda: client)
+    monkeypatch.setattr(llm_agent.time, "sleep", lambda _: None)
+    borrower = SimpleNamespace(model="claude-opus-4-7", reasoning_effort="medium", instructions="")
+    with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
+        assert asyncio.run(llm_agent.LlmAgent.ask_llm_structured(borrower, "draft", include_agent_instructions=False,
+            response_format={"name": "outline", "schema": {}}, max_attempts=5)) == {"thought": "t"}
+    assert len(calls) == 5
+
+
+def test_a_claude_call_that_fails_for_another_reason_stays_one_attempt(tmp_path, monkeypatch):
+    calls = []
+    client = _dropping_claude_client(calls, ValueError("not a dropped connection"), 3)
+    monkeypatch.setattr(llm_agent, "_claude_client", lambda: client)
+    monkeypatch.setattr(llm_agent.time, "sleep", lambda _: None)
+    borrower = SimpleNamespace(model="claude-opus-4-7", reasoning_effort="medium", instructions="")
+    with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
+        with pytest.raises(RuntimeError, match="ValueError"):
+            asyncio.run(llm_agent.LlmAgent.ask_llm_structured(borrower, "draft", include_agent_instructions=False,
+                response_format={"name": "outline", "schema": {}}, max_attempts=1))
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])

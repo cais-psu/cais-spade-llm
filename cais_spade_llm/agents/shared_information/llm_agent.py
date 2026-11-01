@@ -13,8 +13,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import httpx
 from dotenv import load_dotenv
-from openai import BadRequestError, OpenAI  # REST client for GPT models.
+from openai import APIConnectionError, BadRequestError, OpenAI  # REST client for GPT models.
 from spade.agent import Agent  # SPADE base class providing lifecycle hooks.
 
 from cais_spade_llm.function_analyzer import (
@@ -28,6 +29,8 @@ load_dotenv()
 
 _client = OpenAI()  # Single shared client so we reuse HTTP sessions and rate-limit buckets.
 
+# Tries for a call whose connection failed, so it got no answer, also where one attempt is the rule.
+_NO_ANSWER_TRIES = 3
 # Room for Claude's adaptive thinking plus the JSON reply; the request is streamed, so a long one does not time out.
 _CLAUDE_MAX_TOKENS = 32000
 
@@ -36,23 +39,30 @@ def _is_claude(model_name: str) -> bool:
     return str(model_name or "").startswith("claude-")
 
 
-# The outline prompt states what stays the same first; its first changing section starts at one of these headers.
+# The outline and composition prompts state what stays the same first; their first changing section starts at one
+# of these headers.
 _CHANGING_SECTIONS = ("\n\nRecovery Events So Far", "\n\nYour Last Outline (refused)", "\n\nValidation Feedback\n",
-                      "\n\nResources\n")
+                      "\n\nResources\n", "\n\nPrevious Validation Feedback (read first)\n",
+                      "\n\nActive DES Transition (token)\n")
+# Composition's stable part has seams of its own: a resource's fixed text, its model, which every event of the
+# resource shares, and what one event looked up. Each gets a cache point, so a change after it keeps what is before it.
+_STABLE_SEAMS = ("\n\nServed Context: resource model\n", "\n\nServed Context (retrieved earlier in this event)\n")
 
 
 def _cached_user_content(prompt: str) -> str | list[dict[str, Any]]:
-    """Split a prompt before its first changing section and mark the part before it for Claude's prompt cache.
+    """Split a prompt before its first changing section and mark what comes before for Claude's prompt cache.
 
-    The text is unchanged; only its first part is reused across turns. A prompt without those sections is
+    The text is unchanged; only its stable parts are reused across turns. A prompt without those sections is
     sent as one block.
     """
-    cuts = [prompt.find(marker) for marker in _CHANGING_SECTIONS if marker in prompt]
-    if not cuts or min(cuts) <= 0:
+    changing = [prompt.find(marker) for marker in _CHANGING_SECTIONS if marker in prompt]
+    if not changing or min(changing) <= 0:
         return prompt
-    cut = min(cuts)
-    return [{"type": "text", "text": prompt[:cut], "cache_control": {"type": "ephemeral"}},
-            {"type": "text", "text": prompt[cut:]}]
+    end = min(changing)
+    cuts = sorted({*(prompt.find(seam) for seam in _STABLE_SEAMS if 0 < prompt.find(seam) < end), end})
+    blocks = [{"type": "text", "text": prompt[start:cut], "cache_control": {"type": "ephemeral"}}
+              for start, cut in zip([0, *cuts], cuts, strict=False)]
+    return [*blocks, {"type": "text", "text": prompt[end:]}]
 
 
 @functools.cache
@@ -77,6 +87,9 @@ def _parse_structured_json_text(raw_text: str) -> Any:
             try:
                 parsed, end_idx = decoder.raw_decode(text[start_idx:])
             except json.JSONDecodeError:
+                continue
+            # A structured reply is an object; a list here is a range of numbers in the text before it.
+            if not isinstance(parsed, dict):
                 continue
             trailing = text[start_idx + end_idx :].strip()
             if trailing:
@@ -458,7 +471,8 @@ class LlmAgent(Agent):
         include_agent_instructions:
             Whether to prepend this agent's configured system instructions.
         max_attempts:
-            Application-level attempts per request; one also disables SDK retries.
+            Application-level attempts per request; one also disables SDK retries. A call whose
+            connection failed gets at least ``_NO_ANSWER_TRIES`` tries.
 
         Returns
         -------
@@ -512,7 +526,7 @@ class LlmAgent(Agent):
 
                 back = 1.0
                 last_err: Exception | None = None
-                for attempt in range(1, max_attempts + 1):
+                for attempt in range(1, max(max_attempts, _NO_ANSWER_TRIES) + 1):
                     try:
                         r = records.submit(
                             (_client.with_options(max_retries=0) if max_attempts == 1 else _client).chat.completions.create, kwargs,
@@ -526,6 +540,8 @@ class LlmAgent(Agent):
                             f"LLM call failed: {_structured_call_error_summary(exc)}"
                         ) from exc
                     except Exception as e:  # noqa: BLE001
+                        if attempt >= max_attempts and not isinstance(e, (APIConnectionError, httpx.TransportError)):
+                            raise RuntimeError(f"LLM call failed after retries: {_structured_call_error_summary(e)}") from e
                         time.sleep(back)
                         back = min(back * 2, 8.0)
                         last_err = e
@@ -609,7 +625,8 @@ class LlmAgent(Agent):
             response_format: The OpenAI ``json_schema`` entry; its ``schema`` is stated to Claude.
             tools: Must be empty; tool calls are not supported on this path.
             include_agent_instructions: Whether to send this agent's configured instructions first.
-            max_attempts: Application-level attempts; one also disables SDK retries.
+            max_attempts: Application-level attempts; one also disables SDK retries. A call whose connection
+                failed gets at least ``_NO_ANSWER_TRIES`` tries.
 
         Returns:
             The parsed structured response.
@@ -617,6 +634,7 @@ class LlmAgent(Agent):
         if tools:
             raise ValueError("Tool calls are not supported for Claude models")
         import anthropic
+        import httpx2
 
         system = ([{"type": "text", "text": self.instructions}] if include_agent_instructions and self.instructions
                   else [])
@@ -640,7 +658,7 @@ class LlmAgent(Agent):
 
             back = 1.0
             last_err: Exception | None = None
-            for attempt in range(1, max_attempts + 1):
+            for attempt in range(1, max(max_attempts, _NO_ANSWER_TRIES) + 1):
                 try:
                     message = records.submit(stream_final_message, deepcopy(payload), tool_round=0, attempt=attempt)
                     break
@@ -649,6 +667,9 @@ class LlmAgent(Agent):
                 except anthropic.BadRequestError as exc:
                     raise RuntimeError(f"LLM call failed: {_structured_call_error_summary(exc)}") from exc
                 except Exception as e:  # noqa: BLE001
+                    # The Anthropic SDK's transport is httpx2: a reply cut off mid-stream raises its errors unwrapped.
+                    if attempt >= max_attempts and not isinstance(e, (anthropic.APIConnectionError, httpx2.TransportError)):
+                        raise RuntimeError(f"LLM call failed after retries: {_structured_call_error_summary(e)}") from e
                     time.sleep(back)
                     back = min(back * 2, 8.0)
                     last_err = e
