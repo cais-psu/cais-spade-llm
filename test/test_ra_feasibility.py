@@ -1045,6 +1045,24 @@ def test_a_place_with_a_declared_completion_is_stated_in_the_part_s_record(cell,
     assert check_event(_release(), session, {}, cell)["feasibility_status"] == "FEASIBLE"
 
 
+def test_a_place_at_a_spot_the_belt_does_not_record_is_refused_with_that_fact(cell, session):
+    # No recorded area is that spot, so no check can reach it; the belt's loading positions are not stand-ins.
+    session["symbolic_resources"][CONVEYOR]["part_location.P1"] = None
+    session["recovery_des_models"][CONVEYOR]["state_variables"]["part_location.P1"]["domain"].append(
+        "after loading_position_1")
+    event = {**_event(UR, {"held_part": None, "part_location": "Conveyor", "resource_state": "idle",
+                           "gripper_state": "open"}, part="P1"),
+             "neighbor_end_state": {CONVEYOR: {"part_location.P1": "after loading_position_1"}}}
+    result = check_event(event, session, {}, cell)
+    place = next(row for row in result["capability"] if row["check"] == "place")
+    assert (place["status"], place["reason"]) == ("NEEDS_CONTEXT", "after loading_position_1 names no recorded area of Conveyor")
+    event["neighbor_end_state"][CONVEYOR]["part_location.P1"] = "loading_position_1"
+    place = next(row for row in check_event(event, session, {}, cell)["capability"] if row["check"] == "place")
+    assert "names no recorded area" not in str(place.get("reason"))
+    # A slot that is the owner's own variable stands for the whole place, as for a buffer zone's slot.
+    assert check_event(_release(), session, {}, cell)["feasibility_status"] == "FEASIBLE"
+
+
 def test_a_place_onto_a_belt_states_the_order_the_belt_s_model_gives(cell, session):
     # The belt's runtime model sets part_order with the place (conveyor_load_parameters); no primitive declares it.
     from cais_spade_llm.resources.environment_models import build_environment_models

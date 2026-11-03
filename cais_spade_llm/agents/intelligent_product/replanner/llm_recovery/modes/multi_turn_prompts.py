@@ -3448,12 +3448,13 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
         if isinstance(row, dict)
     ]
 
+    latest = [dict(row) for row in (session_state.get("primitive_rejection_feedback") or []) if isinstance(row, dict)]
+    # Composition lists every distinct finding the active event has had, the latest last.
+    active_outline_id = active_event_full.get("outline_id") or active_event_token.get("outline_id")
+    earlier = [dict(row) for row in (session_state.get("composition_rejection_history") or [])
+               if isinstance(row, dict) and row.get("outline_id") == active_outline_id]
     primitive_feedback = _primitive_rejection_feedback_summary(
-        [
-            dict(row)
-            for row in (session_state.get("primitive_rejection_feedback") or [])
-            if isinstance(row, dict)
-        ]
+        earlier + [row for row in latest if row not in earlier]
     )
 
     sections: list[str] = [

@@ -64,7 +64,13 @@ def preview_composition_output(*, primitive: str, params: dict, recovery_snapsho
             # placement outputs to its private _task_ctx before this preview.
             recorded = grounding_context.get("resources", {}).get(task["resource_jid"], {}).get(
                 "resource_evidence", resource_evidence)
-            defaults.update(pick_ctx=recorded.get("state", {}).get("_task_ctx"), product_geometry=None,
+            pick_ctx = recorded.get("state", {}).get("_task_ctx")
+            attachment = resource_evidence.get("attachment") or {}
+            # Held through a projected grasp, the part's pick context is the one that grasp recorded (_hold), which
+            # this calculation reads when pick_ctx is left out.
+            if attachment.get("part_name") == part and (attachment.get("source") or {}).get("kind") == "projected":
+                pick_ctx = (resource_evidence.get("state") or {}).get("_task_ctx")
+            defaults.update(pick_ctx=pick_ctx, product_geometry=None,
                 destination_location=calculated["destination_location"], z_adjustment_m=0., assembly_board_v1_aruco=None)
         unsupported = [field for field, value in params.items()
                        if field not in defaults or value != defaults[field]]

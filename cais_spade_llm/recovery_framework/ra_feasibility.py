@@ -908,6 +908,13 @@ class _Check:
 
     def reach_place(self, place: Any, slot: str | None, what: str, *, part_start: list[float] | None = None,
                     transfer: str | None = None) -> dict:
+        jid = next((key for key, rid in self.cell.rids.items() if rid == place), None)
+        # A slot that is a variable of the place's owner, such as a machine's part_name, stands for the whole
+        # place; a spot the event names has to be a recorded area, as a transport's stop does.
+        if isinstance(slot, str) and jid is not None and slot not in self.variables(jid) and not self.records_area(
+                place, slot):
+            return {"status": NEEDS_CONTEXT, "reason": f"{_text(slot)} names no recorded area of {place}",
+                    "place": place, "slot": slot}
         areas = [] if self.in_gripper(place, slot) else self.areas(place, slot)
         if not areas:
             return {"status": NEEDS_CONTEXT, "reason": self.unrecorded_place(place), "place": place,
@@ -917,6 +924,12 @@ class _Check:
         best = _best(result["status"] for result in results)
         chosen = next(result for result in results if result["status"] == best)
         return {**chosen, "place": place, **({"slot": slot} if slot else {})}
+
+    def records_area(self, place: str, spot: str) -> bool:
+        """Return whether a spot names one of the place's recorded areas, ``<place>.<spot>`` or one it begins."""
+        return any(name.startswith(place + ".") and (spot == name.split(".", 1)[-1]
+                                                     or spot.startswith(name.split(".", 1)[-1] + "_"))
+                   for name, row in self.cell.regions.items() if row.get("bounds"))
 
     def in_gripper(self, place: Any, slot: str | None) -> bool:
         """Return whether a place is a gripping resource's gripper, whatever geometry its body has.
@@ -1715,9 +1728,7 @@ class _Check:
     def transport_check(self, condition: str) -> dict:
         place, slot = self.rid, self.end[condition]
         # The stated slot must name one of the belt's recorded areas; any other stop has no geometry to reach.
-        if not isinstance(slot, str) or not any(name.startswith(place + ".") and (slot == name.split(".", 1)[-1]
-                                                       or slot.startswith(name.split(".", 1)[-1] + "_"))
-                   for name, row in self.cell.regions.items() if row.get("bounds")):
+        if not isinstance(slot, str) or not self.records_area(place, slot):
             return {"check": "transport", "part": self.part, "status": NEEDS_CONTEXT, "place": place, "slot": slot,
                     "reason": f"{_text(slot)} names no recorded area of {place}"}
         known, before = self.value(self.jid, condition)

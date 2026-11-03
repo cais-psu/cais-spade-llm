@@ -552,6 +552,21 @@ def _kmr_composition_guidance(resource_jid: str) -> str:
     )
 
 
+def _record_composition_findings(session_state: dict[str, Any], findings: list[dict[str, Any]]) -> None:
+    """Keep every distinct finding of the events being composed, the latest last, for the next prompt.
+
+    A revision that answers only the latest finding can bring back an earlier one, so the prompt lists them all.
+    A finding is the same when its event, resource, check, reason and step are, as for the same-cause stop.
+    """
+    history = session_state.setdefault("composition_rejection_history", [])
+    for row in findings:
+        if not isinstance(row, dict) or not row.get("reason"):
+            continue
+        key = {name: row.get(name) for name in ("outline_id", "resource_jid", "constraint_code", "reason", "step_index")}
+        history[:] = [old for old in history if {name: old.get(name) for name in key} != key]
+        history.append(deepcopy(row))
+
+
 def _note_declared_route(
     payload: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
@@ -2324,7 +2339,7 @@ async def generate_primitive_batch_with_llm_agent(
                     prepared_recovery_request, resource_jid) == "kmr" else
                 "The owner's target calculations read recorded geometry and observed poses themselves. "
                 "An accepted projected placement can support compute_pick_targets in this model-based "
-                "composition, but cannot serve as a fresh perception observation for detect_parts. "
+                "composition. "
                 "The robot target outputs include approach_pose, target_pose, and retreat_pose. Only a place "
                 "into the part's assembly_slot (the location in /parts/<name>/target) has slot fields in the "
                 "calculated place targets. ")
@@ -2367,6 +2382,7 @@ async def generate_primitive_batch_with_llm_agent(
             # Changed proposals can fail for the same cause. Stop paid retries
             # by the finding, independent of program and evidence fingerprints.
             findings = turn_entry.get("primitive_rejection_feedback", [])
+            _record_composition_findings(session_state, findings)
             causes = {json.dumps({key: row.get(key) for key in (
                 "outline_id", "resource_jid", "constraint_code", "reason", "step_index")},
                 sort_keys=True) for row in findings if row.get("reason")}

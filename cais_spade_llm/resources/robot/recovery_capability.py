@@ -982,21 +982,12 @@ def check_robot_primitive_capability(
         observed = (resource_evidence.get("observed_parts") or {}).get(part) or {}
         pose = _pose_mapping(observed.get("observed_pose", observed.get("current_pose")))
         if observed.get("source", {}).get("kind") == "projected":
-            recorded = (resource_evidence.get("recorded_observed_parts") or {}).get(part) or {}
-            recorded_pose = _pose_mapping(recorded.get("observed_pose", recorded.get("current_pose")))
-            context = part_context or {}
-            observation_source = context.get("observed_pose_source") or {}
-            owner_source = resource_evidence.get("source") or {}
-            if (not observation_source.get("run_id") or "revision" not in observation_source
-                    or observation_source.get("frame") != "world"
-                    or observation_source.get("run_id") != owner_source.get("run_id")
-                    or observation_source.get("revision") != owner_source.get("revision")
-                    or context.get("observed_pose_current") is False
-                    or not all(_number(pose.get(axis)) for axis in ("x", "y", "z"))
-                    or pose != recorded_pose or pose != context.get("observed_pose")):
-                return result("NEEDS_CONTEXT", "A projected part pose is not a perception observation", refs=[root + "/observed_parts/" + str(part)])
-            return result("FEASIBLE", "Retained recorded observation supports independent detection capability",
-                          observed_pose=recorded_pose, observation_source=observation_source,
+            # Offline nothing observes a part an earlier accepted event put down. The pose that event projected is
+            # the one compute_pick_targets reads; the detection itself is confirmed when the primitive executes.
+            if not all(_number(pose.get(axis)) for axis in ("x", "y", "z")) or observed.get("frame") != "world":
+                return result("NEEDS_CONTEXT", "The projected part pose is incomplete", refs=[root + "/observed_parts/" + str(part)])
+            return result("FEASIBLE", "A projected part pose stands in for the detection until the primitive executes",
+                          observed_pose=pose, observation_source=deepcopy(observed["source"]),
                           composition_obligations=["Confirm detection when the primitive executes"])
         if all(_number(pose.get(axis)) for axis in ("x", "y", "z")) and observed.get("frame", resource_evidence.get("frame")) == "world":
             return result("FEASIBLE", "Recorded part observation is available without invoking perception", observed_pose=pose)

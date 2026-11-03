@@ -290,6 +290,33 @@ def test_a_composition_prompt_keeps_what_repeats_ahead_of_what_changes():
     assert prompt.count(model_ref) == 1 and prompt.index(model_ref) < order[3]
 
 
+def test_a_composition_retry_lists_every_finding_its_event_has_had():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _record_composition_findings,
+    )
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import (
+        _render_primitive_generation_prompt,
+    )
+
+    def finding(outline_id, reason, step):
+        return {"outline_id": outline_id, "resource_jid": "arm", "constraint_code": "composition_infeasible",
+                "reason": reason, "step_index": step}
+    override, line = finding("R5", "pick override", 1), finding("R5", "straight line", 7)
+    session = {}
+    for findings in ([override], [line], [override], [finding("R4", "other event", 2)]):
+        _record_composition_findings(session, findings)
+    # Each distinct finding once, the latest last.
+    assert [row["reason"] for row in session["composition_rejection_history"]] == [
+        "straight line", "pick override", "other event"]
+    event = {"outline_id": "R5", "resource_jid": "arm", "event_name": "move"}
+    session["primitive_rejection_feedback"] = [override]
+    prompt = _render_primitive_generation_prompt({"session_state": session, "primitive_active_outline_event_token": event,
+                                                  "primitive_active_outline_event": event})
+    feedback = prompt.split("Previous Validation Feedback (read first)\n")[1]
+    assert feedback.index("straight line") < feedback.index("pick override")
+    assert feedback.count("pick override") == 1 and "other event" not in feedback
+
+
 def test_claude_caches_each_stable_part_of_a_composition_prompt_and_nothing_after_it():
     from cais_spade_llm.agents.shared_information.llm_agent import _cached_user_content
 
@@ -1944,6 +1971,29 @@ def test_a_place_retreat_rises_when_the_place_sits_above_the_picks_travel_height
     assert result["output"]["retreat_pose"]["z"] == pytest.approx(retreat_z)
 
 
+def test_a_place_after_its_own_grasp_takes_the_pick_context_that_grasp_recorded(monkeypatch):
+    from cais_spade_llm.resources.robot import recovery_capability
+    from cais_spade_llm.resources.robot.recovery_composition import preview_composition_output
+
+    monkeypatch.setattr(recovery_capability, "calculate_recovery_place_target", lambda **kwargs: {
+        "status": "calculated", "destination_location": "M2", "target_pose": {"x": 0., "y": 0., "z": 1.}})
+    picked = {"target_pose": {"x": 1.0}, "model_name": "P_model"}
+    earlier = {"part_name": "earlier"}
+    held = {"attachment": {"part_name": "P", "source": {"kind": "projected"}}, "state": {"_task_ctx": picked}}
+
+    def place(evidence, pick_ctx):
+        return preview_composition_output(primitive="compute_place_targets",
+            params={"part_name": "P", "destination_location": "M2", "pick_ctx": pick_ctx}, recovery_snapshot={},
+            part_context={}, task={"part_name": "P", "resource_jid": "robot"},
+            grounding_context={"resources": {"robot": {"resource_evidence": {"state": {"_task_ctx": earlier}}}}},
+            resource_evidence=evidence, physical_evidence={})
+    assert place(held, picked)["status"] == "calculated"
+    assert "pick_ctx" in place(held, earlier)["reason"]
+    # Without a projected grasp of the part, the recorded context is still the one an explicit pick_ctx must equal.
+    assert place({}, earlier)["status"] == "calculated"
+    assert "pick_ctx" in place({}, picked)["reason"]
+
+
 def test_pick_override_feedback_identifies_all_unsupported_inputs_without_accepting_them(monkeypatch):
     from cais_spade_llm.resources.robot import recovery_capability
     from cais_spade_llm.resources.robot.recovery_composition import preview_composition_output
@@ -1971,6 +2021,23 @@ def test_pick_override_feedback_identifies_all_unsupported_inputs_without_accept
                          ("apply_pick_z_adjustments", True), ("min_pick_tcp_z_override_m", 1.)):
         refused = preview_composition_output(params={"part_name": "P", field: value}, **values)
         assert refused["status"] == "NEEDS_CONTEXT" and field in refused["reason"]
+
+
+def test_detect_parts_at_a_part_an_accepted_event_put_down_is_an_execution_obligation():
+    from cais_spade_llm.resources.robot.recovery_capability import check_robot_primitive_capability
+
+    pose = [-2.05, 0.5, 1.015, 0.0, 0.0, 0.0, 1.0]
+    def check(row):
+        return check_robot_primitive_capability(primitive="detect_parts", params={"part_name": "P"},
+            task={"resource_jid": "robot", "part_name": "P"}, recovery_snapshot={}, static_capabilities={},
+            resource_evidence={"observed_parts": {"P": row}}, primitive_catalog=[], resource_jid="robot")
+    placed = check({"current_pose": pose, "frame": "world", "source": {"kind": "projected", "contract_fingerprint": "f"}})
+    assert placed["feasibility_status"] == "FEASIBLE", placed
+    # The pose compute_pick_targets reads stands in; the detection is confirmed when the step runs.
+    assert placed["evidence"]["observed_pose"] == dict(zip(("x", "y", "z", "qx", "qy", "qz", "qw"), pose))
+    assert placed["evidence"]["composition_obligations"] == ["Confirm detection when the primitive executes"]
+    incomplete = check({"current_pose": pose[:2], "frame": "world", "source": {"kind": "projected"}})
+    assert incomplete["feasibility_status"] == "NEEDS_CONTEXT", incomplete
 
 
 def test_detect_parts_previews_the_observation_the_owner_recorded():

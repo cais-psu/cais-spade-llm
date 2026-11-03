@@ -243,6 +243,64 @@ the belt order alone; scratch copies that state it (0 after each belt place, nul
 each. A program that follows the `pick_approach` note at a re-pick of a part an earlier event put down (Machining events 6, 10,
 11; ur5e-1 event 6) is still refused once, correctly, as "A projected part pose is not a perception observation".
 
+**Reruns, November 3 (user go "ok do ur5e-1 first then machining"; uncommitted fix in main on top of `4289468`).** The user
+committed the November 2–3 work as `4289468`. Opus 5.5 medium, Framework incremental, from frozen worktrees.
+- ur5e-1 from `wt_rerun2` (`4289468`): `draft_31dda7fd…` passed (17 calls, 184,125 tokens) but put KET4 on the Conveyor at
+  `after loading_position_1`. At turn 14 it had put it at `loading_position_1`, was refused for leaving `part_order` out, and
+  moved the spot instead. The RA's `areas()` fell back from a spot with no recorded area to the belt's other areas, so it proved
+  reach to `loading_position_1` for an event that names another spot; composition has no target there. Not composed (hand
+  check stops at event 8). Fix (user go): `_Check.reach_place` refuses a named spot that is not the owner's variable and names
+  no recorded area, with the transport check's own text ("after loading_position_1 names no recorded area of Conveyor");
+  `records_area` is shared with `transport_check`. No fixed names. Tests 399 passed; `31dda7fd` no longer replays.
+- From `wt_rerun3` (`0e7f17c`, main with that fix): ur5e-1 `draft_2d3c9955…` did_not_finish at the 40-turn budget (617,416
+  tokens; 22 turns on the KMR place at the M2 tray, all refusals true). Retry `draft_d2c0d302…` passed, 8 events, 23 calls,
+  320,847 tokens; hand check 8/8; composed `composition_dbe5652a65144be4851eb33562ae4946`, 8 of 8, 19 calls, 163,743 tokens.
+  It replaces `draft_95f9d084` and `composition_bc65b869…`, which no longer load and stay until the user decides.
+- Machining `draft_7859122a…` ended at turn 20 on a provider stop_reason refusal (169,330 tokens) while ur5e-1 shuttled KET4 on
+  and off the M1 staging tray. Retry `draft_e7ae0b4c…` passed with 28 events (36 calls, 401,104 tokens): the same shuttle four
+  times (events 4–12) and ur5e-2 taking the finished part out of M2, back in and out again (20–22). Hand check 28/28 with the
+  declared route at events 16 and 23. Its composition `composition_8496aea4…` was stopped by the user after 1 event (5 calls,
+  126,784 tokens): "i dont want compose it that did 28 events". Archived to
+  `/home/jongh/recovery_archives/20261103_stopped_machining_composition/` and removed; receipt
+  `recapture_v2_20261015/stopped_machining_composition_20261103_deletion_list.json`. Next: the user's call on Machining.
+- Machining reference outlines (user requests; hand-edited from `draft_e7ae0b4c`, labelled `hand_edit`, not model outputs):
+  20 events (duplicates removed), 17 (also the tray detour and the KMR's unused trip, two start values copied from the
+  outline's own statements), and 13 `draft_c8b73659…` (also each pick merged with its place; merged events store the change
+  lists the replay records). All three pass the replay and hand checks; an 11-event merge of select_program with start_job is
+  refused by the RA ("start_job (result square) needs selected_program = square; projected selected_program is circle").
+  Composition of the 13-event outline, user go: `composition_44f4d394e11f488f9bf6c32d176567af` stopped at RECOVERY_SEQ5. RECOVERY_SEQ5 (ur5e-2 picks KET4 from Conveyor loading_position_2 and places it into M2): all three programs began with detect_parts on a part an earlier composed event put down; the capability check refused it each time with 'A projected part pose is not a perception observation', and the third same-cause refusal stopped the attempt. The model read the refusal as a call for live perception. 4 of 13 accepted, 21 calls, 663,257 tokens. Archived to `/home/jongh/recovery_archives/20261103_stopped_machining13_composition/` and
+  removed. The hand check missed it: hand programs use no detect_parts. Next: the user's decision on detect_parts at a
+  projected pose.
+  Fix (user go "fix it", uncommitted): `check_robot_primitive_capability` accepts robot `detect_parts` at a part an earlier
+  accepted event put down (a `projected` observed_parts row, world frame, complete position) with the obligation "Confirm
+  detection when the primitive executes"; that is the pose `compute_pick_targets` already reads, and the KMR's check
+  already accepted it. The older equality-to-a-retained-recording branch is gone, subsumed. One served sentence was a wrong
+  fact after this and lost its clause ("…but cannot serve as a fresh perception observation for detect_parts"); nothing was
+  added. Checks: 624 tests in the touched suites passed; the 13-event outline composes 13/13 by hand with `detect_parts`
+  before every pick (events 2, 3, 5, 9, 10); all four current outlines replay and the three saved compositions bind.
+  Rerun from `wt_rerun4` (`7bae021`), user go: `composition_b47089562a04477c98cbfdf65e21ab82` stopped. RECOVERY_SEQ3 (ur5e-1 picks KET4 from M1 and places it on Conveyor loading_position_1, one event): the model alternated between adding pick_ctx to compute_place_targets (refused) and the straight carry that passes 0.042 m from ur5e-1's base axis (refused); its one program through a declared waypoint also carried pick_ctx, so the route was never judged; the third straight-line refusal stopped the attempt. The retry prompt shows only the latest finding. 2 of 13 accepted, 14 calls, 526,021 tokens. Archived to `/home/jongh/recovery_archives/20261103_stopped_machining13_rerun/` and removed. The
+  earlier attempt had passed this event, so it is chance which program the model lands on.
+  Cause, found after: in an event that picks and then places, `preview_composition_output` compared an explicit
+  `pick_ctx` with the task context recorded before the event, while the place reads the context the event's own grasp
+  records (`_hold`). So the model's binding to its own pick output was refused and only leaving it out passed; the served
+  contract offers `pick_ctx`, and the retry showed only the latest finding, so the model swapped between that refusal and the
+  straight-line one. Fix (user go "ok fix it", uncommitted): held through a projected grasp, an explicit `pick_ctx` is
+  compared with the context that grasp recorded; any other value is still refused. No prompt or refusal text changed; no
+  saved composition binds `pick_ctx`. Control on the 13-event outline with `pick_ctx` bound in all five pick-and-place events:
+  the code before refuses event 2 for `pick_ctx`, the fixed code accepts 13/13. Tests: composition suite 166, wider suites 459
+  passed. Showing every earlier finding on a retry is a separate decision, not taken.
+  Rerun 2 from `wt_rerun5` (`ffdacdd`), user go: `composition_a2b726bda0224aa896353c28197f4ff5` passed event 3 and stopped at RECOVERY_SEQ5. RECOVERY_SEQ5 (ur5e-2 picks KET4 from Conveyor loading_position_2 and places it into M2, one event): the model alternated between binding the pick target from the detection (refused as an override of the owner's calculation) and the straight carry that passes 0.036 m from ur5e-2's base axis (refused); twice it bound the declared route in the right order, but with an unresolved /event_facts/detected_parts ref or the override, so the route was never judged. The retry prompt shows only the latest finding. 4 of 13 accepted, 20 calls, 733,209 tokens.
+  Archived to `/home/jongh/recovery_archives/20261103_stopped_machining13_rerun2/` and removed. Machining composition attempts today: 2,049,271 tokens, no composition.
+  Fix (user go "ok fix it", uncommitted): a composition retry lists every distinct finding its event has had, the latest
+  last (`_record_composition_findings` keeps them in `composition_rejection_history`, keyed as the same-cause stop is; the
+  renderer shows the active event's), instead of only the latest. Same section, same refusal texts, nothing added.
+  Tests 391 passed. The `detect_parts` publish key (`part_pose.<part>`) is still not served; not changed.
+  Rerun 3 from `wt_rerun6` (`20b8051`), user go: Machining COMPOSED, `composition_b368d27ba783477a97b4487e116efa56` on the
+  13-event reference outline `draft_c8b73659…`, 13 of 13, 37 calls, 832,949 tokens, 1,791 s. Programs use `detect_parts`
+  before picks (events 2–5, 9, 10), the declared route (3, 5, 9, 10) and `pick_ctx` (2, 3). Retained now: Part slippage
+  `composition_ae42057d…`, Conveyor `composition_dac0ed72…`, ur5e-1 `composition_dbe5652a…`, Machining
+  `composition_b368d27b…` (from a hand-edited reference outline, not a model outline). None has run; dispatch is not built.
+
 **Independent review (read-only, November 2, 21:05–23:25).** One reviewer and one adversarial verifier per composition, plus
 one agent for the stop and one that recomputed every number above; results in
 `/home/jongh/recovery_review_1030/fresh_review_20261102/review_results.json`. All three verdicts stand: none would run as
