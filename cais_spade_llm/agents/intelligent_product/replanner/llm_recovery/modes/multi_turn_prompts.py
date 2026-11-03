@@ -3507,7 +3507,8 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             [
                 "",
                 "Served Context: resource model",
-                _compact_json({model_ref: served_context[model_ref]}),
+                # One line: indentation was half of this block, the largest one a composition prompt serves.
+                json.dumps({model_ref: served_context[model_ref]}, default=str, ensure_ascii=False),
             ]
         )
     event_context = {ref: value for ref, value in served_context.items() if ref != model_ref}

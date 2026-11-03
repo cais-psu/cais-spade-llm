@@ -35,7 +35,13 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   `cais_spade_llm/monitor/environment_runs/recovery/outline_experiments/`
   (Experiments tab batches, their attempt drafts, audits, and manifests),
   whether an attempt finished, failed, stopped, did not finish, or was
-  interrupted.
+  interrupted. Only the user can make an exception. On 2026-11-03 the user
+  had every Opus 4.7 batch and the Opus 5.5 batches from before November 2
+  evening removed as made on older code; they are archived in
+  `/home/jongh/recovery_archives/20261103_older_experiments_and_outlines/`.
+  Later that day the user had the remaining Opus 5.5 batches, outlines and
+  compositions removed before a final Opus 5.5 rerun from one commit; they are
+  archived in `/home/jongh/recovery_archives/20261103_opus55_results_before_final_rerun/`.
 - Protect active work and the current partial attempt still needed for debugging,
   including work owned by another chat or process. Remove abandoned attempts once
   their useful findings are recorded and their required dependencies are retained.

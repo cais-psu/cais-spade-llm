@@ -94,6 +94,9 @@ def composition_grounding_context(*, session: dict, prepared: dict, task: dict) 
         # The valuation is the capture's too. It is dropped rather than projected: this model is one cached
         # prompt block across a resource's events, and /resources/<jid>/snapshot serves the current state.
         model.pop("current_valuation", None)
+        # The model's own primitive_catalog repeats /primitive_contracts/<name>, and it carries the internal gripper
+        # primitives and primitive_kind that the served catalog leaves out.
+        model.pop("primitive_catalog", None)
         for event in model.get("events") or []:
             event.pop("recovery_visible_steps", None)
             for step in (event.get("composition_contract") or {}).get("steps") or []:

@@ -317,6 +317,32 @@ def test_a_composition_retry_lists_every_finding_its_event_has_had():
     assert feedback.count("pick override") == 1 and "other event" not in feedback
 
 
+def test_a_served_resource_model_has_no_duplicate_catalog_and_takes_one_line():
+    import json
+
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import (
+        _render_primitive_generation_prompt,
+    )
+    from cais_spade_llm.resources.recovery_composition import composition_grounding_context
+
+    model = {"events": [{"event_name": "pick_grasp", "updates": {"part_location": {"set": "arm"}}}],
+             "primitive_catalog": [{"name": "open_gripper", "primitive_kind": "gripper"}], "current_valuation": {}}
+    prepared = {"recovery_resources": {"arm": {"resource_type": "robot", "recovery_des_model": deepcopy(model),
+                                               "resource_evidence": {"observed_parts": {}}}}}
+    context = composition_grounding_context(session={"accepted_primitive_program": []}, prepared=prepared,
+                                            task={"resource_jid": "arm"})
+    served = context["resources"]["arm"]["recovery_des_model"]
+    assert "primitive_catalog" not in served and served["events"] == model["events"]
+    # The owner checks read the prepared model, which keeps its catalog.
+    assert prepared["recovery_resources"]["arm"]["recovery_des_model"]["primitive_catalog"] == model["primitive_catalog"]
+    event = {"outline_id": "R1", "resource_jid": "arm"}
+    prompt = _render_primitive_generation_prompt({"primitive_active_outline_event_token": event,
+        "primitive_active_outline_event": event,
+        "primitive_served_context": {"/resources/arm/recovery_des_model": served}})
+    block = prompt.split("Served Context: resource model\n")[1].split("\n\n")[0]
+    assert "\n" not in block and json.loads(block)["/resources/arm/recovery_des_model"] == served
+
+
 def test_claude_caches_each_stable_part_of_a_composition_prompt_and_nothing_after_it():
     from cais_spade_llm.agents.shared_information.llm_agent import _cached_user_content
 

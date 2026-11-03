@@ -168,7 +168,15 @@ two passing outlines has a value written by code; both load for composition with
   17-event outlines: "KMR cannot carry on normal production from where it is". The model added the KMR's return as event 1,
   where CCA safety refuses it, because M2's job could then finish on its own before KET4; it never tried the return last,
   which is what `5836a16f` does (event 16). The refusals are true; this is a run outcome, not a code fault.
-- Retained now (updated November 2, 23:30): in `draft_compositions`, Part slippage `composition_ae42057d…` on `6cdab5fd`,
+- Retained now (updated November 3, evening): nothing. The user decided that Opus 5.5 medium gives the paper's reference
+  answers (Appendix A outlines, Appendix B compositions) and that the experiments run on lower models. Before a final Opus 5.5
+  rerun from one commit, every outline, composition and Experiments batch was archived to
+  `/home/jongh/recovery_archives/20261103_opus55_results_before_final_rerun/` and removed (receipt
+  `recapture_v2_20261015/opus55_results_before_final_rerun_20261103_deletion_list.json`); captures and legacy records stay.
+  Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
+  or also merging picks with places) is decided after that; compositions on a separate go. Open before composition: event
+  lookups on one line, the two target contracts, the `detect_parts` publish key.
+- Earlier (November 2, 23:30): in `draft_compositions`, Part slippage `composition_ae42057d…` on `6cdab5fd`,
   Conveyor `composition_dac0ed72…` on `fd45dc72`, ur5e-1 `composition_bc65b869…` on `95f9d084`. Machining has no
   composition: its attempt stopped and was removed, see "Fresh compositions" below. Since the November 3 fixes, Part
   slippage and Conveyor replay and their compositions bind; the ur5e-1 outline `95f9d084` (event 7) and the Machining outline
@@ -300,6 +308,16 @@ committed the November 2–3 work as `4289468`. Opus 5.5 medium, Framework incre
   before picks (events 2–5, 9, 10), the declared route (3, 5, 9, 10) and `pick_ctx` (2, 3). Retained now: Part slippage
   `composition_ae42057d…`, Conveyor `composition_dac0ed72…`, ur5e-1 `composition_dbe5652a…`, Machining
   `composition_b368d27b…` (from a hand-edited reference outline, not a model outline). None has run; dispatch is not built.
+  Served robot model trimmed (user go "fix it", uncommitted): `composition_grounding_context` drops `primitive_catalog` from
+  the served `recovery_des_model` (it repeated `/primitive_contracts/<name>` and carried the internal gripper primitives and
+  `primitive_kind`), and the "Served Context: resource model" block is printed on one line. 123k characters became about 39k;
+  peak composition prompts go from about 50-54k to about 30k tokens. No fact or wording changed; owner checks read the
+  prepared model. Tests 168 + 507 passed; all four current outlines replay and their compositions load.
+  Cleanup (user request): every Opus 4.7 batch, the gpt-5.4 outline, Opus 5.5 batches before November 2 evening, and the
+  Recovery list's older outline copies and the old ur5e-1 composition were archived to
+  `/home/jongh/recovery_archives/20261103_older_experiments_and_outlines/` and removed; the Machining 28- and 17-event copies to
+  `20261103_machining_28_and_17_event_outlines/`. The Recovery list holds Part slippage `6cdab5fd`, Conveyor `fd45dc72`,
+  ur5e-1 `d2c0d302` (and today's refused `31dda7fd`), Machining `c8b73659`.
 
 **Independent review (read-only, November 2, 21:05–23:25).** One reviewer and one adversarial verifier per composition, plus
 one agent for the stop and one that recomputed every number above; results in
