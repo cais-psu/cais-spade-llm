@@ -3,7 +3,9 @@ from __future__ import annotations
 """Recorded owner capability preparation for all failure scenario resources."""
 
 from copy import deepcopy
+import json
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -66,8 +68,8 @@ def _held_kmr(owner_context, part):
     names = owner_context.inputs['scene']['KMR']['arm_joint_names']
     snapshot = {**environment_owner_snapshot(owner), 'held_part': part, 'joint_names': names, 'joint_positions': [0.] * 7,
         'current_pose': [0., 0., 1.16, 1., 0., 0., 0.], 'base_pose': [-3.3, 1.3, 0., 0., 0., .7071068, .7071068],
-        'resource_location': None,
-        'continuous_motion_configuration': {'joints': [{'name': name, 'position_bounds': [-3., 3.]} for name in names]}}
+        'resource_location': None, 'continuous_motion_configuration': json.loads(
+            (Path(__file__).parent / 'fixtures/recorded_arm_chains.json').read_text())['arms']['KMR']['configuration']}
     transform = [0., 0., .025, 1., 0., 0., 0.]
     evidence['attachment'] = {'attached': True, 'held_part': part, 'grasp_transform': transform}
     return owner, evidence, snapshot, transform
@@ -123,6 +125,38 @@ def test_the_kmr_heights_the_ra_checks_are_the_ones_its_targets_use(owner_contex
         calibrated, config['minimum_pick_lift_m']))
 
 
+def test_a_release_moves_its_approach_toward_the_arm_only_where_straight_above_is_out_of_reach(owner_context):
+    from cais_spade_llm.recovery_framework.geometry import compose
+    from cais_spade_llm.recovery_framework.kmr_recovery import RELEASE_SHIFTS_M, release_shift, release_targets
+
+    scene = owner_context.inputs['scene']
+    down = scene['KMR']['task_execution']['pick_orientation_xyzw']
+    half = math.sqrt(.5)
+    base = [-.68, 1.45, 0., 0., 0., half, half]
+    arm = compose(base, [*scene['KMR']['arm_mount_xyz'], 0., 0., 0., 1.])
+    transform, current = [0., 0., .025, 1., 0., 0., 0.], [-.9, 1.2, 1.16, *down]
+    destination = [-.68, .5, 1.017, 0., 0., 0., 1.]
+
+    def targets(limit):
+        return release_targets(scene, transform, current, base, destination,
+                               reaches=lambda pose: math.dist(pose[:2], arm[:2]) <= limit if pose[2] > 1.1 else True)
+
+    straight = release_targets(scene, transform, current, base, destination)
+    assert straight['approach'][:2] == straight['target'][:2] == straight['retreat'][:2]
+    assert targets(1.)['approach'] == straight['approach']
+    # 0.70 m from the arm, which reaches 0.645 m at the approach's height: 6 cm closer is the first that fits.
+    moved = targets(.645)
+    assert moved['target'] == straight['target'] and moved['retreat'] == moved['approach']
+    assert moved['approach'][2:] == straight['approach'][2:]
+    assert math.dist(moved['approach'][:2], arm[:2]) == pytest.approx(.64)
+    assert math.dist(moved['approach'][:2], moved['target'][:2]) == pytest.approx(.06)
+    # Out of range, the approach stays where the owner's checked move then refuses it.
+    assert targets(.7 - RELEASE_SHIFTS_M[-1] - .01)['approach'] == straight['approach']
+    # Straight over the arm there is no direction to move in.
+    above = [*arm[:2], 1.042, *down]
+    assert release_shift(scene, base, above, lambda pose: False) is None
+
+
 def test_a_pick_off_a_tray_reads_the_observed_part_and_a_stated_workholding_stays_checked(owner_context):
     from cais_spade_llm.recovery_framework.kmr_recovery import check_kmr_primitive_capability
 
@@ -174,18 +208,22 @@ def test_a_belt_takes_a_part_only_as_its_runtime_does(owner_context):
     physical = {'jids': {'Conveyor': 'belt', 'ur5e-2': 'arm'}, 'environment_models': evidence['environment_models'],
                 'environment_valuation': deepcopy(evidence['environment_valuation'])}
 
-    def place(values=None, at=row, **belt):
+    def place(values=None, at=row, stated=None, **belt):
         physical['environment_valuation']['Conveyor'].update(values or {})
         projected = {}
+        stated = stated or {'belt': {f'part_location.{part}': 'loading_position_2', f'part_order.{part}': 0}}
         placed = receive_placed_part(part, 'Conveyor', dict(zip('xy', at['pose'], strict=False)), acting_jid='arm',
             grounding_context={'resources': {'belt': {'resource_state': 'idle', 'availability': 'available', **belt}}},
-            physical_evidence=physical, projected_resources=projected)
+            physical_evidence=physical, projected_resources=projected, stated=stated)
         return placed, projected
 
     placed, projected = place()
     assert placed['location'] == 'Conveyor', placed
     assert projected['belt'][f'part_location.{part}'] == 'loading_position_2'
     assert projected['belt'][f'part_order.{part}'] == 0
+    # The belt's model sets the order with the place; code writes it only where the event states it.
+    unstated = place(stated={'belt': {f'part_location.{part}': 'loading_position_2'}})[1]['belt']
+    assert unstated[f'part_location.{part}'] == 'loading_position_2' and unstated[f'part_order.{part}'] is None
     # A place between the loading positions is not one of them.
     assert 'failure' in place(at={'pose': [row['pose'][0] + .3, row['pose'][1]]})[0]
     assert place(resource_state='running')[0]['failure'] == 'Conveyor cannot receive a part in its recorded state'
@@ -543,6 +581,22 @@ def test_kmr_home_missing_custody_does_not_mean_empty(owner_context):
         task={'resource_jid': 'KMR@localhost'}, recovery_snapshot={}, resource_evidence=evidence)
     assert result['feasibility_status'] == 'NEEDS_CONTEXT'
     assert any('held_part' in ref for ref in result['context_requests'])
+
+
+def test_kmr_stopped_between_places_parks_from_its_recorded_tool_pose(owner_context):
+    from cais_spade_llm.recovery_framework.kmr_recovery import check_kmr_primitive_capability
+
+    evidence = environment_owner_evidence(owner_for(owner_context, 'KMR'))
+    names = owner_context.inputs['scene']['KMR']['arm_joint_names']
+    half = math.sin(math.pi / 4)
+    evidence['snapshot'].update(joint_names=names, joint_positions=[0.] * 7, held_part=None,
+        base_pose=[-3.03, 3.05, 0., 0., 0., half, half], current_pose=[-3.53, 2.8, 1.16, 1., 0., 0., 0.],
+        continuous_motion_configuration={'joints': [{'name': name, 'position_bounds': [-3., 3.]} for name in names]})
+    result = check_kmr_primitive_capability(primitive='move_to_named_pose', params={'pose_name': 'transport'},
+        task={'resource_jid': 'KMR@localhost'}, recovery_snapshot={'current_pose': {'x': -3.03, 'y': 3.05, 'yaw': 1.57}},
+        resource_evidence=evidence)
+    assert result['feasibility_status'] == 'FEASIBLE', result['reason']
+    assert result['evidence']['target'][:3] == pytest.approx([-3.53, 2.8, 1.16])
 
 
 @pytest.mark.parametrize('case,status', [('empty', 'FEASIBLE'), ('missing_custody', 'NEEDS_CONTEXT'),

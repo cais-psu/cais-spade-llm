@@ -14,6 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from cais_spade_llm.resources.machine.machine_jobs import inside_bounds, workholding_bounds
 from cais_spade_llm.resources.workflow_task_programs import workflow_task_program
 from cais_spade_llm.resources.gazebo_programs import saved_workflow_program
 
@@ -139,6 +140,34 @@ def transport_chain(scene: dict, resource_id: str, part_position: list[float]) -
     return configuration
 
 
+def measured_robot_clearance(position_of: Callable[[str], Any], robot_ids: list[str], part_states: dict[str, Any],
+                             region: list | None = None) -> dict[str, float]:
+    """Measure each robot from the parts and refuse one that has not cleared them.
+
+    Args:
+        position_of: Read a robot's ``clearance_observation_link`` position.
+        robot_ids: The robots to check.
+        part_states: The parts' observed states.
+        region: A machine's declared workholding region, which the robot must be outside. Transport has no such
+            region: its belt parts move, and the Conveyor and Buffer declare no clearance, so it keeps a fixed distance.
+
+    Returns:
+        Each robot's distance from its nearest part.
+    """
+    distances = {}
+    for robot_id in robot_ids:
+        position = position_of(robot_id)
+        point = (position.x, position.y, position.z)
+        distances[robot_id] = min(math.dist(point, (state.pose.position.x, state.pose.position.y, state.pose.position.z))
+                                  for state in part_states.values())
+        if region is not None:
+            if inside_bounds(region, point):
+                raise ValueError(f"{robot_id} has not cleared the machine's declared workholding region")
+        elif distances[robot_id] < 0.12:
+            raise ValueError(f"{robot_id} has not cleared the active transport/process area")
+    return distances
+
+
 class WorkflowPrimitiveRunner:
     """Execute one declared machine or transport function using Gazebo callbacks.
 
@@ -146,7 +175,7 @@ class WorkflowPrimitiveRunner:
         request: Bound task, scene, geometry, and observed valuation.
         entity: Read a Gazebo entity state.
         set_pose: Command one Gazebo entity pose.
-        robot_clearance: Check observed robot clearance around part states.
+        robot_clearance: Check observed robot clearance around part states, against a machine's region when given one.
         current_clock: Read the simulation clock.
         wait_simulation: Advance a process or motion for simulation seconds.
         update_part_collisions: Publish observed resident poses before completion.
@@ -158,7 +187,7 @@ class WorkflowPrimitiveRunner:
         *,
         entity: Callable[[str], Any],
         set_pose: Callable[[str, Any], None],
-        robot_clearance: Callable[[list[str], dict[str, Any]], dict[str, float]],
+        robot_clearance: Callable[..., dict[str, float]],
         current_clock: Callable[[], float],
         wait_simulation: Callable[[float, Callable[[float], None] | None], tuple[float, float]],
         update_part_collisions: Callable[[dict[str, Any]], None] | None = None,
@@ -431,7 +460,7 @@ class WorkflowPrimitiveRunner:
         expected = machine["workholding_pose"]
         initial = self.entity(model)
         position = initial.pose.position
-        if math.dist((position.x, position.y, position.z), expected[:3]) > 0.08:
+        if not inside_bounds(workholding_bounds(self.scene, machine["resource_id"]), (position.x, position.y, position.z)):
             raise ValueError("The correct part is not observed at machine workholding")
         self.state.update(machine=machine, model=model, expected=expected, initial=initial)
 
@@ -464,7 +493,8 @@ class WorkflowPrimitiveRunner:
         self.state["kmr_distances"] = self._kmr_clearance()
         self.state["observed_at"] = self.current_clock()
         self.state["robot_distances"] = self.robot_clearance(
-            [machine["handling_robot"]], {self.part_name: self.state["initial"]}
+            [machine["handling_robot"]], {self.part_name: self.state["initial"]},
+            workholding_bounds(self.scene, machine["resource_id"]),
         )
 
     def dwell(self, duration_sec: float | None = None) -> None:
@@ -473,7 +503,6 @@ class WorkflowPrimitiveRunner:
         self.verify_process_clearance()
         machine = self.state["machine"]
         model = self.state["model"]
-        expected = self.state["expected"]
         minimum_duration = float(machine["simulation_process"]["processing_time_sec"])
         duration = minimum_duration if duration_sec is None else float(duration_sec)
         if not math.isfinite(duration) or duration < minimum_duration:
@@ -512,14 +541,15 @@ class WorkflowPrimitiveRunner:
                     self._publish_machine_interruption()
                 raise
             observed = observed_state.pose.position
-            if math.dist((observed.x, observed.y, observed.z), expected[:3]) > 0.08:
+            if not inside_bounds(workholding_bounds(self.scene, machine["resource_id"]), (observed.x, observed.y, observed.z)):
                 raise ValueError("The part left machine workholding during machining")
             for link, distance in self._kmr_clearance().items():
                 self.state["kmr_distances"][link] = min(
                     self.state["kmr_distances"][link], distance
                 )
             clearance = self.robot_clearance(
-                [machine["handling_robot"]], {self.part_name: observed_state}
+                [machine["handling_robot"]], {self.part_name: observed_state},
+                workholding_bounds(self.scene, machine["resource_id"]),
             )
             robot = machine["handling_robot"]
             self.state["robot_distances"][robot] = min(
@@ -910,21 +940,8 @@ def run(request: dict, session: dict | None = None) -> dict:
         link = robot["clearance_observation_link"]
         return entity(f"dual_robot::{robot['prefix']}{link}").pose.position
 
-    def robot_clearance(robot_ids: list[str], part_states: dict[str, Any]) -> dict[str, float]:
-        distances = {}
-        for robot_id in robot_ids:
-            tcp_position = robot_tcp(robot_id)
-            distance = min(
-                math.dist(
-                    (tcp_position.x, tcp_position.y, tcp_position.z),
-                    (state.pose.position.x, state.pose.position.y, state.pose.position.z),
-                )
-                for state in part_states.values()
-            )
-            if distance < 0.12:
-                raise ValueError(f"{robot_id} has not cleared the active transport/process area")
-            distances[robot_id] = distance
-        return distances
+    def robot_clearance(robot_ids: list[str], part_states: dict[str, Any], region: list | None = None) -> dict[str, float]:
+        return measured_robot_clearance(robot_tcp, robot_ids, part_states, region)
 
     def current_clock() -> float:
         check_owner()

@@ -9,7 +9,7 @@ from itertools import product
 
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
 from cais_spade_llm.resources.environment_models import feasibility
-from cais_spade_llm.resources.machine.machine_jobs import machine_public_state
+from cais_spade_llm.resources.machine.machine_jobs import inside_bounds, machine_public_state, workholding_bounds
 from cais_spade_llm.resources.nominal_conveyor import conveyor_location_at
 from cais_spade_llm.resources.nominal_des import outcome_models
 from cais_spade_llm.resources.recovery_feasibility import derive_primitive_union
@@ -516,7 +516,11 @@ def _machine_command_projection(evidence: dict, snapshot: dict, primitive: str, 
     if not record:
         raise ValueError('NEEDS_CONTEXT: processing_observations/' + rid)
     params = deepcopy(params)
+    reloads = machine.get('simulation_process', {}).get('job_control', {}).get('resume_after_reload') is True
     for field, value in machine_public_state(record, snapshot).items():
+        # A paused job's part can come out and back in: the machine then reads loaded, and its job record still paused.
+        if reloads and value == 'paused' and snapshot.get(field) == 'loaded':
+            continue
         if field in snapshot and snapshot[field] != value:
             raise ValueError('NEEDS_CONTEXT: processing observation differs from projected ' + field)
     if primitive == 'start_job':
@@ -583,10 +587,34 @@ def _machine_access_transforms(physical: dict, rid: str) -> tuple[dict, dict]:
         'configuration_fingerprint': recovery_validation_fingerprint(configuration)}
 
 
-def _machine_access_projection(evidence: dict, snapshot: dict, task: dict, physical: dict, part: str) -> dict:
-    """Evaluate the native machine workholding and clearance checks on model bounds."""
+def _kmr_link_clearance(transforms: dict, scene: dict, machine: dict) -> dict:
+    """Bound each configured KMR link's clearance from the machine's workholding point."""
     from cais_spade_llm.resources.continuous_motion import transformed_box
 
+    configured = scene['KMR']['task_execution']['clearance_link_bounds']
+    clearance = machine['KMR_process_clearance_m']
+    if not configured or type(clearance) not in (int, float) or not math.isfinite(clearance) or clearance < 0:
+        raise ValueError('NEEDS_CONTEXT: configured KMR process clearance')
+    expected = machine['workholding_pose'][:3]
+    kmr_bounds = {}
+    for link, spheres in configured.items():
+        if not spheres:
+            raise ValueError('NEEDS_CONTEXT: KMR clearance bounds for ' + link)
+        distances = []
+        for sphere in spheres:
+            radius = sphere['radius']
+            if type(radius) not in (int, float) or not math.isfinite(radius) or radius < 0:
+                raise ValueError('NEEDS_CONTEXT: finite KMR clearance radius')
+            box = transformed_box(transforms[link], [[value, value] for value in sphere['center']], link)
+            bounds = [[low[0], high[1]] for low, high in zip(box['minimum'], box['maximum'], strict=True)]
+            low, high = _machine_distance_bounds(bounds, expected)
+            distances.append((math.nextafter(low - radius, -math.inf), math.nextafter(high - radius, math.inf)))
+        kmr_bounds[link] = [min(pair[0] for pair in distances), min(pair[1] for pair in distances)]
+    return kmr_bounds
+
+
+def _machine_access_projection(evidence: dict, snapshot: dict, task: dict, physical: dict, part: str) -> dict:
+    """Evaluate the native machine workholding and clearance checks on model bounds."""
     rid = evidence['resource_id']
     scene = evidence['inputs']['scene']
     machine = next(row for row in scene['machines'] if row['resource_id'] == rid)
@@ -605,41 +633,26 @@ def _machine_access_projection(evidence: dict, snapshot: dict, task: dict, physi
     if (support.get('status') != 'supported' or not support.get('source')
             or support.get('current_pose') != state.get('current_pose')):
         raise ValueError('NEEDS_CONTEXT: matching stationary workholding part evidence')
-    expected = machine['workholding_pose'][:3]
-    present = _machine_distance_bounds([[value, value] for value in state['current_pose'][:3]], expected)
+    region = workholding_bounds(scene, rid)
     # These are the same checks used by WorkflowPrimitiveRunner.observe_workholding
     # and its native robot_clearance callback; no clearance is inferred from labels.
-    if present[0] > .08:
+    if not inside_bounds(region, state['current_pose'][:3]):
         raise ValueError('The correct part is not observed at machine workholding')
-    if present[1] > .08:
-        raise ValueError('NEEDS_CONTEXT: workholding position bounds cross the native tolerance')
     kmr, kmr_source = _machine_access_transforms(physical, 'KMR')
-    configured = scene['KMR']['task_execution']['clearance_link_bounds']
+    kmr_bounds = _kmr_link_clearance(kmr, scene, machine)
     clearance = machine['KMR_process_clearance_m']
-    if not configured or type(clearance) not in (int, float) or not math.isfinite(clearance) or clearance < 0:
-        raise ValueError('NEEDS_CONTEXT: configured KMR process clearance')
-    kmr_bounds = {}
-    for link, spheres in configured.items():
-        if not spheres:
-            raise ValueError('NEEDS_CONTEXT: KMR clearance bounds for ' + link)
-        distances = []
-        for sphere in spheres:
-            radius = sphere['radius']
-            if type(radius) not in (int, float) or not math.isfinite(radius) or radius < 0:
-                raise ValueError('NEEDS_CONTEXT: finite KMR clearance radius')
-            box = transformed_box(kmr[link], [[value, value] for value in sphere['center']], link)
-            bounds = [[low[0], high[1]] for low, high in zip(box['minimum'], box['maximum'], strict=True)]
-            low, high = _machine_distance_bounds(bounds, expected)
-            distances.append((math.nextafter(low - radius, -math.inf), math.nextafter(high - radius, math.inf)))
-        kmr_bounds[link] = [min(pair[0] for pair in distances), min(pair[1] for pair in distances)]
     handling = machine['handling_robot']
     robot = next(row for row in scene['robots'] if row['resource_id'] == handling)
     transforms, robot_source = _machine_access_transforms(physical, handling)
     link = robot['prefix'] + robot['clearance_observation_link']
-    robot_bounds = _machine_distance_bounds([list(transforms[link][index][3]) for index in range(3)],
-                                            state['current_pose'][:3])
-    blocked = any(pair[1] < clearance for pair in kmr_bounds.values()) or robot_bounds[1] < .12
-    if not blocked and (any(pair[0] < clearance for pair in kmr_bounds.values()) or robot_bounds[0] < .12):
+    position = [list(transforms[link][index][3]) for index in range(3)]
+    robot_bounds = _machine_distance_bounds(position, state['current_pose'][:3])
+    robot_may_block = all(low <= top and high >= floor
+                          for (low, high), (floor, top) in zip(position, region, strict=True))
+    robot_blocks = all(floor <= low and high <= top
+                       for (low, high), (floor, top) in zip(position, region, strict=True))
+    blocked = any(pair[1] < clearance for pair in kmr_bounds.values()) or robot_blocks
+    if not blocked and (any(pair[0] < clearance for pair in kmr_bounds.values()) or robot_may_block):
         raise ValueError('NEEDS_CONTEXT: machine access bounds cross the native clearance limits')
     return {'part_name': part, 'correct_part_present': True, 'robot_access_clear': not blocked,
         'robot_clearance_m': {handling: robot_bounds[0]},
@@ -652,5 +665,94 @@ def _machine_access_projection(evidence: dict, snapshot: dict, task: dict, physi
             'part_support_fingerprint': recovery_validation_fingerprint(support),
             'resources': [kmr_source, robot_source]},
         'physical_execution_verified': False, 'execution_authorized': False}
+
+
+def _composed_kmr_transforms(scene: dict, physical: dict, kmr: dict) -> dict:
+    """Place the KMR chain where the accepted events left its base and joints."""
+    from cais_spade_llm.recovery_framework.kmr_recovery import _pose_list
+    from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms
+    from cais_spade_llm.resources.kinematic_reach import reach
+
+    if any(kmr.get(field) is None for field in ('base_pose', 'joint_positions', 'current_pose')):
+        raise ValueError('NEEDS_CONTEXT: the KMR base pose, joint positions and arm pose')
+    chain = deepcopy(physical.get('resource_models', {}).get('KMR', {}).get('configuration'))
+    if not chain:
+        raise ValueError('NEEDS_CONTEXT: the recorded KMR chain')
+    chain.update(root_xyz=kmr['base_pose'][:3], root_quaternion=kmr['base_pose'][3:7])
+
+    def placed(joints: list) -> dict:
+        return kinematic_transforms(chain, {name: interval(value) for name, value in
+                                            zip(chain['joint_names'], joints, strict=True)})
+
+    transforms = placed(kmr['joint_positions'])
+    pose = _pose_list(kmr['current_pose'])
+    tool = [transforms[chain['reference_link']][index][3][0] for index in range(3)]
+    if math.dist(tool, pose[:3]) <= scene['KMR']['task_execution']['position_tolerance_m']:
+        return transforms
+    # A named KMR pose moves the arm by a Cartesian target and leaves no joints, so find a configuration at that pose.
+    solved = reach(chain, pose, seeds=[kmr['joint_positions']])
+    if solved['feasibility_status'] != 'FEASIBLE':
+        raise ValueError('NEEDS_CONTEXT: KMR joint positions at its current pose')
+    return placed(solved['joint_positions'])
+
+
+def composed_machine_access(evidence: dict, physical: dict, grounding_context: dict, part: str) -> dict:
+    """Work out what a machine's job needs observed, from the state the accepted events leave.
+
+    Gazebo observes these conditions before a job runs. A composed program has nothing to observe and ``physical`` is
+    the failure-time record, so this reads ``grounding_context``, and judges them as ``WorkflowPrimitiveRunner`` does:
+    the part inside the machine's declared region, the handling robot outside it, the KMR links clear of it.
+
+    Args:
+        evidence: The machine's evidence, for the scene and the parts as recorded.
+        physical: The physical evidence, for the resource names and the KMR chain.
+        grounding_context: The projected resources and parts at this point of the program.
+        part: The job's part.
+
+    Returns:
+        The access observation a job records. It proposes no event value.
+
+    Raises:
+        ValueError: A condition does not hold, or, with ``NEEDS_CONTEXT``, a fact it needs is missing.
+    """
+    from cais_spade_llm.recovery_framework.kmr_recovery import _pose_list
+
+    rid, scene = evidence['resource_id'], evidence['inputs']['scene']
+    machine = next(row for row in scene['machines'] if row['resource_id'] == rid)
+    region = workholding_bounds(scene, rid)
+    resources = {name: grounding_context.get('resources', {}).get(jid, {}) for name, jid in physical.get('jids', {}).items()}
+    # A program that moves a part projects its pose; a part none has moved stays where it was recorded.
+    pose = (grounding_context.get('parts', {}).get(part, {}).get('observed_pose')
+            or (evidence.get('observed_parts', {}).get(part) or {}).get('current_pose'))
+    if pose is None:
+        raise ValueError(f'NEEDS_CONTEXT: the position of {part}')
+    position = _pose_list(pose)[:3]
+    if not inside_bounds(region, position):
+        raise ValueError(f'{part} at {[round(value, 3) for value in position]} is outside the declared region '
+                         f'{rid}.workholding')
+    holders = [name for name, row in resources.items() if row.get('held_part') == part]
+    if holders:
+        raise ValueError(f'{part} is still held by {", ".join(holders)}')
+    handling = machine['handling_robot']
+    robot_pose = resources.get(handling, {}).get('current_pose')
+    if robot_pose is None:
+        raise ValueError(f'NEEDS_CONTEXT: the position of {handling}')
+    # current_pose is the robot's tool0, which sits on wrist_3_link, its declared clearance_observation_link.
+    robot = _pose_list(robot_pose)[:3]
+    if inside_bounds(region, robot):
+        raise ValueError(f'{handling} at {[round(value, 3) for value in robot]} has not left the declared region '
+                         f'{rid}.workholding')
+    kmr = _composed_kmr_transforms(scene, physical, resources.get('KMR', {}).get('resource_evidence', {}).get('snapshot') or {})
+    kmr_bounds = _kmr_link_clearance(kmr, scene, machine)
+    clearance = machine['KMR_process_clearance_m']
+    near = [link for link, pair in kmr_bounds.items() if pair[0] < clearance]
+    if near:
+        raise ValueError(f'KMR links {", ".join(near)} are within {clearance} m of {rid} workholding')
+    return {'part_name': part, 'correct_part_present': True, 'robot_access_clear': True,
+            'robot_clearance_m': {handling: math.dist(robot, position)},
+            'KMR_arm_clearance_m': {link: pair[0] for link, pair in kmr_bounds.items()},
+            'source': {'kind': 'projected', 'calculation': 'resource_owned_machine_access',
+                       'region': f'{rid}.workholding'},
+            'physical_execution_verified': False, 'execution_authorized': False}
 
 

@@ -26,7 +26,7 @@ OBSTACLE_BOUNDS = {
     "ur5e-2 work area": (-2.85, -1.70, 0.72, 1.47),
     "Conveyor": (-4.95, -0.74, 0.32, 0.68),
     "Buffer For Machined parts": (-0.74, -0.26, 0.32, 0.68),
-    "Assembly Station": (-0.75, 0.75, -0.95, 1.05),
+    "Assembly Station": (-0.75, 0.75, -0.95, 0.80),
 }
 
 

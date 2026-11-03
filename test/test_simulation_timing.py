@@ -440,6 +440,7 @@ def test_configured_machine_access_controls_horizontal_pick_and_retreat():
                 "approach_pose": [-6.08, 1.64, 1.085, 0.0, 1.0, 0.0, 0.0],
                 "target_pose": [-6.08, 1.82, 1.085, 0.0, 1.0, 0.0, 0.0],
                 "pose_format": "xyz_xyzw",
+                "workholding_bounds": [[-6.2, -5.96], [1.7, 1.94], [0.94, 1.18]],
             },
         },
         detected_parts=[
@@ -1376,6 +1377,19 @@ def test_gear_pick_uses_configured_cad_width_with_mesh_collision(part):
     assert geometry["grasp_width_m"] == expected
     assert controller._derive_gripper_close_position(
         model_name=part, product_geometry=geometry) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("machine, robot", [("M1", "ur5e-1"), ("M2", "ur5e-2")])
+def test_a_machine_pick_carries_the_machines_declared_region(machine, robot):
+    from cais_spade_llm.product.environment import EnvironmentProductContext
+    from cais_spade_llm.ui.recovery_setup import load_setup, validate_setup
+    from cais_spade_llm.recovery_framework.workflow_execution import _pick_geometry
+
+    inputs = validate_setup(load_setup())
+    context = EnvironmentProductContext(inputs["scene"], inputs["product_order"], inputs["geometry"])
+    geometry = _pick_geometry(context, "KET4_Square_4mm", machine, robot)
+    assert geometry["handling_robot_access"]["workholding_bounds"] == (
+        inputs["scene"]["safety_preparation"]["regions"][machine + ".workholding"]["bounds"])
 
 
 def test_simulation_mating_targets_compensate_measured_grasp_offset():
@@ -2315,7 +2329,8 @@ def test_machine_pick_retreat_lifts_before_withdrawing_to_saved_clearance(robot,
     result = controller.compute_pick_targets(
         part_name='KET4_Square_4mm',
         product_geometry={'model_name': 'KET4_Square_4mm', 'part_height_m': .05,
-                          'handling_robot_access': machine['handling_robot_access']},
+                          'handling_robot_access': {**machine['handling_robot_access'], 'workholding_bounds':
+                              scene['safety_preparation']['regions'][machine['resource_id'] + '.workholding']['bounds']}},
         detected_parts=[{'part_name': 'KET4_Square_4mm', 'model_name': 'KET4_Square_4mm',
                          'x': x, 'y': 1.82, 'z': 1.06}],
     )

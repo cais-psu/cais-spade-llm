@@ -115,6 +115,37 @@ def test_a_carried_part_enters_a_region_only_after_its_required_completion(compl
     assert gate.decide(prediction)["status"] == expected
 
 
+def _assembly_order_rule() -> dict:
+    return _rule("gear_before_peg", ORDER, {
+        "ap001": ("process_target_completed", {"part": "peg", "process": "assembly", "target": "peg_slot"}),
+        "ap002": ("process_target_completed", {"part": "gear", "process": "assembly", "target": "gear_slot"})})
+
+
+@pytest.mark.parametrize("gear_done,expected", [(False, "held"), (True, "allowed")])
+def test_a_part_enters_a_free_region_and_only_its_assembly_waits_for_the_earlier_one(gear_done, expected):
+    tracker = {"peg": {"processCompleted": []},
+               "gear": {"processCompleted": [{"process": "assembly", "target": "gear_slot"}] if gear_done else []}}
+    gate = _gate([_board_mutex(), _assembly_order_rule()], tracker=tracker)
+    approach = _prediction(gate, task_id="approach", regions=("board",), part="peg", part_regions=("board",))
+    assert gate.decide(approach)["status"] == "allowed"
+    insert = _prediction(gate, task_id="insert", regions=("board",), observation=_observation(r1="board"),
+                         completions=frozenset({("peg", "assembly", "target", "peg_slot")}))
+    assert gate.decide(insert)["status"] == expected
+
+
+def test_the_later_part_on_the_board_holds_itself_and_the_earlier_part():
+    # Known limit of nominal admission (Eq. 13 only): the robot with the later part may reach the free board first.
+    # Its insert then waits on the gear while the mutex keeps the gear's robot out, so both sends time out.
+    tracker = {"peg": {"processCompleted": []}, "gear": {"processCompleted": []}}
+    gate = _gate([_board_mutex(), _assembly_order_rule()], tracker=tracker)
+    inside = _observation(r1="board")
+    insert = _prediction(gate, task_id="insert", regions=("board",), observation=inside,
+                         completions=frozenset({("peg", "assembly", "target", "peg_slot")}))
+    gear = _prediction(gate, task_id="gear", rid="r2", regions=("board",), observation=inside)
+    assert gate.decide(insert)["rule_id"] == "gear_before_peg"
+    assert gate.decide(gear)["rule_id"] == "board_mutex"
+
+
 @pytest.mark.parametrize("square_done,expected", [(False, "held"), (True, "allowed")])
 def test_a_start_is_checked_against_the_completions_its_finish_applies(square_done, expected):
     processing = _rule("square_before_circle", ORDER, {

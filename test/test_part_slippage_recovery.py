@@ -524,7 +524,7 @@ def test_owner_evidence_capture_satisfies_default_pick_calculation_without_calls
     controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.pick_z_adjustments_m = {"part": .01}
     controller.controller_config = {"motion": {"pick_tcp_z_bias_min_m": .003, "pick_tcp_z_bias_max_m": .02,
-        "approach_height_m": .2, "min_pick_tcp_z_m": 1.07}}
+        "recovery_observed_pick_approach_height_m": .06, "recovery_observed_pick_surface_clearance_m": .005}}
     controller.wait_for_services = Mock(side_effect=AssertionError("live controller access"))
     owner = SimpleNamespace(agent_name="robot", jid="robot@localhost", _controller=controller,
                             static_capabilities={"resource_type": "robot"})
@@ -543,7 +543,7 @@ def test_owner_evidence_capture_satisfies_default_pick_calculation_without_calls
     result = calculate_recovery_pick_target(task={"resource_jid": "robot@localhost", "part_name": "part"},
         recovery_snapshot={"current_pose": pose}, resource_evidence=evidence)
     assert result["status"] == "calculated", result
-    assert result["target_pose"]["z"] == pytest.approx(1.288)
+    assert result["target_pose"]["z"] == pytest.approx(1.2355)
     controller.wait_for_services.assert_not_called()
 
 

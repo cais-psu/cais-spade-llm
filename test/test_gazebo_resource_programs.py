@@ -547,7 +547,7 @@ def test_machine_fault_uses_simulation_clock_and_preserves_WIP(scene, tmp_path, 
                                "checkpoint": "during_processing_halfway", "control_path": str(path),
                                "evidence_path": str(tmp_path / "interruption.json")}},
         entity=entity, set_pose=Mock(),
-        robot_clearance=lambda _names, _states: {machine["handling_robot"]: 1.},
+        robot_clearance=lambda _names, _states, _region=None: {machine["handling_robot"]: 1.},
         current_clock=lambda: 10., wait_simulation=wait,
     )
     runner._kmr_clearance = lambda: {"link": 1.}

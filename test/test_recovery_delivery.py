@@ -1151,6 +1151,35 @@ def test_transport_sweep_rejects_attached_payload_collision_before_dispatch(inpu
     assert queries[0].robot_state['KMR_base_x_joint'] < queries[-1].robot_state['KMR_base_x_joint']
 
 
+def test_KMR_sweep_with_no_route_to_sample_reads_the_endpoints_alone(inputs):
+    import ast
+    import math
+    from pathlib import Path
+    from cais_spade_llm.recovery_framework import kmr_gazebo
+
+    tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'validate_transport')
+    method.body[0] = ast.copy_location(ast.Global(names=['planning_seconds']), method.body[0])
+    kmr = inputs['scene']['KMR']
+    route = [[0., 0., 0.], [.1, 0., 0.]]
+
+    def validity(_kind, _name, queries):
+        # The straight line between two clear ends runs through a machine, as from the M1 dock to the M2 dock.
+        return [SimpleNamespace(valid=query.robot_state['KMR_base_x_joint'] in (0., .1),
+                                contacts=[SimpleNamespace(contact_body_1='KMR_base', contact_body_2='M1')])
+                for query in queries]
+    namespace = dict(planning_seconds=0., time=SimpleNamespace(monotonic=lambda: 1.), config=kmr['task_execution'],
+                     kmr=kmr, math=math, deepcopy=deepcopy, service_batch=validity,
+                     GetStateValidity=SimpleNamespace(Request=lambda **kw: SimpleNamespace(**kw)),
+                     updated_state=lambda _state, names, positions: dict(zip(names, positions)))
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(kmr_gazebo.__file__), 'exec'), namespace)
+    state = SimpleNamespace(joint_state=SimpleNamespace(name=kmr['arm_joint_names'], position=[0.]*7))
+    with pytest.raises(ValueError, match='sweep is obstructed'):
+        namespace['validate_transport'](state, route=route)
+    result = namespace['validate_transport'](state, route=route, endpoints_only=True)
+    assert result['sampled'] == 'endpoints' and result['checked_states'] == 2
+
+
 def test_transport_heartbeat_stops_when_observed_part_leaves_attachment():
     import ast
     import json
@@ -1188,8 +1217,9 @@ def test_transport_heartbeat_stops_when_observed_part_leaves_attachment():
     namespace['custody_client'].call_async.assert_not_called()
 
 
+@pytest.mark.parametrize('mode, endpoints_only', [('task', False), ('primitive', True)])
 @pytest.mark.parametrize('acknowledged', [False, True])
-def test_move_base_waits_for_matching_guarded_custody_acknowledgement(acknowledged):
+def test_move_base_waits_for_matching_guarded_custody_acknowledgement(acknowledged, mode, endpoints_only):
     import ast
     import json
     import math
@@ -1228,7 +1258,7 @@ def test_move_base_waits_for_matching_guarded_custody_acknowledgement(acknowledg
         'custody': Mock(), 'confirm_carrying': Mock(return_value=[0.] * 7), 'part': part,
         'entity': lambda _name: source, '_base_yaw': lambda _pose: 0.,
         '_at_dock': lambda pose, dock, **_kw: math.dist(pose[:2], dock[:2]) < .005,
-        'scene': scene, 'held_part': part, 'mode': 'task',
+        'scene': scene, 'held_part': part, 'mode': mode,
         'pose_values': lambda value: value,
         'GetEntityState': SimpleNamespace(Request=SimpleNamespace),
         'config': {'attach_link': 'iiwa_link_7', 'services': {'get_state': '/get_state'}},
@@ -1256,6 +1286,7 @@ def test_move_base_waits_for_matching_guarded_custody_acknowledgement(acknowledg
         dispatch.assert_not_called()
     sent = json.loads(transport.publish.call_args.args[0].data)
     assert sent['custody_id'] == 'current' and sent['attached'] is True
+    assert namespace['validate_transport'].call_args.kwargs['endpoints_only'] is endpoints_only
 
 
 def test_gripper_controller_success_waits_for_measured_width():
@@ -1680,6 +1711,7 @@ def test_workflow_gazebo_executes_declared_primitive_order(
             },
             {"resource_id": "M2", "conveyor_loading_pose": [1.0, 0.0, 0.0]},
         ],
+        "safety_preparation": {"regions": {"M1.workholding": {"bounds": [[-0.1, 0.1]] * 3}}},
         "KMR": {"task_execution": {"clearance_link_bounds": {
             "link": [{"center": [0.0, 0.0, 0.0], "radius": 0.1}]
         }}},
@@ -1713,7 +1745,7 @@ def test_workflow_gazebo_executes_declared_primitive_order(
         request,
         entity=lambda name: entities[name],
         set_pose=lambda name, pose: setattr(entities[name], "pose", pose),
-        robot_clearance=lambda names, _states: {name: 1.0 for name in names},
+        robot_clearance=lambda names, _states, _region=None: {name: 1.0 for name in names},
         current_clock=lambda: 0.0,
         wait_simulation=wait_simulation,
     )
@@ -1777,7 +1809,8 @@ def test_workflow_gazebo_rejects_missing_workholding_and_blocked_conveyor():
     geometry = {"part": {"model_name": "part"}}
     machine = WorkflowPrimitiveRunner(
         {
-            "scene": {"machines": [{"resource_id": "M1", "workholding_pose": [0.0, 0.0, 0.0]}]},
+            "scene": {"machines": [{"resource_id": "M1", "workholding_pose": [0.0, 0.0, 0.0]}],
+                      "safety_preparation": {"regions": {"M1.workholding": {"bounds": [[-0.1, 0.1]] * 3}}}},
             "geometry": geometry,
             "task": {"event_name": "machine_part", "resource_id": "M1",
                      "parameters": {"part_name": "part"}},
@@ -2214,6 +2247,35 @@ def test_KMR_shared_storage_pose_distinguishes_return_from_pickup(function, inpu
         assert result['arm_parked'] is True
         dispatch.assert_called_once()
         authorize.assert_called_once()
+
+
+@pytest.mark.parametrize('mode, waypoints, endpoints_only', [
+    ('primitive', None, True), ('primitive', [], True), ('primitive', [[-5.54, 3.1, 1.5708]], False),
+    ('environment_task', [], False)])
+def test_KMR_primitive_with_no_waypoints_leaves_its_path_to_the_base(inputs, mode, waypoints, endpoints_only):
+    """Storage to M2 has a declared route no composed program is served, and its straight line runs through M1."""
+    import ast
+    import math
+    from pathlib import Path
+    from cais_spade_llm.recovery_framework import kmr_gazebo
+    from cais_spade_llm.recovery_framework.geometry import quaternion
+
+    tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'move_base')
+    method.body[1] = ast.copy_location(ast.Global(names=['transport_timer']), method.body[1])
+    scene = inputs['scene']
+    dock = next(row['KMR_docking_pose'] for row in scene['machines'] if row['resource_id'] == 'M2')
+    target = [dock[0], dock[1], dock[5]]
+    home = scene['Storage']['KMR_docking_pose']
+    base = [home[0], home[1], 0., *quaternion([0., 0., home[5]])]
+    dispatch, authorize = Mock(return_value=target), Mock(return_value={'success': True})
+    namespace = dict(math=math, deepcopy=deepcopy, scene=scene, part=None, name=None, mode=mode, held_part=None,
+                     operations=[], transport_timer=None, entity=lambda _: base, _base_yaw=kmr_gazebo._base_yaw,
+                     _at_dock=kmr_gazebo._at_dock, authorize_empty_transport=authorize, dispatch_base_move=dispatch)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(kmr_gazebo.__file__), 'exec'), namespace)
+    assert namespace['move_base'](target, waypoints)['resource_location'] == 'M2'
+    assert authorize.call_args.kwargs['endpoints_only'] is endpoints_only
+    dispatch.assert_called_once_with(target, waypoints or [])
 
 
 @pytest.mark.parametrize('part', ['KET4_Square_4mm', 'RGOCG16-50_16mm'])

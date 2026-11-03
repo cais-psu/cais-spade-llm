@@ -534,36 +534,44 @@ def _job_composition_guidance(prepared_recovery_request: dict[str, Any], resourc
     return (
         f"A job primitive's job_id is a key of /resources/{resource_jid}/resource_evidence/processing_observations/jobs; "
         "active_job in that record names the running job, and a paused job keeps its key. "
-    )
-
-
-def _transport_composition_guidance(prepared_recovery_request: dict[str, Any], resource_jid: str) -> str:
-    """Say that a transport program binds no distance; empty for other resources."""
-    names = {str(row.get("name")) for row in _primitive_catalog_for_resource(prepared_recovery_request, resource_jid)}
-    if "compute_transport_targets" not in names:
-        return ""
-    return (
-        "A transport program is detect_parts, compute_transport_targets, then move_relative, with no parameters: "
-        "compute_transport_targets calculates where the parts arrive from the locations the event states. "
+        "start_job opens a new job, so it takes no job_id. "
     )
 
 
 def _kmr_composition_guidance(resource_jid: str) -> str:
-    """Say how a KMR program binds what the KMR's decompositions name by ``$state`` and ``$ref``."""
+    """Say what a KMR's decompositions name by ``$state`` and ``$ref``, and where those values are."""
     return (
-        "For this KMR, adapt its capability decompositions; their $state and $ref values name what a program binds. "
-        "compute_pick_targets and compute_place_targets publish their calculated poses under "
-        "event_facts.pick_targets.<part> and event_facts.place_targets.<part>, by the names the decompositions use "
-        "(target, approach, lift, lift_waypoints, retreat, transport, withdraw_waypoints); bind "
-        "move_cartesian.target to one of these lists. "
-        "compute_pick_targets needs no parameters. compute_place_targets reads the place from the event's "
-        "part_location and the zone it names, so omit part_pose. "
-        f"Bind its transform to /resources/{resource_jid}/resource_evidence/attachment/grasp_transform, "
-        "and move_base's too while the KMR holds a part. move_base takes [x, y, yaw]: the event's stated pose, or "
-        f"the place's dock from /resources/{resource_jid}/docks/<place>. Custody completion requires reaching the "
-        "calculated target, then grasp_part or release_part, then a next motion that reaches the calculated "
-        "retreat. "
+        "In this KMR's capability decompositions, $state and $ref values name recorded or calculated facts. "
+        "compute_pick_targets and compute_place_targets publish their calculated values under "
+        "event_facts.pick_targets.<part> and event_facts.place_targets.<part>, by the names the decompositions use: "
+        "the poses target, approach, lift, retreat and transport, and the waypoints lift_waypoints, "
+        "transfer_waypoints and withdraw_waypoints. compute_place_targets reads the place from the event's "
+        f"part_location and the zone it names. The recorded grasp is /resources/{resource_jid}/resource_evidence/"
+        f"attachment/grasp_transform, and a place's dock is /resources/{resource_jid}/docks/<place>. move_base takes "
+        "[x, y, yaw]. "
     )
+
+
+def _note_declared_route(
+    payload: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    resource_jid: str,
+) -> None:
+    """Note on a nominal approach the route the robot declares for it; a function with none stays as it is.
+
+    The controller adds these points inside the approach step (``_move_xy_direct``), so no step template shows them.
+    """
+    evidence = _resource_recovery_entry(prepared_recovery_request, resource_jid).get("resource_evidence") or {}
+    motion = (evidence.get("controller_config") or {}).get("cartesian_motion") or {}
+    root = f"/resources/{resource_jid}/resource_evidence/controller_config/cartesian_motion"
+    routes = {"pick_approach": (f"{root}/pick_transit_waypoints", motion.get("pick_transit_waypoints")),
+              "place_approach": (f"{root}/transit_waypoints/0", (motion.get("transit_waypoints") or [None])[0])}
+    for function_name, (route, points) in routes.items():
+        decomposition = payload if payload.get("function_name") == function_name else payload.get(function_name)
+        if points and decomposition:
+            approach = next(step for step in decomposition["recovery_visible_steps"]
+                            if step["primitive"] == "move_cartesian")
+            approach["note"] = f"Nominally the controller flies this move through the declared route {route} = {points}."
 
 
 def _capability_decomposition_for_resource(
@@ -574,7 +582,7 @@ def _capability_decomposition_for_resource(
 ) -> Any:
     resource_type = _resource_type_for_resource(prepared_recovery_request, resource_jid)
     profile = get_resource_profile(resource_type or "resource")
-    return resource_capability_decompositions(
+    payload = resource_capability_decompositions(
         profile,
         function_name=function_name,
         primitive_catalog=_primitive_catalog_for_resource(
@@ -583,6 +591,9 @@ def _capability_decomposition_for_resource(
         ),
         resource_jid=resource_jid,
     )
+    if prepared_recovery_request.get("composition_validation_version") == 1:
+        _note_declared_route(payload, prepared_recovery_request, resource_jid)
+    return payload
 
 
 def _resource_recovery_entry(
@@ -1247,6 +1258,10 @@ def _active_resource_named_pose_names(
         names = _named_pose_names_only(source)
         if names:
             return names
+    if _resource_type_for_resource(prepared_recovery_request, resource_jid) == "kmr":
+        from cais_spade_llm.recovery_framework.kmr_recovery import KMR_NAMED_POSES
+
+        return list(KMR_NAMED_POSES)
     return []
 
 
@@ -1355,7 +1370,6 @@ def _visible_primitive_catalog_card(
             ],
             **contract,
             "output_schema": deepcopy(entry.get("output_schema") or {}),
-            "primitive_kind": str(entry.get("primitive_kind") or "").strip() or None,
         }
         by_name[name] = row
         card.append(row)
@@ -1365,7 +1379,7 @@ def _visible_primitive_catalog_card(
 def _visible_primitive_catalog_names(
     primitive_catalog: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Minimal catalog view: just ``{name, primitive_kind}`` per entry.
+    """Minimal catalog view: just ``{name}`` per entry.
 
     Full contract cards (params / preconditions / effects / output_schema) are
     retrieved on demand via ``/primitive_contracts/<name>``.
@@ -1377,8 +1391,7 @@ def _visible_primitive_catalog_names(
         name = str(entry.get("name") or "").strip()
         if not name or any(row["name"] == name for row in rows):
             continue
-        kind = str(entry.get("primitive_kind") or "").strip() or None
-        rows.append({"name": name, "primitive_kind": kind})
+        rows.append({"name": name})
     return rows
 
 
@@ -1602,6 +1615,31 @@ def _relevant_authoring_memo(
     return matches
 
 
+_CAPTURE_SNAPSHOT_FIELDS = ("occupancy", "resource_core", "held_part_location")
+_PUBLISHED_TARGET_FIELDS = {
+    "compute_pick_targets": ("approach_pose", "target_pose", "retreat_pose", "access_retreat_pose", "observed_pose",
+                             "pick_tcp_z", "pick_z", "travel_z", "tcp_offset_z", "part_height", "model_name"),
+    "compute_place_targets": ("approach_pose", "target_pose", "retreat_pose", "insert_pose", "pre_insert_pose",
+                              "target_origin_pose", "grasp_transform", "part_height", "model_name", "destination_location",
+                              "slot_x", "slot_y", "board_top_z", "place_part_origin_z"),
+}
+_ASSEMBLY_SLOT_FIELDS = ("Fields: slot_x, slot_y, part_height, board_top_z, part_origin_z (published as "
+                         "place_part_origin_z) and destination_location.")
+
+
+def _composition_contract(entry: dict[str, Any], resource_type: str) -> dict[str, Any]:
+    """Add to an arm's served contract what its catalog does not list; the catalog itself stays as recorded."""
+    served = deepcopy(entry)
+    if resource_type != "robot":
+        return served
+    if served.get("name") in _PUBLISHED_TARGET_FIELDS:
+        served["publishes"] = list(_PUBLISHED_TARGET_FIELDS[served["name"]])
+    slot = (served.get("params") or {}).get("assembly_slot")
+    if isinstance(slot, dict):
+        slot["description"] = f"{slot.get('description', '')} {_ASSEMBLY_SLOT_FIELDS}".strip()
+    return served
+
+
 def _resolve_context_ref(
     *,
     ref: str,
@@ -1625,7 +1663,7 @@ def _resolve_context_ref(
       /parts/<name>/snapshot                      -> full part state
       /primitive_catalog/<resource_jid>           -> visible catalog for that resource
       /primitive_contracts/<primitive_name>       -> catalog entry for one primitive
-      /projected_snapshot/<resource_jid>          -> last projected snapshot for this resource
+      /projected_snapshot/<resource_jid>          -> this resource at the start of the active event
     """
     trimmed = str(ref or "").strip()
     if not trimmed.startswith("/"):
@@ -1637,17 +1675,27 @@ def _resolve_context_ref(
     head = segments[0]
     rest = segments[1:]
 
-    if prepared_recovery_request.get("composition_validation_version") == 1 and head in {"resources", "parts"}:
+    if (prepared_recovery_request.get("composition_validation_version") == 1
+            and head in {"resources", "parts", "projected_snapshot"}):
         from cais_spade_llm.resources.recovery_composition import resolve_composition_value
 
         context = _primitive_grounding_context(session_state=session_state,
             prepared_recovery_request=prepared_recovery_request, outline_event=outline_event)
         if head == "parts" and len(rest) == 2 and rest[1] == "snapshot":
             trimmed = "/parts/" + rest[0]
+        # Each event runs in its own batch session, so this session has no accepted row of its own to read.
+        if head == "projected_snapshot":
+            trimmed = f"/resources/{rest[0] if rest else _outline_resource_jid(outline_event)}/snapshot"
         try:
-            return resolve_composition_value({"context_ref": trimmed}, context), None
+            value = resolve_composition_value({"context_ref": trimmed}, context)
         except (KeyError, ValueError) as exc:
             return None, str(exc)
+        # A projected snapshot keeps these capture fields, which no program updates. The owner check reads its own
+        # record, so only what is served drops them, or held_part would be contradicted by a part already released.
+        if isinstance(value, dict):
+            value = {name: item for name, item in value.items()
+                     if name not in _CAPTURE_SNAPSHOT_FIELDS and not name.startswith("task_ctx.")}
+        return value, None
 
     if head == "outline_event":
         payload = deepcopy(outline_event)
@@ -1723,6 +1771,9 @@ def _resolve_context_ref(
         catalog = _primitive_catalog_for_resource(prepared_recovery_request, resource_jid)
         for entry in _visible_primitive_catalog_card(catalog):
             if entry.get("name") == primitive_name:
+                if prepared_recovery_request.get("composition_validation_version") == 1:
+                    return _composition_contract(entry, _resource_type_for_resource(
+                        prepared_recovery_request, resource_jid)), None
                 return deepcopy(entry), None
         return None, f"primitive {primitive_name!r} is not in the visible catalog"
 
@@ -2257,35 +2308,26 @@ async def generate_primitive_batch_with_llm_agent(
         if prepared_recovery_request.get("composition_validation_version") == 1:
             prompt_text += (
                 "\n\nRA composition validation: author an ordered program that establishes every intended "
-                "resource and part postcondition from declared effects. Primitive support is only a union "
+                "resource and part postcondition from declared effects; a location no primitive declares is read "
+                "from where the program ends. Primitive support is only a union "
                 "of possible contributors, not a sequence or a requirement to use every primitive. "
                 "Use exact primitive identities and explicit {\"context_ref\": \"/path\"} bindings. "
                 "A contract with controllable false is the resource's own outcome, after after_sec: a step that "
-                "names it sends no command and waits for it; bind its parameters to the record it completes. "
+                "names it sends no command and waits for it. "
                 f"The recovery_des_model is retrievable under /resources/{resource_jid}/recovery_des_model. "
                 f"Recorded owner inputs are under /resources/{resource_jid}/resource_evidence/<field>: request only "
                 "the fields a parameter binds to; the whole record is too large and is listed by field. "
                 "Missing facts require need_context; they are different from explicit null. "
                 "Calculated event_facts are available only after their producing step. "
                 + _job_composition_guidance(prepared_recovery_request, resource_jid)
-                + _transport_composition_guidance(prepared_recovery_request, resource_jid)
                 + (_kmr_composition_guidance(resource_jid) if _resource_type_for_resource(
                     prepared_recovery_request, resource_jid) == "kmr" else
-                "For robot targets, prefer recorded owner inputs with part_name, and destination_location "
-                "for compute_place_targets. In this composition path, the owner reads recorded geometry "
-                "and observed poses internally: omit product_geometry, target_pose, and target_pose_source "
-                "instead of copying those observations into explicit geometric overrides. "
+                "The owner's target calculations read recorded geometry and observed poses themselves. "
                 "An accepted projected placement can support compute_pick_targets in this model-based "
                 "composition, but cannot serve as a fresh perception observation for detect_parts. "
-                "Include detect_parts only when its outputs or effects are required and recorded "
-                "perception evidence supports it; a capability decomposition does not require every primitive. "
-                "Geometric overrides require exact owner verification. "
-                "The robot target outputs include approach_pose, target_pose, and retreat_pose; bind all "
-                "seven pose coordinates to preserve the calculated orientation. Custody completion requires "
-                "reaching target_pose, grasp_part or release_part, then retreat_pose. Only a place into the part's "
-                "assembly_slot (the location in /parts/<name>/target) binds release_part.assembly_slot: slot_x, "
-                "slot_y, part_height, board_top_z, place_part_origin_z (as part_origin_z), and destination_location "
-                "from the calculated place targets. Any other destination has no slot fields, so omit assembly_slot. ")
+                "The robot target outputs include approach_pose, target_pose, and retreat_pose. Only a place "
+                "into the part's assembly_slot (the location in /parts/<name>/target) has slot fields in the "
+                "calculated place targets. ")
                 + "Validation findings identify the step or missing postcondition to revise. "
                 "This is composition for review; no execution is authorized."
             )
@@ -2420,11 +2462,17 @@ async def generate_primitive_batch_with_llm_agent(
 _PUBLISHED_REF_SCHEMA: list[dict[str, str]] = [
     {"ref": "/outline_event", "description": "the active outline event (full)"},
     {"ref": "/resources/<jid>/snapshot", "description": "full resource snapshot"},
-    {"ref": "/resources/<jid>/current_pose", "description": "current pose for the resource"},
+    {"ref": "/resources/<jid>/current_pose", "description": "an arm's current tool pose; a KMR's poses are in its snapshot"},
     {"ref": "/resources/<jid>/held_part", "description": "currently held part, if any"},
     {
         "ref": "/resources/<jid>/static_capabilities",
-        "description": "named poses, workspace bounds, staging areas",
+        "description": "as the capture recorded: the places an arm reaches, a machine's process capabilities and "
+                       "configuration; empty for other resources; no poses or coordinates",
+    },
+    {
+        "ref": "/resources/<jid>/resource_evidence/controller_config/cartesian_motion",
+        "description": "an arm's declared route around its base, as x, y, z points: pick_transit_waypoints "
+                       "and transit_waypoints, and rotation_waypoint, where it turns",
     },
     {"ref": "/parts/<name>/snapshot", "description": "full part state"},
     {
@@ -2442,19 +2490,11 @@ _PUBLISHED_REF_SCHEMA: list[dict[str, str]] = [
     },
     {
         "ref": "/projected_snapshot/<jid>",
-        "description": "last accepted projected snapshot for this resource",
+        "description": "this resource at the start of the active event",
     },
-    {"ref": "/observation_store", "description": "session observation store"},
-    {"ref": "/accepted_outline_prefix", "description": "full accepted outline prefix (all events)"},
-    {"ref": "/remaining_outline_events", "description": "events at/after the current cursor"},
-    {"ref": "/safety_rules", "description": "loaded safety rules with raw text"},
     {
         "ref": "/capability_decompositions/<function_name>",
-        "description": "primary modeled source for how the active resource composes recovery-visible low-level primitives",
-    },
-    {
-        "ref": "/memo/primitive_authoring",
-        "description": "session-scoped memo of previously accepted decompositions",
+        "description": "how a nominal function of the active resource composes primitives",
     },
 ]
 

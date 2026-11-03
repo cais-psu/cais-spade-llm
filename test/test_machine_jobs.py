@@ -377,7 +377,7 @@ def test_machine_access_keeps_constraints_and_missing_evidence_distinct(resource
     elif condition in {'KMR_occupied', 'handling_robot_occupied', 'KMR_ambiguous', 'handling_robot_ambiguous'}:
         peer = 'KMR' if condition.startswith('KMR') else handling
         model = physical['resource_models'][peer]['configuration']
-        margin = machine['KMR_process_clearance_m'] + .1 if peer == 'KMR' else .12
+        margin = machine['KMR_process_clearance_m'] + (.1 if peer == 'KMR' else 0.)
         model['root_xyz'][0] = machine['workholding_pose'][0] + (margin if condition.endswith('ambiguous') else .01)
     elif condition == 'missing_link':
         evidence['inputs']['scene']['KMR']['task_execution']['clearance_link_bounds']['missing'] = [{'center': [0., 0., 0.], 'radius': .1}]
@@ -394,6 +394,300 @@ def test_machine_access_keeps_constraints_and_missing_evidence_distinct(resource
             _machine_access_projection(evidence, snapshot, task, physical, part)
         assert ('NEEDS_CONTEXT:' in str(rejected.value)) is (condition not in {'part_moved', 'held'})
     assert (evidence, snapshot, task, physical) == before
+
+
+def _composed_access_case(resource_id='M2'):
+    """A job at a composition prefix: the part placed at the machine, its robot above, the KMR away."""
+    scene = deepcopy(json.loads(SCENE_PATH.read_text()))
+    machine = next(row for row in scene['machines'] if row['resource_id'] == resource_id)
+    x, y, z = machine['workholding_pose'][:3]
+    scene['KMR']['task_execution']['clearance_link_bounds'] = {'tool': [{'center': [0., 0., 0.], 'radius': .01}]}
+    # The recorded root is failure-time: a KMR that moved stands where the accepted events left its base.
+    chain = {'root': 'base', 'reference_link': 'tool', 'root_xyz': [9., 9., 9.], 'root_quaternion': [0., 0., 0., 1.],
+             'joint_names': ['a1'], 'joints': [{'name': 'a1', 'parent': 'base', 'child': 'tool', 'type': 'revolute',
+                                                'axis': [0., 0., 1.], 'xyz': [0., 0., .5], 'rpy': [0., 0., 0.],
+                                                'position_bounds': [-3., 3.]}]}
+    kmr = {'base_pose': [x + 2., y, 0., 0., 0., 0., 1.], 'joint_positions': [0.], 'current_pose': [x + 2., y, .5, 0., 0., 0., 1.]}
+    part = 'KET4_Square_4mm'
+    context = {'parts': {part: {'observed_pose': {'x': x, 'y': y, 'z': z}}},
+               'resources': {'robot': {'held_part': None, 'current_pose': {'x': x, 'y': y, 'z': z + .28}},
+                             'kmr': {'held_part': None, 'resource_evidence': {'snapshot': kmr}}}}
+    physical = {'jids': {machine['handling_robot']: 'robot', 'KMR': 'kmr'}, 'resource_models': {'KMR': {'configuration': chain}}}
+    return {'resource_id': resource_id, 'inputs': {'scene': scene}}, physical, context, part
+
+
+@pytest.mark.parametrize('resource_id', ['M1', 'M2'])
+def test_a_composed_job_takes_its_access_from_the_state_the_accepted_events_leave(resource_id):
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case(resource_id)
+    before = deepcopy((evidence, physical, context))
+    access = composed_machine_access(evidence, physical, context, part)
+    assert (access['part_name'], access['correct_part_present'], access['robot_access_clear']) == (part, True, True)
+    assert access['source']['kind'] == 'projected' and access['source']['region'] == resource_id + '.workholding'
+    assert access['physical_execution_verified'] is False and access['execution_authorized'] is False
+    assert (evidence, physical, context) == before
+
+
+def test_a_composed_part_reads_the_same_as_a_recorded_list_or_a_projected_dict():
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    pose = context['parts'][part]['observed_pose']
+    context['parts'][part]['observed_pose'] = [pose['x'], pose['y'], pose['z'], 0., 0., 0., 1.]
+    assert composed_machine_access(evidence, physical, context, part)['correct_part_present'] is True
+
+
+@pytest.mark.parametrize('offset, inside', [(.1, True), (.119, True), (.121, False), (.2, False)])
+def test_a_part_is_at_the_machine_while_it_is_inside_its_declared_region(offset, inside):
+    from cais_spade_llm.recovery_framework.workflow_gazebo import WorkflowPrimitiveRunner
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    context['parts'][part]['observed_pose']['x'] += offset
+    pose = context['parts'][part]['observed_pose']
+    state = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(**pose)))
+    runner = WorkflowPrimitiveRunner(
+        {'scene': evidence['inputs']['scene'], 'geometry': {part: {'model_name': 'part'}},
+         'task': {'resource_id': 'M2', 'event_name': 'machine_part', 'parameters': {'part_name': part}}},
+        entity=lambda _: state, set_pose=Mock(), robot_clearance=Mock(), current_clock=lambda: 0., wait_simulation=Mock())
+    if inside:
+        composed_machine_access(evidence, physical, context, part)
+        runner.observe_workholding()
+    else:
+        with pytest.raises(ValueError, match='outside the declared region M2.workholding'):
+            composed_machine_access(evidence, physical, context, part)
+        with pytest.raises(ValueError, match='not observed at machine workholding'):
+            runner.observe_workholding()
+
+
+def test_a_handling_robot_inside_the_declared_region_is_refused_by_name():
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    context['resources']['robot']['current_pose']['z'] -= .2
+    with pytest.raises(ValueError, match='ur5e-2 .* has not left the declared region M2.workholding') as refused:
+        composed_machine_access(evidence, physical, context, part)
+    assert 'NEEDS_CONTEXT' not in str(refused.value)
+
+
+def test_a_kmr_link_inside_its_clearance_is_refused_from_where_its_base_stands_now():
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    machine = next(row for row in evidence['inputs']['scene']['machines'] if row['resource_id'] == 'M2')
+    x, y, z = machine['workholding_pose'][:3]
+    context['resources']['kmr']['resource_evidence']['snapshot'].update(
+        base_pose=[x, y, z - .5, 0., 0., 0., 1.], current_pose=[x, y, z, 0., 0., 0., 1.])
+    with pytest.raises(ValueError, match='KMR links tool are within'):
+        composed_machine_access(evidence, physical, context, part)
+
+
+def test_a_part_a_resource_still_holds_is_refused():
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    context['resources']['kmr']['held_part'] = part
+    with pytest.raises(ValueError, match=f'{part} is still held by KMR'):
+        composed_machine_access(evidence, physical, context, part)
+
+
+@pytest.mark.parametrize('fact, named', [('part', 'the position of KET4_Square_4mm'), ('robot', 'the position of ur5e-2'),
+    ('kmr', 'the KMR base pose'), ('chain', 'the recorded KMR chain'), ('region', 'the declared region M2.workholding')])
+def test_a_missing_access_fact_is_refused_by_name_and_never_defaulted(fact, named):
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    if fact == 'part':
+        context['parts'][part]['observed_pose'] = None
+    elif fact == 'robot':
+        context['resources']['robot']['current_pose'] = None
+    elif fact == 'kmr':
+        context['resources']['kmr']['resource_evidence']['snapshot'] = {}
+    elif fact == 'chain':
+        physical['resource_models'] = {}
+    else:
+        evidence['inputs']['scene']['safety_preparation']['regions'].pop('M2.workholding')
+    with pytest.raises(ValueError, match='NEEDS_CONTEXT: ' + named):
+        composed_machine_access(evidence, physical, context, part)
+
+
+def test_kmr_joints_a_named_pose_left_behind_are_not_read_as_its_arm():
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    context['resources']['kmr']['resource_evidence']['snapshot']['current_pose'][2] += .3
+    with pytest.raises(ValueError, match='NEEDS_CONTEXT: KMR joint positions at its current pose'):
+        composed_machine_access(evidence, physical, context, part)
+
+
+def test_a_kmr_named_pose_is_solved_for_its_arm_instead_of_refusing_the_job():
+    import math
+
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    chain = physical['resource_models']['KMR']['configuration']
+    chain['joints'][0]['child'] = 'link'
+    chain['joints'].append({'name': 'fixed', 'parent': 'link', 'child': 'tool', 'type': 'fixed', 'axis': [0., 0., 1.],
+                            'xyz': [.3, 0., 0.], 'rpy': [0., 0., 0.]})
+    snapshot = context['resources']['kmr']['resource_evidence']['snapshot']
+    x, y = snapshot['base_pose'][:2]
+    tool = [x + .3 * math.cos(1.), y + .3 * math.sin(1.), .5]
+    snapshot['current_pose'] = [*tool, 0., 0., math.sin(.5), math.cos(.5)]
+    machine = next(row for row in evidence['inputs']['scene']['machines'] if row['resource_id'] == 'M2')
+    access = composed_machine_access(evidence, physical, context, part)
+    assert access['KMR_arm_clearance_m']['tool'] == pytest.approx(math.dist(tool, machine['workholding_pose'][:3]) - .01,
+                                                                  abs=1e-4)
+
+
+def test_a_part_no_program_moved_is_read_where_it_was_recorded():
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    pose = context['parts'][part]['observed_pose']
+    evidence['observed_parts'] = {part: {'current_pose': [pose['x'], pose['y'], pose['z'], 0., 0., 0., 1.]}}
+    context['parts'][part]['observed_pose'] = None
+    assert composed_machine_access(evidence, physical, context, part)['correct_part_present'] is True
+
+
+def test_a_part_a_program_moved_is_not_read_where_it_was_recorded():
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    pose = context['parts'][part]['observed_pose']
+    evidence['observed_parts'] = {part: {'current_pose': [pose['x'], pose['y'], pose['z'], 0., 0., 0., 1.]}}
+    context['parts'][part]['observed_pose'] = {'x': -2.6, 'y': 1.1, 'z': 1.06}
+    with pytest.raises(ValueError, match='outside the declared region M2.workholding'):
+        composed_machine_access(evidence, physical, context, part)
+
+
+@pytest.mark.parametrize('axis', ['x', 'y', 'z'])
+@pytest.mark.parametrize('sign', [1., -1.])
+def test_the_declared_region_is_judged_on_every_side(axis, sign):
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    center = dict(context['parts'][part]['observed_pose'])
+    context['resources']['robot']['current_pose'] = {**center, axis: center[axis] + sign * .119}
+    with pytest.raises(ValueError, match='has not left the declared region'):
+        composed_machine_access(evidence, physical, context, part)
+    context['resources']['robot']['current_pose'] = {**center, axis: center[axis] + sign * .121}
+    composed_machine_access(evidence, physical, context, part)
+    context['parts'][part]['observed_pose'][axis] += sign * .121
+    with pytest.raises(ValueError, match='outside the declared region'):
+        composed_machine_access(evidence, physical, context, part)
+
+
+@pytest.mark.parametrize('distance, clear', [(.125, False), (.135, True)])
+def test_a_kmr_link_is_judged_by_the_machines_declared_clearance(distance, clear):
+    from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    machine = next(row for row in evidence['inputs']['scene']['machines'] if row['resource_id'] == 'M2')
+    x, y, z = machine['workholding_pose'][:3]
+    context['resources']['kmr']['resource_evidence']['snapshot'].update(
+        base_pose=[x + distance, y, z - .5, 0., 0., 0., 1.], current_pose=[x + distance, y, z, 0., 0., 0., 1.])
+    if clear:
+        assert composed_machine_access(evidence, physical, context, part)['robot_access_clear'] is True
+    else:
+        with pytest.raises(ValueError, match='KMR links tool are within 0.12 m'):
+            composed_machine_access(evidence, physical, context, part)
+
+
+def test_a_composed_observation_starts_a_new_job_on_the_machines_own_record():
+    from cais_spade_llm.resources.environment_recovery import _machine_command_projection, composed_machine_access
+
+    evidence, physical, context, part = _composed_access_case()
+    scene = evidence['inputs']['scene']
+    machine = next(row for row in scene['machines'] if row['resource_id'] == 'M2')
+    owner = MachineJobs(machine, 'run')
+    owner.command('select_program', {'program': 'square'}, command_id='program', now=100., observations={})
+    evidence['processing_observations'] = owner.snapshot()
+    access = composed_machine_access(evidence, physical, context, part)
+    physical['machine_access_observations'] = {'M2': access}
+    task = {'outline_id': 'start', 'part_name': part}
+    record, reply = _machine_command_projection(evidence, {'resource_state': 'loaded', 'part_name': part}, 'start_job',
+        {'part_name': part, 'process': 'trim', 'result': 'square'}, task, physical)
+    assert reply['job_state'] == 'running'
+    assert record['jobs'][record['active_job']]['observations'] == access
+
+
+@pytest.mark.parametrize('declared, state, resumes', [(True, 'loaded', True), (False, 'loaded', False), (True, 'idle', False)])
+def test_a_paused_job_resumes_after_a_reload_only_where_the_machine_declares_it(machine, declared, state, resumes):
+    from cais_spade_llm.resources.environment_recovery import _machine_command_projection
+
+    part = 'RGOCG4-50_Round_4mm'
+    owner = MachineJobs(machine, 'run')
+    start(owner)
+    owner.command('pause_job', {'job_id': 'circle-job'}, command_id='pause', now=101, observations=observed())
+    machine['simulation_process']['job_control']['resume_after_reload'] = declared
+    evidence = {'resource_id': machine['resource_id'], 'processing_observations': owner.snapshot(),
+                'inputs': {'scene': {'machines': [machine]}}}
+    snapshot = {'resource_state': state, 'part_name': part, 'selected_program': 'circle'}
+    physical = {'machine_access_observations': {machine['resource_id']: observed()}}
+    task = {'outline_id': 'resume', 'part_name': part}
+    if resumes:
+        record, reply = _machine_command_projection(evidence, snapshot, 'resume_job', {'job_id': 'circle-job'}, task, physical)
+        assert reply['job_state'] == 'running' and record['active_job'] == 'circle-job'
+    else:
+        with pytest.raises(ValueError, match='processing observation differs from projected resource_state'):
+            _machine_command_projection(evidence, snapshot, 'resume_job', {'job_id': 'circle-job'}, task, physical)
+
+
+def _gazebo_machine_runner(positions, *, clearance=None):
+    from cais_spade_llm.recovery_framework.workflow_gazebo import WorkflowPrimitiveRunner
+
+    scene = deepcopy(json.loads(SCENE_PATH.read_text()))
+    machine = next(row for row in scene['machines'] if row['resource_id'] == 'M2')
+    x, y, z = machine['workholding_pose'][:3]
+    states = [SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=x + offset, y=y, z=z))) for offset in positions]
+
+    def wait(duration, observe):
+        observe(duration)
+        return 0., duration
+
+    runner = WorkflowPrimitiveRunner(
+        {'scene': scene, 'geometry': {'part': {'model_name': 'part'}},
+         'task': {'resource_id': 'M2', 'event_name': 'machine_part',
+                  'parameters': {'part_name': 'part', 'process': 'trim', 'result': 'square'}}},
+        entity=lambda _: states.pop(0) if len(states) > 1 else states[0], set_pose=Mock(), robot_clearance=clearance or Mock(),
+        current_clock=lambda: 0., wait_simulation=wait)
+    runner._kmr_clearance = lambda: {'link': 1.}
+    return runner, scene['safety_preparation']['regions']['M2.workholding']['bounds']
+
+
+def test_gazebo_checks_the_handling_robot_against_the_machines_declared_region():
+    seen = []
+
+    def clearance(names, _states, region=None):
+        seen.append(region)
+        return {names[0]: 1.}
+
+    runner, bounds = _gazebo_machine_runner([0., .13], clearance=clearance)
+    with pytest.raises(ValueError, match='left machine workholding'):
+        runner.dwell()
+    assert seen == [bounds]
+    seen.clear()
+    runner, bounds = _gazebo_machine_runner([0., .1], clearance=clearance)
+    runner.dwell()
+    assert seen == [bounds, bounds]
+
+
+def test_gazebo_clears_a_machine_by_its_region_and_transport_by_its_distance():
+    from cais_spade_llm.recovery_framework.workflow_gazebo import measured_robot_clearance
+
+    def position(x):
+        return SimpleNamespace(x=x, y=0., z=0.)
+
+    part = {'part': SimpleNamespace(pose=SimpleNamespace(position=position(0.)))}
+    region = [[-.12, .12]] * 3
+    with pytest.raises(ValueError, match="declared workholding region"):
+        measured_robot_clearance(lambda _: position(.11), ['robot'], part, region)
+    assert measured_robot_clearance(lambda _: position(.13), ['robot'], part, region) == {'robot': .13}
+    with pytest.raises(ValueError, match='transport/process area'):
+        measured_robot_clearance(lambda _: position(.11), ['robot'], part)
+    assert measured_robot_clearance(lambda _: position(.13), ['robot'], part) == {'robot': .13}
 
 
 def test_seeded_random_failure_uses_observed_overlap(machine):

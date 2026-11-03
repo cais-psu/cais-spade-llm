@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import json
 from pathlib import Path
 
@@ -111,6 +113,38 @@ def test_a_base_pose_needs_a_free_footprint_and_a_way_from_the_start():
     assert all(abs(x - 2.0) >= 0.4 for x, _, _ in left)
 
 
+def test_the_floor_check_gives_the_base_controllers_answer_on_the_real_map():
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    from cais_spade_llm.recovery_framework import SCENE_PATH
+    from cais_spade_llm.recovery_framework.outline_draft import ROOT, _navigation_floor
+    from cais_spade_llm.resources.kinematic_reach import _FLOOR_CELL_M, _footprint_hits, _occupied_cells
+
+    spec = spec_from_file_location("kmr_base_controller_floor", ROOT / "ros2/cais_lab_robotics/scripts/kmr_base_controller.py")
+    controller = module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    content = (ROOT / "ros2/cais_lab_robotics/config/recovery_framework_map.pgm").read_bytes()
+    header = content.index(b"255\n") + 4
+    width, height = map(int, content.split(b"\n")[2].split())
+    # The file's top row is the map's far edge, as map_server loads it.
+    data = [100 if content[header + (height - 1 - row) * width + column] < 100 else 0
+            for row in range(height) for column in range(width)]
+    floor = _navigation_floor()
+    x0, y0 = floor["floor_extent_xy"][0], floor["floor_extent_xy"][2]
+    footprint = json.loads(SCENE_PATH.read_text())["KMR"]["platform_overall_dimensions_m"]
+    cells = _occupied_cells(floor)
+    assert len({(round(x, 6), round(y, 6)) for x, y in cells.tolist()}) == sum(value > 0 for value in data)
+    around = [(-0.68, 1.43), (-1.12, 1.3), (-1.15, -0.33), (-5.47, 1.1), (-3.275, 1.4), (-2.7, 2.2), (-5.54, 2.13)]
+    poses = [(x + dx, y + dy, yaw) for x, y in around for dx in (-0.06, -0.025, 0.0, 0.02, 0.05)
+             for dy in (-0.06, -0.025, 0.0, 0.02, 0.05) for yaw in (0.0, 0.4, math.pi / 2, 2.2, math.pi, -math.pi / 2)]
+    # Exact ties, where a cell lies exactly on the padded outline.
+    poses += [(x, 1.2, yaw) for x in (-1.075, -3.175) for yaw in (0.0, math.pi, -math.pi)]
+    poses += [(x, 1.2, math.pi / 2) for x in (-1.14, -1.31, -1.41, -2.69, -3.31, -3.41)]
+    for pose in poses:
+        assert controller.occupancy_grid_footprint_is_clear(
+            data, width, height, _FLOOR_CELL_M, x0, y0, *pose) != _footprint_hits(cells, footprint, pose), pose
+
+
 def test_a_footprint_names_the_floor_obstacles_it_overlaps():
     from cais_spade_llm.resources.kinematic_reach import footprint_obstacles
 
@@ -118,3 +152,5 @@ def test_a_footprint_names_the_floor_obstacles_it_overlaps():
     assert footprint_obstacles(floor, [1.0, 0.6], [1.6, 2.0, 0.0]) == ["wall"]
     # Turned a quarter, the same base is 0.6 m long in x and clears the wall.
     assert footprint_obstacles(floor, [1.0, 0.6], [1.55, 2.0, 1.5707963267948966]) == []
+    # The padding counts: the plain outline is 2.5 cm from the wall's first cell, and the padded one is not.
+    assert footprint_obstacles(floor, [1.0, 0.6], [1.6, 2.0, 1.5707963267948966]) == ["wall"]

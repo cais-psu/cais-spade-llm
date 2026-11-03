@@ -1984,6 +1984,9 @@ def test_fixed_kmr_map_and_nav2_parameters_match_the_accepted_cell() -> None:
     assert recovery_map.occupied_at(-6.0, 1.9)
     assert recovery_map.occupied_at(-3.75, 0.5)
     assert not recovery_map.occupied_at(-5.0, 3.85)
+    # The assembly table's edge, so the KMR's arm can work at the Buffer on it.
+    assert recovery_map.occupied_at(-0.5, 0.775)
+    assert not recovery_map.occupied_at(-0.5, 0.825)
 
     payload = json.loads(ROBOTS_PATH.read_text(encoding='utf-8'))
     docks = [

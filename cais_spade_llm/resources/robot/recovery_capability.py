@@ -369,12 +369,45 @@ def calculate_recovery_place_target(*, task: dict, recovery_snapshot: dict, reso
             "target_origin_pose": deepcopy(pose), "target_reference": deepcopy(target["target_reference"])}
 
 
+def _mating_pick_orientation(part: str, observed: dict, orientation: dict, geometry: dict) -> dict:
+    """Turn a pick about the vertical so its fingers will cross the row of parts at the part's mating slot.
+
+    A mating place keeps the grasp and turns the part to the slot's declared yaw, so the tool's angle there is set at
+    the pick. The row runs from the part's declared slot to the nearest slot its mating contact names. The fingers
+    spread along the tool's X axis. A part with no mating contact keeps the orientation it was given.
+    """
+    from scipy.spatial.transform import Rotation
+
+    board = geometry.get("assembly_board") or {}
+    mating = (board.get("mating_contact_by_part") or {}).get(part)
+    slots = board.get("slots") or {}
+    named = [str(name).split("/")[0] for name in (mating or {}).get("ignore_tooth_contact_with") or []]
+    neighbours = [slots[name] for name in named if name in slots]
+    quaternion = ("qx", "qy", "qz", "qw")
+    if not neighbours or part not in slots or not _number((mating or {}).get("target_yaw_rad")) or not all(
+            _number(pose.get(axis)) for pose in (observed, orientation) for axis in quaternion):
+        return orientation
+    nearest = min(neighbours, key=lambda slot: math.dist(slot, slots[part]))
+    row = math.atan2(nearest[1] - slots[part][1], nearest[0] - slots[part][0])
+    tool = Rotation.from_quat([orientation[axis] for axis in quaternion])
+    fingers = tool.apply([1.0, 0.0, 0.0])
+    part_yaw = Rotation.from_quat([observed[axis] for axis in quaternion]).as_euler("ZYX")[0]
+    at_slot = math.atan2(fingers[1], fingers[0]) + mating["target_yaw_rad"] - part_yaw
+    turn = math.remainder(row + math.pi / 2 - at_slot, math.pi)
+    return dict(zip(quaternion, (Rotation.from_euler("z", turn) * tool).as_quat().tolist(), strict=True))
+
+
 def calculate_recovery_pick_target(*, task: dict, recovery_snapshot: dict, resource_evidence: dict) -> dict:
     """Calculate a supported simulation pick from recorded observation and policy.
 
     All geometry, offsets and policy choices must be recorded. Physical CAD
     grasp qualification remains an owning-resource obligation outside this
     vertical simulation calculation.
+
+    A recovery pick has a grounded observed pose, so this applies what the robot applies to one
+    (``RobotAgent._inject_observed_pose_for_pick_targets``): no TCP minimum and no per-part adjustment, the current
+    height left out of the travel height, and the configured observed-pick clearance and approach height. A program
+    does not choose them.
     """
     root = f"/resources/{task.get('resource_jid', '')}/resource_evidence"
     part = task.get("part_name")
@@ -390,15 +423,17 @@ def calculate_recovery_pick_target(*, task: dict, recovery_snapshot: dict, resou
     motion = resource_evidence.get("motion_config") or resource_evidence.get("controller_config", {}).get("motion") or {}
     geometry = (resource_evidence.get("pick_geometry") or {}).get(part) or {}
     handling_access = geometry.get("handling_robot_access") or {}
+    cartesian = resource_evidence.get("controller_config", {}).get("cartesian_motion") or {}
     if not handling_access:
         location = observed.get("part_location", observed.get("current_location", observed.get("location")))
-        sources = [row for row in resource_evidence.get("inputs", {}).get("scene", {}).get("machines", [])
+        scene = resource_evidence.get("inputs", {}).get("scene", {})
+        sources = [row for row in scene.get("machines", [])
                    if row.get("resource_id") == location
-                   and row.get("handling_robot_access", {}).get("resource_id") == resource_evidence.get("resource_id",
-                       resource_evidence.get("source", {}).get("resource_id"))]
+                   and row.get("handling_robot_access", {}).get("resource_id") == cartesian.get("resource_id")]
         if len(sources) == 1:
-            handling_access = sources[0]["handling_robot_access"]
-    policy = (resource_evidence.get("pick_policy") or {}).get(part) or {}
+            regions = scene.get("safety_preparation", {}).get("regions", {})
+            handling_access = {**sources[0]["handling_robot_access"],
+                               "workholding_bounds": regions.get(f"{location}.workholding", {}).get("bounds")}
     offset_record = resource_evidence.get("tcp_observation") or {}
     offset = None
     offset_ref = "/tcp_observation/tcp_offset_z"
@@ -451,13 +486,9 @@ def calculate_recovery_pick_target(*, task: dict, recovery_snapshot: dict, resou
     need(_number(offset), offset_ref, "A recorded fixed controlled-link/TCP transform or matching observed height offset is required")
     explicit_access = handling_access.get("approach_pose") is not None or handling_access.get("target_pose") is not None
     if not explicit_access:
-        for key in ("pick_tcp_z_bias_min_m", "pick_tcp_z_bias_max_m", "approach_height_m"):
+        for key in ("pick_tcp_z_bias_min_m", "pick_tcp_z_bias_max_m", "recovery_observed_pick_surface_clearance_m",
+                    "recovery_observed_pick_approach_height_m"):
             need(_number(motion.get(key)), "/motion_config/" + key, "Recorded vertical pick policy is required")
-        for key in ("surface_clearance_override_m", "pick_z_adjustment_m"):
-            need(_number(policy.get(key)), "/pick_policy/" + str(part) + "/" + key, "Explicit pick policy parameter is required")
-        need(type(policy.get("use_global_min_pick_tcp_z")) is bool, "/pick_policy/" + str(part) + "/use_global_min_pick_tcp_z", "Explicit TCP minimum policy is required")
-        if policy.get("use_global_min_pick_tcp_z") is True:
-            need(_number(motion.get("min_pick_tcp_z_m")), "/motion_config/min_pick_tcp_z_m", "Recorded TCP minimum height is required")
     need(_number(geometry.get("part_height_m")) and geometry.get("part_height_m", 0) > 0,
          "/pick_geometry/" + str(part) + "/part_height_m", "Recorded supported vertical part height is required")
     if not explicit_access:
@@ -465,8 +496,8 @@ def calculate_recovery_pick_target(*, task: dict, recovery_snapshot: dict, resou
     record = {"status": "NEEDS_CONTEXT" if missing else "calculated", "missing_facts": missing,
               "context_requests": [row["ref"] for row in missing], "part_name": part, "command_sent": False,
               "source": {"kind": "calculated", "calculation": "vertical_pick_bias, controlled_link_height, pick_travel_height",
-                         "inputs": [root + "/observed_parts", root + "/pick_geometry", root + "/pick_policy",
-                                    root + "/motion_config", root + offset_ref, root + "/snapshot"]}}
+                         "inputs": [root + "/observed_parts", root + "/pick_geometry", root + "/motion_config",
+                                    root + offset_ref, root + "/snapshot"]}}
     if missing:
         return record
     if handling_access:
@@ -479,19 +510,22 @@ def calculate_recovery_pick_target(*, task: dict, recovery_snapshot: dict, resou
                     "missing_facts": [{"ref": ref, "reason": str(exc)}]}
         if poses is not None:
             approach, target = poses
+            # The controller leaves a Cartesian-only access at the height it turns the tool at.
+            turning = cartesian.get("rotation_waypoint") if cartesian.get("only") is True else None
+            retreat = {**approach, "z": max(approach["z"], turning[2])} if turning else dict(approach)
             return {**record, "target_pose": target, "approach_pose": approach,
                 "observed_pose": pose, "pick_tcp_z": target["z"] + offset, "tcp_offset_z": offset,
                 "travel_z": approach["z"], "tx": pose["x"], "ty": pose["y"], "tz": pose["z"],
-                "pick_z": target["z"], "part_height": geometry["part_height_m"], "access_retreat_pose": approach,
+                "pick_z": target["z"], "part_height": geometry["part_height_m"], "access_retreat_pose": retreat,
                 "source": {"kind": "calculated", "calculation": "handling_robot_access_poses",
                            "inputs": [root + "/pick_geometry/" + str(part) + "/handling_robot_access", root + "/observed_parts"]}}
     bias = vertical_pick_bias(geometry["part_height_m"], motion["pick_tcp_z_bias_min_m"], motion["pick_tcp_z_bias_max_m"])
-    pick_tcp_z = pose["z"] + bias + max(0., policy["surface_clearance_override_m"])
-    if policy["use_global_min_pick_tcp_z"]:
-        pick_tcp_z = max(pick_tcp_z, motion["min_pick_tcp_z_m"])
-    pick_z = controlled_link_height(pick_tcp_z, offset, policy["pick_z_adjustment_m"])
-    travel_z = pick_travel_height(pose["z"], geometry["board_center"]["z"], pick_z, motion["approach_height_m"], current["z"])
-    orientation = {key: current[key] for key in ("qx", "qy", "qz", "qw")}
+    pick_tcp_z = pose["z"] + bias + max(0., motion["recovery_observed_pick_surface_clearance_m"])
+    pick_z = controlled_link_height(pick_tcp_z, offset, 0.)
+    travel_z = pick_travel_height(pose["z"], geometry["board_center"]["z"], pick_z,
+                                  motion["recovery_observed_pick_approach_height_m"], None)
+    orientation = _mating_pick_orientation(part, pose, {key: current[key] for key in ("qx", "qy", "qz", "qw")},
+                                           resource_evidence.get("inputs", {}).get("geometry") or {})
     return {**record, "target_pose": {"x": pose["x"], "y": pose["y"], "z": pick_z, **orientation},
             "approach_pose": {"x": pose["x"], "y": pose["y"], "z": travel_z, **orientation},
             "observed_pose": pose, "pick_tcp_z": pick_tcp_z, "tcp_offset_z": offset, "travel_z": travel_z,
@@ -834,6 +868,20 @@ def _cartesian_joint_witness(*, pose: dict, resource_jid: str, recovery_snapshot
             "endpoint_calculation": calculated}}
 
 
+def _nearest_base_axis(start: dict, end: dict, axis: list) -> dict | None:
+    """Return the point of a straight move nearest a vertical axis, or None when that is one of the move's ends."""
+    if not all(_number(pose.get(key)) for pose in (start, end) for key in ("x", "y", "z")):
+        return None
+    along = [end["x"] - start["x"], end["y"] - start["y"]]
+    length = along[0] ** 2 + along[1] ** 2
+    if length == 0:
+        return None
+    share = ((axis[0] - start["x"]) * along[0] + (axis[1] - start["y"]) * along[1]) / length
+    if not 0 < share < 1:
+        return None
+    return {key: start[key] + share * (end[key] - start[key]) for key in ("x", "y", "z")}
+
+
 def check_robot_primitive_capability(
     *, primitive: str, params: dict, task: dict, recovery_snapshot: dict,
     resource_evidence: dict, static_capabilities: dict, primitive_catalog: list, resource_jid: str,
@@ -989,7 +1037,9 @@ def check_robot_primitive_capability(
             if (not isinstance(slot, dict) or slot.get("destination_location") != "assembly_board-v1"
                     or destination != "assembly_board-v1"
                     or any(not _number(slot.get(key)) for key in ("slot_x", "slot_y", "part_height", "board_top_z", "part_origin_z"))):
-                return result("INFEASIBLE", "release_part assembly_slot is incompatible with its declared destination")
+                return result("INFEASIBLE", "release_part assembly_slot needs destination_location assembly_board-v1, the "
+                                            "event's own destination, and numbers for slot_x, slot_y, part_height, "
+                                            "board_top_z and part_origin_z, which is the calculated place_part_origin_z")
             if resource_evidence.get("execution_mode") != "simulation":
                 return result("NEEDS_CONTEXT", "assembly_slot requires recorded simulation execution_mode", refs=[root + "/execution_mode"])
         return result("FEASIBLE", "Recorded held part and attachment support independent release capability",
@@ -1023,6 +1073,20 @@ def check_robot_primitive_capability(
     checked = _cartesian_joint_witness(pose=pose, resource_jid=resource_jid,
         recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
         physical_evidence=physical_evidence or {})
+    # The end of a move can have joints while its straight line has none: an arm cannot pass close to its own base axis.
+    rid = next((name for name, jid in (physical_evidence or {}).get("jids", {}).items() if jid == resource_jid), None)
+    base = ((physical_evidence or {}).get("resource_models", {}).get(rid, {}).get("configuration") or {}).get("root_xyz")
+    if checked["feasibility_status"] == "FEASIBLE" and isinstance(base, list):
+        start = _pose_mapping(recovery_snapshot.get("current_pose"))
+        nearest = _nearest_base_axis(start, pose, base)
+        if nearest is not None:
+            passing = _cartesian_joint_witness(pose={**pose, **nearest}, resource_jid=resource_jid,
+                recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
+                physical_evidence=physical_evidence or {})
+            if passing["feasibility_status"] != "FEASIBLE":
+                return result("INFEASIBLE", f"The straight line to ({pose['x']:.3f}, {pose['y']:.3f}, {pose['z']:.3f}) passes "
+                              f"{math.dist((nearest['x'], nearest['y']), base[:2]):.3f} m from this arm's base axis at "
+                              f"({nearest['x']:.3f}, {nearest['y']:.3f}, {nearest['z']:.3f}), where no joint solution was found")
     return {**checked, "evidence": {**evidence, **checked["evidence"]}}
 
 

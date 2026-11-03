@@ -14,6 +14,33 @@ MACHINE_PRIMITIVES = ("select_program", "start_job", "pause_job", "resume_job", 
 JOB_CONTROL_VERSION = 1
 
 
+def workholding_bounds(scene: dict, machine_id: str) -> list:
+    """Return a machine's workholding region as the scene's safety preparation declares it.
+
+    The region is a cube on ``workholding_pose`` sized by ``KMR_process_clearance_m``. A part is at the machine while it
+    is inside, and a robot has cleared the machine while it is outside, so neither needs a number of its own.
+
+    Args:
+        scene: The Gazebo scene.
+        machine_id: The machine's resource id.
+
+    Returns:
+        World-frame ``[[x0, x1], [y0, y1], [z0, z1]]``.
+
+    Raises:
+        ValueError: The scene declares no such region.
+    """
+    bounds = scene.get("safety_preparation", {}).get("regions", {}).get(f"{machine_id}.workholding", {}).get("bounds")
+    if not bounds:
+        raise ValueError(f"NEEDS_CONTEXT: the declared region {machine_id}.workholding")
+    return bounds
+
+
+def inside_bounds(bounds: list, position) -> bool:
+    """Say whether a position lies inside a region, given one ``[low, high]`` per coordinate."""
+    return all(low <= value <= high for (low, high), value in zip(bounds, position, strict=True))
+
+
 def program_refusal(installed: dict, target: dict) -> str | None:
     """Return why a machine with an installed configuration refuses to select a program, or None.
 

@@ -90,7 +90,11 @@ def composition_grounding_context(*, session: dict, prepared: dict, task: dict) 
         # Step templates are served from code under /capability_decompositions. The template fields a
         # capture recorded inside its DES model can be stale, so this served copy drops them; the owner
         # check reads the prepared model, which keeps them.
-        for event in (resources[jid].get("recovery_des_model") or {}).get("events") or []:
+        model = resources[jid].get("recovery_des_model") or {}
+        # The valuation is the capture's too. It is dropped rather than projected: this model is one cached
+        # prompt block across a resource's events, and /resources/<jid>/snapshot serves the current state.
+        model.pop("current_valuation", None)
+        for event in model.get("events") or []:
             event.pop("recovery_visible_steps", None)
             for step in (event.get("composition_contract") or {}).get("steps") or []:
                 step.pop("public_params", None)
@@ -250,6 +254,9 @@ def validate_recovery_primitive_composition(
         establishes declared composition feasibility, never CCA or execution approval.
     """
     declarations = recovery_des_model.get("state_variables")
+    if declarations and isinstance(declarations, dict):
+        # A part's process record is the part's own, whichever resource acts; a robot's model does not list it.
+        declarations = {"processCompleted": {"scope": "part"}, **declarations}
     result = {
         "composition_validation_version": COMPOSITION_VALIDATION_VERSION,
         "outline_id": task.get("outline_id"), "resource_jid": task.get("resource_jid"),

@@ -48,6 +48,42 @@ def area_rule():
             "requirements": {"SAFE_shared_area_mutex": "At most one resource may occupy the board area."}}
 
 
+@pytest.mark.parametrize("later, broken", [
+    ("safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt", "KET4_Square_4mm"),
+    ("safety_assembly_board-v1_KET4_Square_4mm_before_RGOCG4-50_Round_4mm.txt", "RGOCG4-50_Round_4mm")])
+def test_assembly_order_rules_read_assembly_completion_and_leave_board_entry_to_the_mutex(later, broken):
+    document = parse_predefined_safety((SAFETY / later).read_text())
+    rules, compiled = compile_predefined_safety(document)
+    spec = document["catalog"]["specifications"][0]
+    assert {ap["definition"]["state"]["symbol"] for ap in spec["aps"]} == {"processCompleted"}
+    first, second = document["requirement_scopes"][0]["physical_ap_bindings"].values()
+    assert first["part"] == broken
+    rule = {**rules[0], "rule_id": "order", "ap_kinds": {
+        "ap001": ("process_target_completed", {"process": "assembly", **first}),
+        "ap002": ("process_target_completed", {"process": "assembly", **second})}}
+    capture = {"rules": [rule], "checker": BaseSafetyChecker({"order": compiled[rule["id"]]}, [rule]),
+               "requirements": {rule["id"]: spec["requirement"]}}
+    later_done = ("assembly", "target", first["target"])
+    earlier_done = ("assembly", "target", second["target"])
+    start = {"order": {capture["checker"].dfas["order"]["initial"]}}
+
+    def step(states, completions):
+        return cca_safety._advance(capture, states, {"occupancy": {}, "part_entry": {}, "completions": completions},
+                                   universal=True)
+
+    # A part on the board with neither assembly complete breaks no order rule: the mutex covers its entry.
+    reached, violation = step(start, {})
+    assert violation is None
+    _, violation = step(reached, {(first["part"], *later_done): (True,)})
+    assert violation is not None
+    assert f"{first['part']} assembly {first['target']} completed" in cca_safety._violation_text(
+        capture, "after the event", violation)
+    reached, violation = step(start, {(second["part"], *earlier_done): (True,)})
+    assert violation is None
+    _, violation = step(reached, {(second["part"], *earlier_done): (True,), (first["part"], *later_done): (True,)})
+    assert violation is None
+
+
 @pytest.mark.parametrize("third, fourth, broken", [(False, False, False), (True, False, False), (True, True, True)])
 def test_a_second_resource_in_the_area_breaks_the_rule_and_the_refusal_names_both(area_rule, third, fourth, broken):
     rule_id = area_rule["rules"][0]["rule_id"]

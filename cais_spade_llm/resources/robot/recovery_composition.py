@@ -12,9 +12,24 @@ from cais_spade_llm.agents.shared_information.recovery_validation_protocol impor
 def preview_composition_output(*, primitive: str, params: dict, recovery_snapshot: dict,
                                part_context: dict, grounding_context: dict, task: dict,
                                resource_evidence: dict, physical_evidence: dict) -> dict:
-    """Calculate target outputs from recorded owner facts, without legacy defaults."""
+    """Calculate target outputs from recorded owner facts, without legacy defaults.
+
+    Args:
+        primitive: The step's primitive.
+        params: The step's resolved parameters.
+        recovery_snapshot: The acting resource's state when the step starts.
+        part_context: The event's part as the composition prefix leaves it.
+        grounding_context: The grounded state, per resource.
+        task: The outline event.
+        resource_evidence: The owner's recorded evidence, such as ``observed_parts``.
+        physical_evidence: The capture's runtime models, valuation and geometry.
+
+    Returns:
+        The calculated output with its ``event_fact_key``, a ``NEEDS_CONTEXT`` status with its reason, or
+        nothing for a primitive with no calculated output.
+    """
     from cais_spade_llm.resources.robot.recovery_capability import (
-        calculate_recovery_pick_target, calculate_recovery_place_target,
+        _pose_mapping, calculate_recovery_pick_target, calculate_recovery_place_target,
     )
 
     part = params.get("part_name", task.get("part_name"))
@@ -36,12 +51,14 @@ def preview_composition_output(*, primitive: str, params: dict, recovery_snapsho
         # Explicit geometric overrides cannot silently select another calculation.
         defaults = {"part_name": part}
         if primitive == "compute_pick_targets":
+            motion = resource_evidence.get("motion_config") or resource_evidence.get("controller_config", {}).get("motion") or {}
             defaults.update(target_pose=None, product_geometry=None, detected_parts=None,
-                target_pose_source="", prefer_live_detection=False, approach_height_override_m=None,
-                ignore_current_height_for_travel_z=False, min_pick_tcp_z_override_m=None,
-                use_global_min_pick_tcp_z=resource_evidence.get("pick_policy", {}).get(part, {}).get("use_global_min_pick_tcp_z"),
-                surface_clearance_override_m=resource_evidence.get("pick_policy", {}).get(part, {}).get("surface_clearance_override_m"),
-                apply_pick_z_adjustments=True)
+                target_pose_source="", prefer_live_detection=False,
+                approach_height_override_m=motion.get("recovery_observed_pick_approach_height_m"),
+                ignore_current_height_for_travel_z=True, min_pick_tcp_z_override_m=None,
+                use_global_min_pick_tcp_z=False,
+                surface_clearance_override_m=motion.get("recovery_observed_pick_surface_clearance_m"),
+                apply_pick_z_adjustments=False)
         else:
             # The author binds the recorded input. Owner preparation may add
             # placement outputs to its private _task_ctx before this preview.
@@ -68,30 +85,41 @@ def preview_composition_output(*, primitive: str, params: dict, recovery_snapsho
                 {key: pose[key] for key in ("qx", "qy", "qz", "qw")},
                 simulation_assembly_slot=output.get("target_reference", {}).get("surface_role") == "assembly_slot",
                 insertion_depth=depth))
+            # A part going into its slot is released where it is seated, not at the pre-insert height above it.
+            if output.get("target_reference", {}).get("surface_role") == "assembly_slot":
+                output["target_pose"] = dict(output["insert_pose"])
         output["model_name"] = resource_evidence.get("inputs", {}).get("geometry", {}).get("parts", {}).get("model_map", {}).get(part)
         travel_z = (output.get("travel_z") if primitive == "compute_pick_targets"
                     else resource_evidence.get("state", {}).get("_task_ctx", {}).get("travel_z"))
         if output.get("access_retreat_pose"):
             output["retreat_pose"] = deepcopy(output["access_retreat_pose"])
         elif type(travel_z) in (int, float) and math.isfinite(travel_z):
-            output["retreat_pose"] = {**output["target_pose"], "z": travel_z}
+            # A place can sit above the pick's travel height; its retreat still rises, at least to its own approach.
+            output["retreat_pose"] = {**output["target_pose"],
+                                      "z": max(travel_z, output.get("approach_pose", {}).get("z", travel_z))}
         return {"event_fact_key": f"{key}.{part}", "output": output, "status": "calculated"}
     if primitive == "get_current_pose":
         return {"event_fact_key": "current_pose", "output": deepcopy(recovery_snapshot.get("current_pose")), "status": "calculated"}
     if primitive == "detect_parts":
-        pose = part_context.get("observed_pose")
-        if not isinstance(pose, dict):
+        # The record the capability check and compute_pick_targets read; part_context has no pose for a part
+        # only the owner observed.
+        observed = (resource_evidence.get("observed_parts") or {}).get(part) or {}
+        pose = _pose_mapping(observed.get("observed_pose", observed.get("current_pose")))
+        if not pose:
             return {"status": "NEEDS_CONTEXT", "reason": "Recorded part observation is missing"}
         return {"event_fact_key": f"part_pose.{part}", "output": {"part_name": part, "pose": deepcopy(pose), **pose}, "status": "calculated"}
     return {}
 
 
-def _source_records(part: str, acting_jid: str, grounding_context: dict, physical_evidence: dict) -> list[tuple]:
-    """Return every value that records the part where it rested, with the value it takes once the part has left.
+def _source_records(part: str, acting_jid: str, grounding_context: dict, physical_evidence: dict,
+                    stated: dict) -> list[tuple]:
+    """Return the stated values that record the part where it rested, with the value each takes once it has left.
 
     As the RA's pick finds them (``ra_feasibility._Check.source_variables``): a resource-scope value that is the
     part, or a per-part variable for the part that is not null or false; it becomes null, or false where its
-    declared values have no null.
+    declared values have no null. Code writes no value the event leaves out, so only the values its
+    ``neighbor_end_state`` (``stated``) names are returned. The RA refuses one left out unless it is private or a
+    ``task_ctx.`` or ``_`` name, and the postcondition compares the stated ones with these.
     """
     records = []
     for owner, model in physical_evidence.get("environment_models", {}).items():
@@ -104,7 +132,7 @@ def _source_records(part: str, acting_jid: str, grounding_context: dict, physica
                   **{key: value for key, value in grounding_context.get("resources", {}).get(jid, {}).items()
                      if key in declarations}}
         for name, declaration in declarations.items():
-            if (declaration or {}).get("scope") == "part" or name not in values:
+            if (declaration or {}).get("scope") == "part" or name not in values or name not in (stated.get(jid) or {}):
                 continue
             value = values[name]
             if value == part or (name.endswith("." + part) and value is not None and value is not False):
@@ -144,6 +172,36 @@ def _hold(evidence: dict, part_name: str, target: dict, pose: dict, event: dict)
         "grasp_transform": transform, "projected_attachment_complete": True,
         "source": {"kind": "projected", "contract_fingerprint": recovery_validation_fingerprint(event)}}
     evidence.setdefault("state", {})["_task_ctx"] = deepcopy(target)
+
+
+def _grasp_refusal(part_name: str, pose: dict, target: dict, *, resource_evidence: dict,
+                   physical_evidence: dict) -> tuple[str, str] | None:
+    """Return why a grasp at ``pose`` does not reach its part, and the status, by the controller's payload check.
+
+    ``grasp_point_evidence`` reads the part's recorded bounds at its observed pose and the TCP, ``tcp_offset_z`` along
+    the tool from the grasp pose, against the recorded position tolerance.
+    """
+    from cais_spade_llm.recovery_framework.geometry import compose, rotate
+    from cais_spade_llm.recovery_framework.part_collision import grasp_point_evidence
+
+    bounds = physical_evidence.get("geometry", {}).get("parts", {}).get(part_name, {}).get("local_bounds")
+    tolerance = resource_evidence.get("controller_config", {}).get("move_group", {}).get("position_tolerance_m")
+    offset = target.get("tcp_offset_z")
+    if not bounds or type(tolerance) not in (int, float) or type(offset) not in (int, float):
+        return "The grasp check requires the part's recorded bounds, the TCP offset and the position tolerance", "NEEDS_CONTEXT"
+    axes = ("x", "y", "z", "qx", "qy", "qz", "qw")
+    center = [(low + high) / 2 for low, high in bounds]
+    box = {"pose": compose([target["observed_pose"][key] for key in axes], [*center, 0., 0., 0., 1.]),
+           "size": [high - low for low, high in bounds]}
+    along_tool = rotate([pose[key] for key in axes[3:]], [0., 0., abs(offset)])
+    tcp = [pose[axis] + along_tool[index] for index, axis in enumerate(axes[:3])]
+    grasp = grasp_point_evidence([box], tcp, tolerance)
+    if grasp["payload_at_gripper"]:
+        return None
+    return (f"The grasp's TCP at ({tcp[0]:.4f}, {tcp[1]:.4f}, {tcp[2]:.4f}) is {grasp['tcp_to_payload_distance_m']:.4f} m "
+            f"from {part_name}, whose recorded box is centred at ({box['pose'][0]:.4f}, {box['pose'][1]:.4f}, "
+            f"{box['pose'][2]:.4f}) with size {[round(value, 4) for value in box['size']]}, beyond the recorded "
+            f"position tolerance {tolerance} m"), "INFEASIBLE"
 
 
 def _receiving_slot(part_name: str, destination: str, origin: dict, physical_evidence: dict) -> tuple[str, str] | None:
@@ -192,10 +250,13 @@ def _named_pose(jid: str, pose_name: str, physical_evidence: dict) -> dict | Non
 
 
 def _load_onto_belt(part_name: str, destination: str, origin: dict, acting_jid: str, *, grounding_context: dict,
-                    physical_evidence: dict, projected_resources: dict) -> dict:
+                    physical_evidence: dict, projected_resources: dict, stated: dict) -> dict:
     """Put a placed part on the belt loading position under the target, as the belt's own order records it.
 
     A belt takes a part only as the runtime does: idle and available, and not reserved for another resource.
+    The belt's model sets the part's location and the order with the place, and the RA's place check finds
+    them; only the ones the event states (``stated``, its ``neighbor_end_state``) are written, and the
+    postcondition compares them.
     """
     from cais_spade_llm.resources.nominal_conveyor import conveyor_load_parameters
 
@@ -217,15 +278,31 @@ def _load_onto_belt(part_name: str, destination: str, origin: dict, acting_jid: 
         order = conveyor_load_parameters(model, values, part_name, rows[0]["loading_position"])
     except ValueError as exc:
         return {"failure": str(exc), "status": "INFEASIBLE"}
-    values.update({field.removeprefix("next_"): value for field, value in order.items()})
-    values[f"part_location.{part_name}"] = rows[0]["loading_position"]
+    changed = {field.removeprefix("next_"): value for field, value in order.items()}
+    changed[f"part_location.{part_name}"] = rows[0]["loading_position"]
+    values.update({field: value for field, value in changed.items() if field in (stated.get(jid) or {})})
     projected_resources[jid] = values
     return {"location": destination, "owner": destination, "values": values, "model": model}
 
 
 def receive_placed_part(part_name: str, destination: str, origin: dict, *, grounding_context: dict,
-                        physical_evidence: dict, projected_resources: dict, acting_jid: str) -> dict:
+                        physical_evidence: dict, projected_resources: dict, acting_jid: str,
+                        stated: dict) -> dict:
     """Put a placed part into the slot that receives it, in ``projected_resources``.
+
+    Code writes no value the event leaves out: the receiving resource takes only the values the event states
+    for it. The RA refuses a place that leaves the receiving slot or a belt's order out, and the postcondition
+    compares the stated values with these.
+
+    Args:
+        part_name: The placed part.
+        destination: The place the event states for the part.
+        origin: Where the place target sets the part down.
+        grounding_context: The grounded state, per resource.
+        physical_evidence: The capture's runtime models and valuation.
+        projected_resources: The values the event leaves, per resource, updated here.
+        acting_jid: The resource that places the part.
+        stated: The event's ``neighbor_end_state``.
 
     Returns:
         The part's ``location``, the receiving ``owner``, its ``values`` and ``model``; or ``failure`` with its
@@ -235,7 +312,8 @@ def receive_placed_part(part_name: str, destination: str, origin: dict, *, groun
 
     if physical_evidence.get("environment_models", {}).get(destination, {}).get("assignments", {}).get("loading_positions"):
         return _load_onto_belt(part_name, destination, origin, acting_jid, grounding_context=grounding_context,
-                               physical_evidence=physical_evidence, projected_resources=projected_resources)
+                               physical_evidence=physical_evidence, projected_resources=projected_resources,
+                               stated=stated)
     receiving = _receiving_slot(part_name, destination, origin, physical_evidence)
     if receiving is None:
         return {"failure": "Placement requires a unique declared receiving zone and supported target", "status": "NEEDS_CONTEXT"}
@@ -251,7 +329,8 @@ def receive_placed_part(part_name: str, destination: str, origin: dict, *, groun
     if values[field] not in (None, part_name):
         return {"failure": "The receiving zone is occupied", "status": "INFEASIBLE"}
     values[field] = part_name
-    projected_resources[jid] = values
+    if field in (stated.get(jid) or {}):
+        projected_resources[jid] = values
     product = product_state_from_custody(part_name, owner, values, physical_evidence.get("product_name"))
     return {"location": product["location"], "owner": owner, "values": values, "model": model}
 
@@ -263,9 +342,9 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                                    physical_evidence: dict, locate_pose: Callable[[dict], str | None] | None = None) -> dict:
     """Retain proven primitive effects and require evidence for further completion.
 
-    ``locate_pose`` names the place whose recorded area holds a pose. Composition, like the outline, writes no
-    value the event leaves out (AGENTS.md, "No hidden rules in recovery events"): it refuses a program that ends
-    where the event does not say.
+    ``locate_pose`` names the place whose recorded area holds the robot's gripper at a pose. Composition, like the
+    outline, writes no value the event leaves out (AGENTS.md, "No hidden rules in recovery events"): it refuses a
+    program that ends where the event does not say.
     """
     from cais_spade_llm.resources.robot.robot_primitives import robot_primitive_sequence_validator
 
@@ -370,12 +449,17 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                 elif location in places and not apply_updates(
                         event, {"origin_resource_location": location}, {"resource_location"}):
                     return fail("The owner has no supported pickup location effect")
-            for jid, field, empty in _source_records(part_name, task["resource_jid"], grounding_context, physical_evidence):
+            for jid, field, empty in _source_records(part_name, task["resource_jid"], grounding_context, physical_evidence,
+                                                     task.get("neighbor_end_state") or {}):
                 projected_resources.setdefault(jid, {})[field] = empty
             part["part_holder_resource_jid"] = task["resource_jid"]
             observed = target.get("observed_pose", {})
             if not all(key in observed for key in ("x", "y", "z", "qx", "qy", "qz", "qw")):
                 return fail("The owner requires the complete part pose for projected attachment")
+            refusal = _grasp_refusal(part_name, pose, target, resource_evidence=resource_evidence,
+                                     physical_evidence=physical_evidence)
+            if refusal:
+                return fail(*refusal)
             _hold(evidence, part_name, target, pose, event)
         else:
             event = events.get("place_insert", {})
@@ -397,7 +481,7 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                     return fail("Placement requires a unique declared receiving zone and supported target")
                 placed = receive_placed_part(part_name, destination, origin, grounding_context=grounding_context,
                                              physical_evidence=physical_evidence, projected_resources=projected_resources,
-                                             acting_jid=task["resource_jid"])
+                                             acting_jid=task["resource_jid"], stated=task.get("neighbor_end_state") or {})
                 if "failure" in placed:
                     return fail(placed["failure"], placed["status"])
                 part.update(part_location=placed["location"])
@@ -411,6 +495,18 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                     return fail("Assembly completion requires release_part.assembly_slot bound to the calculated target", "INFEASIBLE")
                 if not apply_updates(event, {"destination_location": destination}, {"part_location"}):
                     return fail("The owner has no supported assembly completion effects")
+                # release_part declares no record entry and a robot's recovery model no record, so a stated record
+                # takes the entries the runtime model declares for this place and the postcondition compares them.
+                # Composition adds no entry the event left out.
+                if "processCompleted" in end_state:
+                    from cais_spade_llm.resources.environment_models import place_completion
+
+                    rid = next((name for name, value in physical_evidence.get("jids", {}).items()
+                                if value == task["resource_jid"]), None)
+                    entries = place_completion(physical_evidence.get("environment_models", {}).get(rid) or {},
+                                               destination, target.get("target"))
+                    record = list(part.get("processCompleted") or [])
+                    part["processCompleted"] = record + [entry for entry in entries if entry not in record]
             else:
                 return fail("The owner has no completion contract for this target surface")
             supported_pose = target.get("support_placement", {}).get("part_pose")
@@ -427,6 +523,7 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
             part["observed_pose_current"] = False
             part["pose_source"] = "validated_composition_projection"
             evidence.setdefault("observed_parts", {})[part_name] = {"current_pose": deepcopy(origin), "frame": "world",
+                "part_location": part.get("part_location"),
                 "source": {"kind": "projected", "contract_fingerprint": recovery_validation_fingerprint(event)}}
             evidence["attachment"] = {}
     stated = task.get("expected_end_state") or {}
@@ -461,7 +558,7 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                 return fail(f"The program ends at {reached or 'no named place'} and the event states no resource_location",
                             "INFEASIBLE")
         elif moved and (transfers or stated["resource_location"] != start):
-            # A move ends at the stated place when one of its recorded areas holds the final pose; a location
+            # A move ends at the stated place when one of its recorded areas holds the gripper; a location
             # the robot keeps holds, and a transfer's place stands unless the robot moves on after its retreat.
             set_field("resource_location", locate_pose(final, stated["resource_location"]))
     for field, aliases in {"part_state": ("state", "current_state"),

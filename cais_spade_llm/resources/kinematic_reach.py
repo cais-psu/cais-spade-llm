@@ -24,10 +24,12 @@ from scipy.spatial.transform import Rotation
 JOINT_SEARCH_CACHE: ContextVar[dict | None] = ContextVar("_cartesian_joint_calculation_cache", default=None)
 # Fixed extra starting points, as fractions of every joint's range, keep the answer reproducible.
 _START_FRACTIONS = (0.5, 0.87, 0.24, 0.61, 0.98, 0.35)
-# The fixed base-pose grid: spacing, headings per position, and the floor cell of the connection check.
-_GRID_STEP_M = 0.1
+# The fixed base-pose grid: spacing, headings per position, and the floor map's cell.
+_GRID_STEP_M = 0.05
 _GRID_HEADINGS = 8
 _FLOOR_CELL_M = 0.05
+# The padding of kmr_base_controller's footprint check (half_length 0.625, half_width 0.39 on a 1.19 x 0.72 m base).
+BASE_PADDING_M = 0.03
 
 
 def _finite_vector(value: Any, length: int) -> bool:
@@ -247,28 +249,51 @@ def _corners(x: float, y: float, yaw: float, size: Sequence[float]) -> list[tupl
                            (-half_length, -half_width), (half_length, -half_width))]
 
 
-def _separated(first: list[tuple[float, float]], second: list[tuple[float, float]]) -> bool:
-    # Two convex outlines are apart when some edge normal of either separates their projections.
-    for outline in (first, second):
-        for index, (x0, y0) in enumerate(outline):
-            x1, y1 = outline[(index + 1) % len(outline)]
-            normal = (y0 - y1, x1 - x0)
-            a = [normal[0] * x + normal[1] * y for x, y in first]
-            b = [normal[0] * x + normal[1] * y for x, y in second]
-            if max(a) < min(b) or max(b) < min(a):
-                return True
-    return False
+def _cell_centres(floor: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    x0, x1, y0, y1 = floor["floor_extent_xy"]
+    columns, rows = round((x1 - x0) / _FLOOR_CELL_M), round((y1 - y0) / _FLOOR_CELL_M)
+    return x0 + (np.arange(columns) + 0.5) * _FLOOR_CELL_M, y0 + (np.arange(rows) + 0.5) * _FLOOR_CELL_M
 
 
-def _box(bounds: Sequence[float]) -> list[tuple[float, float]]:
+def _obstacle_cells(floor: Mapping[str, Any], bounds: Sequence[float]) -> np.ndarray:
+    xs, ys = _cell_centres(floor)
     x0, x1, y0, y1 = bounds
-    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    # The generator rounds a centre to decide its cell, keeping a cell on an obstacle's edge; the controller then
+    # measures from the exact centre, and a tie must fall the same way as there.
+    columns, rows = np.round(xs, 10), np.round(ys, 10)
+    return np.array(np.meshgrid(xs[(columns >= x0) & (columns <= x1)], ys[(rows >= y0) & (rows <= y1)])).reshape(2, -1).T
+
+
+def _occupied_cells(floor: Mapping[str, Any]) -> np.ndarray:
+    """Return the centres of the floor map's occupied cells, laid out as the map generator lays them: obstacles and border."""
+    xs, ys = _cell_centres(floor)
+    border = [(x, y) for x in xs for y in (ys[0], ys[-1])] + [(x, y) for x in (xs[0], xs[-1]) for y in ys]
+    return np.vstack([np.array(border), *(_obstacle_cells(floor, bounds) for bounds in floor["floor_obstacles_xy"].values())])
+
+
+def _footprint_hits(cells: np.ndarray, footprint: Sequence[float], pose: Sequence[float]) -> bool:
+    """Return whether occupied cells fall in a base's padded footprint.
+
+    The base controller's own test (``occupancy_grid_footprint_is_clear``), which refuses to drive to a pose that
+    fails it, so a base accepted here is one it does not refuse. The live map message carries its resolution as a
+    float32, which moves only a pose exactly on a cell's edge, by under a micrometre.
+    """
+    x, y, yaw = pose[:3]
+    half_length, half_width = round(footprint[0] / 2 + BASE_PADDING_M, 10), round(footprint[1] / 2 + BASE_PADDING_M, 10)
+    cosine, sine, half_cell = math.cos(yaw), math.sin(yaw), _FLOOR_CELL_M / 2
+    corners = np.array(_corners(x, y, yaw, [half_length * 2, half_width * 2]))
+    near = ((cells[:, 0] + half_cell >= corners[:, 0].min()) & (cells[:, 0] - half_cell <= corners[:, 0].max())
+            & (cells[:, 1] + half_cell >= corners[:, 1].min()) & (cells[:, 1] - half_cell <= corners[:, 1].max()))
+    dx, dy = cells[near, 0] - x, cells[near, 1] - y
+    rounding = half_cell * (abs(cosine) + abs(sine))
+    return bool(np.any((np.abs(cosine * dx + sine * dy) <= half_length + rounding)
+                       & (np.abs(cosine * dy - sine * dx) <= half_width + rounding)))
 
 
 def footprint_obstacles(floor: Mapping[str, Any], footprint: Sequence[float], pose: Sequence[float]) -> list[str]:
-    """Return the floor obstacles a base footprint centred on a planar pose ``[x, y, yaw]`` overlaps."""
-    corners = _corners(*pose[:3], footprint)
-    return [name for name, bounds in floor["floor_obstacles_xy"].items() if not _separated(corners, _box(bounds))]
+    """Return the floor obstacles whose cells fall in a base's padded footprint at a planar pose ``[x, y, yaw]``."""
+    return [name for name, bounds in floor["floor_obstacles_xy"].items()
+            if _footprint_hits(_obstacle_cells(floor, bounds), footprint, pose)]
 
 
 def free_base_poses(floor: Mapping[str, Any], footprint: Sequence[float], start_xy: Sequence[float],
@@ -277,10 +302,10 @@ def free_base_poses(floor: Mapping[str, Any], footprint: Sequence[float], start_
     """Return candidate planar base poses near a point, in a fixed order, where the base fits and can get to.
 
     Declared docks within the radius come first, then a grid around the point, nearest first, at evenly
-    spaced headings. A pose is kept when the footprint, a rectangle centred on the base, lies on the floor
-    clear of every obstacle, and when its position connects to the start through floor wide enough for the
-    footprint's narrow side. That connection is a necessary condition only; the base's own planner plans
-    the route.
+    spaced headings. A pose is kept when the footprint, a rectangle centred on the base, passes the base
+    controller's check on the floor map's cells, padding included, and when its position connects to the start
+    through floor wide enough for the footprint's narrow side. That connection is a necessary condition only;
+    the base's own planner plans the route.
 
     Args:
         floor: ``floor_extent_xy`` [x0, x1, y0, y1] and ``floor_obstacles_xy`` (name to [x0, x1, y0, y1]).
@@ -294,8 +319,12 @@ def free_base_poses(floor: Mapping[str, Any], footprint: Sequence[float], start_
         Base poses ``[x, y, yaw]``.
     """
     x0, x1, y0, y1 = floor["floor_extent_xy"]
-    obstacles = [_box(bounds) for bounds in floor["floor_obstacles_xy"].values()]
     clearance = min(footprint[:2]) / 2
+    padded = [footprint[0] + 2 * BASE_PADDING_M, footprint[1] + 2 * BASE_PADDING_M]
+    cells = _occupied_cells(floor)
+    # Only the cells a candidate's footprint can touch; the whole map is thousands.
+    cells = cells[np.hypot(cells[:, 0] - around_xy[0], cells[:, 1] - around_xy[1])
+                  <= radius_m + math.hypot(*padded) / 2 + _FLOOR_CELL_M]
 
     def open_cell(x: float, y: float) -> bool:
         if not (x0 + clearance <= x <= x1 - clearance and y0 + clearance <= y <= y1 - clearance):
@@ -320,9 +349,9 @@ def free_base_poses(floor: Mapping[str, Any], footprint: Sequence[float], start_
                 frontier.append(neighbour)
 
     def fits(x: float, y: float, yaw: float) -> bool:
-        corners = _corners(x, y, yaw, footprint)
-        return (all(x0 <= cx <= x1 and y0 <= cy <= y1 for cx, cy in corners)
-                and all(_separated(corners, obstacle) for obstacle in obstacles) and cell(x, y) in connected)
+        return (cell(x, y) in connected
+                and all(x0 <= cx <= x1 and y0 <= cy <= y1 for cx, cy in _corners(x, y, yaw, padded))
+                and not _footprint_hits(cells, footprint, [x, y, yaw]))
 
     steps = int(radius_m / _GRID_STEP_M)
     grid = sorted(((around_xy[0] + i * _GRID_STEP_M, around_xy[1] + j * _GRID_STEP_M)

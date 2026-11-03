@@ -68,6 +68,26 @@ class ResourceGuardError(ValueError):
         self.actual = deepcopy(actual)
 
 
+def place_completion(model: dict, destination: Any, target: str | None) -> list[dict]:
+    """Return the process entries a resource's model declares for finishing a place at a destination.
+
+    Args:
+        model: The resource's runtime environment model.
+        destination: Where the part is put.
+        target: The part's assembly target, which a declared entry may take as its value.
+
+    Returns:
+        The declared entries with their target, or an empty list when the model declares none there.
+    """
+    for event in model.get("events") or []:
+        added = (event.get("product_effects") or {}).get("processCompleted")
+        place = (event.get("parameter_bindings") or {}).get("destination_location") or {}
+        if added and target is not None and place.get("equals") == destination:
+            return [{name: target if value == {"set_from_param": "target"} else value
+                     for name, value in entry.items()} for entry in added]
+    return []
+
+
 def build_environment_models(
     scene: dict, parts: list[str] | None = None, *, schema_version: int = 3
 ) -> dict:

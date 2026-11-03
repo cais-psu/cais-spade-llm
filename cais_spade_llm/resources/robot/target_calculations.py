@@ -9,6 +9,8 @@ state mutation or robot action.
 
 import math
 
+from cais_spade_llm.resources.machine.machine_jobs import inside_bounds
+
 
 def handling_robot_access_poses(access: dict, tcp_offset_z: float,
                                 observed_xy: tuple[float, float],
@@ -16,7 +18,7 @@ def handling_robot_access_poses(access: dict, tcp_offset_z: float,
     """Calculate the existing explicit handling approach and target positions.
 
     Args:
-        access: Recorded handling_robot_access declaration.
+        access: Recorded handling_robot_access declaration, with the machine's ``workholding_bounds``.
         tcp_offset_z: Recorded controlled-link to TCP height offset.
         observed_xy: Observed part position in the same world frame.
         grasp_quaternion: Selected recorded grasp orientation, when supplied.
@@ -47,7 +49,10 @@ def handling_robot_access_poses(access: dict, tcp_offset_z: float,
             raise ValueError(f"configured handling_robot_access {label} orientation does not match grasp_orientation_xyzw")
         poses.append({"x": raw[0], "y": raw[1], "z": raw[2] - tcp_offset_z,
                       **dict(zip(("qx", "qy", "qz", "qw"), orientation, strict=True))})
-    if math.dist((poses[1]["x"], poses[1]["y"]), observed_xy) > .08:
+    bounds = access.get("workholding_bounds")
+    if not bounds:
+        raise ValueError("configured handling_robot_access has no declared workholding region")
+    if not inside_bounds(bounds[:2], observed_xy):
         raise ValueError("configured handling_robot_access target disagrees with the observed part")
     return poses[0], poses[1]
 

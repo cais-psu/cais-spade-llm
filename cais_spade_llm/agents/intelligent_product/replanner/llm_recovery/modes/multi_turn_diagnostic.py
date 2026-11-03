@@ -296,8 +296,9 @@ def _event_changes(task: dict, session: dict) -> list[dict]:
     variables = session.get("recovery_des_models", {}).get(task["resource_jid"], {}).get("state_variables", {})
     by_llm = task.get("candidate_source") != "nominal_connection"
     start = task.get("expected_start_state") or {}
-    return [{"entity": task["part_name"] if variables.get(name, {}).get("scope") == "part" and task.get("part_name")
-             else task["resource_jid"], "variable": name, "value": deepcopy(value), "by": "LLM" if by_llm else "model"}
+    return [{"entity": task["part_name"] if (variables.get(name, {}).get("scope") == "part" or name == "processCompleted")
+             and task.get("part_name") else task["resource_jid"],
+             "variable": name, "value": deepcopy(value), "by": "LLM" if by_llm else "model"}
             for name, value in task["expected_end_state"].items()
             if by_llm or (not name.startswith(("task_ctx.", "_")) and not variables.get(name, {}).get("private")
                           and value != start.get(name))]

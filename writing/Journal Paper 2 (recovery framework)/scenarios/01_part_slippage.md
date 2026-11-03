@@ -47,7 +47,7 @@ Only `ur5e-3` can retrieve the gear, and its gripper is occupied by KET4.
      At the failure, in(ur5e-4, assembly_board-v1) holds.
      → ur5e-3 cannot work at the board until ur5e-4 has retracted.
 
-(5a) a = enters(KET4_Square_4mm, assembly_board-v1)
+(5a) a = assembled(KET4_Square_4mm @ GMC_Laser_Plate_Virtual/KET4_Square_4mm)
      b = assembled(gear_small @ Gear_Plate/Gear_Shaft_1)
      (¬a U (b ∧ ¬a)) ∨ G ¬a
      → ur5e-3 must not insert the KET4 it holds. It has to set KET4 down before it can pick up

@@ -43,12 +43,13 @@ Gazebo execution decides whether the choice works.
 (2)  G ¬( in(ur5e-1, M1) ∧ in(KMR, M1) )
      → ur5e-1's arm is still inside M1. It must retract before the KMR can dock and reach in.
 
-(5b) a = enters(RGOCG4-50_Round_4mm, assembly_board-v1)
+(5b) a = assembled(RGOCG4-50_Round_4mm @ GMC_Laser_Plate_Virtual/RGOCG4-50_Round_4mm)
      b = assembled(KET4_Square_4mm @ GMC_Laser_Plate_Virtual/KET4_Square_4mm)
      (¬a U (b ∧ ¬a)) ∨ G ¬a
      → RGOCG4 keeps flowing from M2 and reaches the assembly cell before the delayed KET4.
-       Inserting RGOCG4 first would keep the line moving but violates 5b. RGOCG4 must wait in
-       the buffer.
+       Inserting RGOCG4 first would keep the line moving but violates 5b. Its assembly must wait
+       for KET4's; carrying it onto the free board first would leave ur5e-3 holding it there, with
+       KET4 still to come, so RGOCG4 waits in the buffer.
 ```
 
 **In force but satisfied:**

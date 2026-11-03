@@ -936,6 +936,18 @@ def test_a_stated_new_job_names_its_machine_by_resource_id_as_the_job_guards_rea
         "machine": "mill", "process": "trim", "result": "square", "status": "running"}
 
 
+def test_a_stated_record_reaches_the_part_when_the_acting_resource_s_model_does_not_list_it():
+    record = [{"process": "print_part"}, {"process": "assembly", "target": "Plate/gear"}]
+    task = {"resource_jid": "arm", "part_name": "gear", "expected_end_state": {"processCompleted": record}}
+    session = {"symbolic_resources": {"arm": {"resource_state": "positioned"}},
+               "symbolic_parts": {"gear": {"processCompleted": record[:1]}},
+               "recovery_des_models": {"arm": {"state_variables": {}}}}
+    multi_turn._apply_task_effects_to_symbolic_state(task, session)
+    assert session["symbolic_parts"]["gear"]["processCompleted"] == record
+    assert multi_turn_diagnostic._event_changes(task, session) == [
+        {"entity": "gear", "variable": "processCompleted", "value": record, "by": "LLM"}]
+
+
 def test_a_resource_states_what_its_declared_job_control_does():
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
 

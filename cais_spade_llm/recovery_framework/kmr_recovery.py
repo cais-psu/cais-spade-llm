@@ -3,6 +3,7 @@ from __future__ import annotations
 """KMR owner calculations over explicitly supplied, recorded observations."""
 
 import math
+from collections.abc import Callable
 from copy import deepcopy
 
 from cais_spade_llm.recovery_framework.geometry import compose, quaternion, rotate
@@ -14,7 +15,10 @@ from cais_spade_llm.resources.kinematic_reach import (  # noqa: F401
 from cais_spade_llm.resources.kinematic_reach import (
     bounded_joint_search as _calculate_cartesian_joints,
 )
-from cais_spade_llm.resources.kinematic_reach import pose_matrix, with_root
+from cais_spade_llm.resources.kinematic_reach import pose_matrix, reach, with_root
+
+# How far a release's approach and retreat may move toward the arm, in order, when straight above is out of reach.
+RELEASE_SHIFTS_M = (.02, .04, .06, .08, .1)
 
 
 def _vector(value, length: int) -> bool:
@@ -120,6 +124,9 @@ def recorded_scene_payloads(observations: dict, scene_capture: dict) -> dict:
     return result
 
 
+KMR_NAMED_POSES = ("transport", "home")
+
+
 def transport_pose(scene: dict, base_pose: list, current_pose: list) -> list:
     """Calculate the declared transport TCP using the measured base and orientation."""
     if not _pose(base_pose) or not _pose(current_pose):
@@ -208,9 +215,14 @@ def release_heights(scene: dict, target_z: float) -> dict[str, float]:
     return {'approach': approach, 'retreat': max(target_z + config['release_offsets_m'][0][2], approach)}
 
 
+def tool_height(scene: dict, part_z: float) -> float:
+    """Return the tool height that grasps or releases a part at ``part_z``."""
+    return part_z + scene['KMR']['task_execution']['grasp_height_m']
+
+
 def transfer_heights(scene: dict, transfer: str, part: str | None, place: str | None, part_z: float) -> list[float]:
     """Return the tool heights above a part at ``part_z`` that a ``pick`` or ``place`` of it needs, highest first."""
-    target_z = part_z + scene['KMR']['task_execution']['grasp_height_m']
+    target_z = tool_height(scene, part_z)
     heights = pick_heights(scene, part, place, target_z) if transfer == 'pick' else release_heights(scene, target_z)
     return sorted(set(heights.values()), reverse=True)
 
@@ -293,8 +305,43 @@ def place_targets(scene: dict, machine: dict, transform: list, current_pose: lis
     return release_targets(scene, transform, current_pose, base_pose, [*fixture[:3], *quaternion(fixture[3:])])
 
 
+def release_shift(scene: dict, base_pose: list, target: list, reaches: Callable[[list], bool]) -> list[float] | None:
+    """Return how far a release's approach and retreat move toward the arm, in world x and y.
+
+    A release comes straight down on its target where the arm reaches the point above it. The gripper stays downward,
+    which costs the arm reach as it rises, so near the end of its reach it can touch a spot and not the point above.
+    There the approach and retreat start closer to the arm and the last move slants; the target and the gripper's
+    orientation stay.
+
+    Args:
+        scene: The captured owner configuration.
+        base_pose: The base pose as position and quaternion.
+        target: The release's TCP pose.
+        reaches: Whether the arm reaches a TCP pose from this base.
+
+    Returns:
+        The shift, or None when no approach within ``RELEASE_SHIFTS_M`` is reachable.
+    """
+    arm = compose(base_pose, [*scene['KMR']['arm_mount_xyz'], 0., 0., 0., 1.])
+    heights = set(release_heights(scene, target[2]).values())
+    distance = math.dist(arm[:2], target[:2])
+
+    def shift(length: float) -> list[float]:
+        return [(arm[axis] - target[axis]) * length / distance for axis in range(2)] if length and distance else [0., 0.]
+
+    def fits(length: float) -> bool:
+        x, y = (target[axis] + shift(length)[axis] for axis in range(2))
+        return all(reaches([x, y, z, *target[3:]]) for z in heights)
+
+    if fits(0.):
+        return shift(0.)
+    if not fits(RELEASE_SHIFTS_M[-1]):
+        return None
+    return shift(next(length for length in RELEASE_SHIFTS_M if fits(length)))
+
+
 def release_targets(scene: dict, transform: list, current_pose: list, base_pose: list,
-                    destination: list) -> dict:
+                    destination: list, *, reaches: Callable[[list], bool] | None = None) -> dict:
     """Calculate TCP poses that put the held part at a world pose, wherever the base stands.
 
     Args:
@@ -303,6 +350,8 @@ def release_targets(scene: dict, transform: list, current_pose: list, base_pose:
         current_pose: The observed TCP pose.
         base_pose: The observed base pose as position and quaternion.
         destination: The part's intended world pose as position and quaternion.
+        reaches: Whether the arm reaches a TCP pose from this base, which lets ``release_shift`` move the approach
+            and retreat; without it they stay straight above the target.
 
     Returns:
         Approach, target, retreat and transport poses. Reachability is decided
@@ -321,10 +370,18 @@ def release_targets(scene: dict, transform: list, current_pose: list, base_pose:
     approach[2] = heights['approach']
     retreat = target.copy()
     retreat[2] = heights['retreat']
+    shift = release_shift(scene, base_pose, target, reaches) if reaches is not None else None
+    for pose in (approach, retreat):
+        pose[:2] = [value + delta for value, delta in zip(pose[:2], shift or [0., 0.], strict=True)]
     transport = transport_pose(scene, base_pose, current_pose)
     return {'target': target, 'approach': approach, 'retreat': retreat, 'destination': destination,
             'transfer_waypoints': transfer_waypoints(scene, base_pose, current_pose, approach),
             'transport': transport, 'withdraw_waypoints': transfer_waypoints(scene, base_pose, retreat, transport)}
+
+
+def _arm_reaches(config: dict, base_pose: list) -> Callable[[list], bool]:
+    """Return whether the arm reaches a TCP pose from a base, by the search the RA's reach check uses."""
+    return lambda pose: reach(config, pose, root=pose_matrix(base_pose))['feasibility_status'] == 'FEASIBLE'
 
 
 def _standing_at(state: dict, evidence: dict) -> str | None:
@@ -386,6 +443,9 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
     kmr = scene.get('KMR', {})
     physical = evidence.get('snapshot', {})
     state = {**deepcopy(physical), **deepcopy(snapshot)}
+    # The symbolic current_pose of a KMR stopped between places is its base; the tool pose stays in its evidence.
+    if not _pose(state.get('current_pose')) and 'current_pose' in physical:
+        state['current_pose'] = deepcopy(physical['current_pose'])
     names, joints = state.get('joint_names'), state.get('joint_positions')
     config = state.get('continuous_motion_configuration') or evidence.get('continuous_motion_configuration')
     if (not isinstance(names, list) or names != kmr.get('arm_joint_names') or len(names) != 7
@@ -431,7 +491,8 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
         try:
             if destination is not None:
                 source = task.get('expected_end_state', {}).get('part_location', 'part_pose')
-                targets = release_targets(scene, transform, state['current_pose'], state['base_pose'], destination)
+                targets = release_targets(scene, transform, state['current_pose'], state['base_pose'], destination,
+                                          reaches=_arm_reaches(config, state['base_pose']))
             else:
                 machine, source = recorded_location(scene, _standing_at(state, evidence))
                 targets = place_targets(scene, machine, transform, state['current_pose'], state['base_pose'],
@@ -481,7 +542,7 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
         return answer('FEASIBLE' if bounded_joints(names, target, limits) else 'INFEASIBLE',
                       'Checked exact KMR joint target against declared bounds; motion interval remains separate')
     if primitive == 'move_to_named_pose':
-        if params.get('pose_name') not in {'home', 'transport'}:
+        if params.get('pose_name') not in KMR_NAMED_POSES:
             return answer('INFEASIBLE', 'Unknown KMR arm pose')
         if params['pose_name'] == 'home' and 'held_part' not in state:
             return missing('KMR home requires explicitly recorded custody', 'snapshot/held_part')

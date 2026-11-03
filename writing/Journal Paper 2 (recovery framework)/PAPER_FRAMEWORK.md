@@ -111,6 +111,11 @@ name the section or equation it implements. If it maps to none, ask the user fir
   - A value the event leaves out stays as it was; code writes none (user, October 31). Where a capability check, a
     stated pose or a stated ledger entry finds that value changed, the event is rejected with that fact and the LLM
     states it. Algorithm 1 goes from stated values only, so this rejection needs a sentence in the paper.
+  - The assembly entry of a part's record (user, November 2): board entry is left to the mutex $\varphi_1$, and
+    $\varphi_5$, $\varphi_6$ order assembly completion, so a recovery event has to reach the record. No primitive declares
+    that entry; the resource's declared completion of the insert does. The place check finds it, the event states it, and
+    leaving it out is rejected with the value. Algorithm 1 goes from primitive effects, so this also needs a sentence in
+    the paper.
   - A mobile base is checked from the pose the event states or the dock of the place it names. Only an event that
     leaves it at no named place opens the search for a free base: that base is a parameter $\theta$ of Eq. 12, which
     the RA finds and the LLM never writes (user, October 31).
@@ -198,8 +203,8 @@ name the section or equation it implements. If it maps to none, ask the user fir
   | $\varphi_2$ M1 mutex | `SAFE_M1_mutex` | pairs of resources that move or carry parts; $A_1$–$A_3$ = `M1.front_access`, `M1.side_access`, `M1.workholding` |
   | $\varphi_3$ M2 mutex | `SAFE_M2_mutex` | pairs of resources that move or carry parts; $A_1$–$A_3$ = `M2.front_access`, `M2.side_access`, `M2.workholding` |
   | $\varphi_4$ Trim before entry | `SAFE_trim_before_assembly_board-v1_entry` | `KET4_Square_4mm`, `KET8_Square_8mm`, `KET12_Square_12mm`, `KET16_Square_16mm` with result `square`; `RGOCG4-50_Round_4mm`, `RGOCG8-50_8mm`, `RGOCG12-50_12mm`, `RGOCG16-50_16mm` with `circle` |
-  | $\varphi_5$ Gear before square peg | `SAFE_gear_small_before_KET4_Square_4mm` | $p$ = `KET4_Square_4mm` (4 mm square peg), $q$ = `gear_small` (small gear), $t_q$ = `Gear_Plate/Gear_Shaft_1` |
-  | $\varphi_6$ Square peg before round peg | `SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm` | $p$ = `RGOCG4-50_Round_4mm` (4 mm round peg), $q$ = `KET4_Square_4mm`, $t_q$ = `GMC_Laser_Plate_Virtual/KET4_Square_4mm` |
+  | $\varphi_5$ Gear before square peg | `SAFE_gear_small_before_KET4_Square_4mm` | $p$ = `KET4_Square_4mm` (4 mm square peg), $t_p$ = `GMC_Laser_Plate_Virtual/KET4_Square_4mm`, $q$ = `gear_small` (small gear), $t_q$ = `Gear_Plate/Gear_Shaft_1` |
+  | $\varphi_6$ Square peg before round peg | `SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm` | $p$ = `RGOCG4-50_Round_4mm` (4 mm round peg), $t_p$ = `GMC_Laser_Plate_Virtual/RGOCG4-50_Round_4mm`, $q$ = `KET4_Square_4mm`, $t_q$ = `GMC_Laser_Plate_Virtual/KET4_Square_4mm` |
   | $\varphi_7$ Square trim before round trim | `SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing` | $p$ = `RGOCG4-50_Round_4mm`, $q$ = `KET4_Square_4mm`; results `circle` and `square` |
 
 - **Failure scenarios.** Conveyor breakdown, robot breakdown (ur5e-1), machine breakdown, and part
@@ -339,7 +344,9 @@ figure's names (square peg, round peg, small gear, assembly board), never code i
    The nonblocking text in Section 5 changes to match: nominal production must still be able to
    complete from every state it can reach after the recovery.
 
-5. **Section 6: add the safety specifications table.** The rows and their code sources are under
+5. **Section 6: add the safety specifications table.** $\varphi_5$ and $\varphi_6$ order assembly completion and
+   $\varphi_1$ alone limits board entry (user, November 2, 2026): reported experiments need this rule, so batches recorded
+   before that date do not match the table. The rows and their code sources are under
    "Case study (Section 6)". Each row defines its AP labels $a_i$ in the formula cell, and the labels
    are local to the row, as `ap001`, `ap002` are local to each rule in the spec files. The three AP
    forms are defined once in Section 3, so no separate AP table is needed. The table fits one column
@@ -354,7 +361,7 @@ figure's names (square peg, round peg, small gear, assembly board), never code i
    \caption{Safety specifications $\Phi$ (Eq.~8) in the case studies. APs are PPR propositions
    (Section~3); $a_i$, $A_i$, $p$ and $q$ are local to each row. $r \neq r'$ are any two resources
    (for $\varphi_2$ and $\varphi_3$, resources that move or carry parts), $B$ is the assembly board
-   area, and $t_q$ is part $q$'s assembly target.}
+   area, and $t_p$ and $t_q$ are the assembly targets of parts $p$ and $q$.}
    \label{tab:safety-specifications}
    \scriptsize
    \setlength{\tabcolsep}{3pt}
@@ -386,15 +393,15 @@ figure's names (square peg, round peg, small gear, assembly board), never code i
 
    $\varphi_5$ &
    $(\neg a_1 \mathbin{\mathbf{U}} (a_2 \wedge \neg a_1)) \vee \mathbf{G}\,\neg a_1$, where \newline
-   $a_1 = \texttt{part\_region\_entry}(p, B)$ \newline
+   $a_1 = \texttt{processCompleted}(p, \texttt{assembly}, t_p)$ \newline
    $a_2 = \texttt{processCompleted}(q, \texttt{assembly}, t_q)$ &
-   The 4\,mm square peg $p$ enters $B$ only after the small gear $q$ is assembled. \\
+   The 4\,mm square peg $p$ is assembled only after the small gear $q$ is. \\
 
    $\varphi_6$ &
    $(\neg a_1 \mathbin{\mathbf{U}} (a_2 \wedge \neg a_1)) \vee \mathbf{G}\,\neg a_1$, where \newline
-   $a_1 = \texttt{part\_region\_entry}(p, B)$ \newline
+   $a_1 = \texttt{processCompleted}(p, \texttt{assembly}, t_p)$ \newline
    $a_2 = \texttt{processCompleted}(q, \texttt{assembly}, t_q)$ &
-   The 4\,mm round peg $p$ enters $B$ only after the 4\,mm square peg $q$ is assembled. \\
+   The 4\,mm round peg $p$ is assembled only after the 4\,mm square peg $q$ is. \\
 
    $\varphi_7$ &
    $(\neg a_1 \mathbin{\mathbf{U}} (a_2 \wedge \neg a_1)) \vee \mathbf{G}\,\neg a_1$, where \newline

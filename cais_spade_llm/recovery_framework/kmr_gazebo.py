@@ -1489,14 +1489,17 @@ def run(request: dict, session: dict | None = None) -> dict:
             return {'resource_location': 'Storage', 'base_pose': arrived,
                     'attached': False, 'pickup_dock': f'Storage/{part}'}
 
-        # A target with no declared dock has no configured route to sample.
+        # A target with no declared dock has no configured route to sample, and neither has a primitive that gives
+        # no waypoints, as no composed program is served them. The base controller sweeps the path it plans for
+        # both; a task's move keeps the sampled check of its configured route.
         free_target = destination is None
+        endpoints_only = free_target or (mode == 'primitive' and not waypoints)
         if transform is None:
             if held_part is not None:
                 raise ValueError('Empty KMR travel requires no held part')
             if free_target and mode != 'primitive':
                 raise ValueError('KMR target is not a configured destination')
-            acknowledgement = authorize_empty_transport(route=route, endpoints_only=free_target)
+            acknowledgement = authorize_empty_transport(route=route, endpoints_only=endpoints_only)
             operations.append({'operation': 'validated_empty_transport_route',
                                'success': True, 'route': route,
                                'controller_acknowledgement': acknowledgement})
@@ -1510,7 +1513,7 @@ def run(request: dict, session: dict | None = None) -> dict:
             raise ValueError('Loaded KMR delivery target must be M1 or M2')
         custody(transform)
         configuration = confirm_carrying()
-        sweep = validate_transport(observed_state(), route=route, endpoints_only=free_target)
+        sweep = validate_transport(observed_state(), route=route, endpoints_only=endpoints_only)
         operations.append(sweep)
         relative_query = GetEntityState.Request(
             name=part, reference_frame='KMR::' + config['attach_link'],

@@ -453,19 +453,19 @@ def test_mutex_preserves_supplied_geometry_ap_records() -> None:
         {"specification": "SAFE_shared_area_mutex", "region": "assembly_board-v1"}]
 
 
-def test_precedence_preserves_exact_entry_and_completion_bindings() -> None:
-    """Part entry requires an earlier acknowledged completion at the given target."""
+def test_precedence_preserves_exact_completion_bindings() -> None:
+    """A part's assembly completion requires the earlier part's completion at the given target."""
     document = json.loads((_SAFETY_DIR / _STANDALONE_FILES["precedence"]).read_text())
     rule, = document["catalog"]["specifications"]
     assert rule["id"] == "SAFE_gear_small_before_KET4_Square_4mm"
     assert rule["formula"] == "(!ap001 U (ap002 & !ap001)) | G !ap001"
     assert [ap["label"] for ap in rule["aps"]] == ["ap001", "ap002"]
-    assert rule["aps"][0]["definition"]["event"]["symbol"] == "part_region_entry"
+    assert rule["aps"][0]["definition"]["state"]["symbol"] == "processCompleted"
     assert rule["aps"][1]["definition"]["state"]["symbol"] == "processCompleted"
     assert document["requirement_scopes"] == [{
         "specification": "SAFE_gear_small_before_KET4_Square_4mm",
         "physical_ap_bindings": {
-            "ap001": {"part": "KET4_Square_4mm", "region": "assembly_board-v1"},
+            "ap001": {"part": "KET4_Square_4mm", "target": "GMC_Laser_Plate_Virtual/KET4_Square_4mm"},
             "ap002": {"part": "gear_small", "process": "assembly", "target": "Gear_Plate/Gear_Shaft_1"},
         },
     }]

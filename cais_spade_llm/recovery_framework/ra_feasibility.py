@@ -68,6 +68,8 @@ class RecordedCell:
         part_geometry: Recorded part extents, ``local_bounds`` about each part's own frame.
         contact_layer_m: The physics engine's recorded contact surface layer, how far resting bodies may
             sink into each other, or None when the capture records none.
+        assembly_targets: Recorded assembly target per part.
+        environment_models: Every resource's runtime model, per resource id.
     """
 
     scene: dict
@@ -81,6 +83,8 @@ class RecordedCell:
     rids: dict
     part_geometry: dict
     contact_layer_m: float | None
+    assembly_targets: dict
+    environment_models: dict
 
 
 def recorded_cell(observations: dict, floor: dict) -> RecordedCell:
@@ -93,6 +97,7 @@ def recorded_cell(observations: dict, floor: dict) -> RecordedCell:
     Returns:
         The cell a check reads.
     """
+    from cais_spade_llm.resources.environment_models import build_environment_models
     from cais_spade_llm.resources.resource_primitives import current_primitive_declarations
 
     physical = observations["physical_evidence"]
@@ -104,7 +109,9 @@ def recorded_cell(observations: dict, floor: dict) -> RecordedCell:
         declarations=current_primitive_declarations(scene),
         rids={jid: rid for rid, jid in observations.get("jids", {}).items()},
         part_geometry=physical.get("geometry", {}).get("parts", {}),
-        contact_layer_m=_contact_layer(physical.get("physics_evidence", {})))
+        contact_layer_m=_contact_layer(physical.get("physics_evidence", {})),
+        assembly_targets=observations["inputs"].get("geometry", {}).get("parts", {}).get("assembly_target_map", {}),
+        environment_models=build_environment_models(scene))
 
 
 def _contact_layer(physics: dict) -> float | None:
@@ -198,6 +205,83 @@ class _Check:
                 row["reason"] = self.refusal(row["producers"], ruled_out)
         return rows
 
+    def effect_refusals(self, conditions: list[dict], capability: list[dict]) -> list[dict]:
+        """Refuse an event whose values are not what the primitives it relies on leave.
+
+        Composition runs those primitives and code writes nothing for the event, so a value a primitive declares
+        has to be the one the event states or the one already there. Where several primitives can make a stated
+        value, one that leaves the event as stated is enough; a grasp and a release in one event leave what the
+        release leaves.
+        """
+        refused = {}
+        for row in conditions:
+            making = [(producer["primitive"], producer["alternative"]) for producer in row.get("producers", [])
+                      if producer.get("makes_value") and producer["status"] == FEASIBLE]
+            left = [self.left_by([step]) for step in making]
+            if left and all(left):
+                refused.update(left[0])
+        for row in capability:
+            if row.get("check") == "handling" and row["status"] == FEASIBLE:
+                refused.update(self.left_by(row["steps"]))
+        settled = {row["condition"] for row in conditions if row["status"] != FEASIBLE}
+        return [row for (_, name), row in refused.items() if name not in settled]
+
+    def left_by(self, steps: list[list]) -> dict[tuple[str, str], dict]:
+        """Return a refusal for each declared variable the primitives of ``steps``, in order, leave otherwise."""
+        from cais_spade_llm.resources.recovery_transition_derivation import _RESOURCE_NAMES
+
+        names = {alias: name for name, aliases in _RESOURCE_NAMES.items() for alias in aliases}
+        writers = {}
+        for primitive, alternative in steps:
+            contract = self.cell.declarations[self.rid][primitive][alternative]
+            for key, scope in (("effects", "resource"), ("product_effects", "part")):
+                for field, rule in (contract.get(key) or {}).items():
+                    writers[(scope, names.get(field, field))] = (primitive, contract, rule)
+        rows = {}
+        for (scope, name), (primitive, contract, rule) in writers.items():
+            declaration = self.variables(self.jid).get(name) if scope == "resource" else self.part_variable(name)
+            if (declaration is None or declaration.get("private") or rule == {"set_unknown": True}
+                    or (scope == "part" and not self.part)):
+                continue
+            known, before = self.value(self.jid, name, scope)
+            before, stated = before if known else None, name in self.end
+            if not stated and not known:
+                continue
+            after = self.end[name] if stated else before
+            status, reason, _ = _produces(rule, before, after, {"part_name": self.part} if self.part else {},
+                                          contract.get("parameters") or {})
+            if status != INFEASIBLE or self.ends_by_transition(primitive, name, rule, after):
+                continue
+            # A resource_state nothing declared sets, such as a recorded fault, is no state a primitive's effect
+            # replaces: left out, it stays as the capture has it.
+            if not stated and name == "resource_state" and not self.declared_value(name, declaration, before):
+                continue
+            subject = self.part if scope == "part" else self.name_of(self.jid)
+            named = self.alternative_name(primitive, contract)
+            rows[(subject, name)] = (
+                {"entity": subject, "condition": name, "status": INFEASIBLE, "found_by": primitive, "reason": f"{named}: {reason}"}
+                if stated else
+                {"entity": subject, "condition": name, "status": NEEDS_CONTEXT, "found_by": primitive,
+                 "reason": f"{named} changes {subject}'s {name}, which is {_text(before)}, and the event does not state it"})
+        return rows
+
+    def declared_value(self, name: str, declaration: dict, value: Any) -> bool:
+        """Return whether a primitive or a declared transition of the acting resource sets a variable to a value."""
+        events = (self.models.get(self.jid) or {}).get("events") or []
+        return (any(((event.get("updates") or {}).get(name) or {}).get("set") == value for event in events)
+                or bool(self.setters(self.jid, name, declaration, value, value)))
+
+    def ends_by_transition(self, primitive: str, name: str, rule: Any, after: Any) -> bool:
+        """Return whether a declared transition through a primitive ends at a value its own effect does not set.
+
+        A primitive's effect stands where a transition through it declares that value too, as for a move home.
+        Where none does, as for a release, the transition's value is the other way the primitive ends.
+        """
+        values = [event["updates"][name]["set"] for event in (self.models.get(self.jid) or {}).get("events") or []
+                  if "set" in ((event.get("updates") or {}).get(name) or {})
+                  and primitive in [step.get("op") for step in (event.get("composition_contract") or {}).get("steps") or []]]
+        return isinstance(rule, dict) and rule.get("set") not in values and after in values
+
     def unstated_found(self, found: dict) -> list[dict]:
         """Refuse an event that leaves out a value its pick, place, stated pose or stated ledger changes.
 
@@ -253,10 +337,7 @@ class _Check:
         act. A ``resource_state`` value names the resource's new state: a name no primitive of the resource
         declares needs nothing.
         """
-        # A part's variables are the part-scoped ones any resource declares, as the knowledge base lists them.
-        declaration = self.variables(jid).get(name) or next(
-            (row for model in self.models.values() for key, row in (model.get("state_variables") or {}).items()
-             if key == name and row.get("scope") == "part"), None)
+        declaration = self.variables(jid).get(name) or self.part_variable(name)
         entity = self.name_of(jid)
         row = {"entity": entity, "condition": name, "after": deepcopy(after)}
         if declaration is None:
@@ -275,8 +356,8 @@ class _Check:
             value, check, status = found[key]
             if self.same_value(value, after):
                 return {**row, "status": status, "found_by": check}
-            reason = (f"the stated pose puts {subject} at {_text(value)}, not {_text(after)}" if check == "pose"
-                      else f"the {check} check finds {subject}'s {name} {_text(value)}, not {_text(after)}")
+            reason = (f"the stated pose puts {subject} at {_text(value)}{self.gripper_at()}, not {_text(after)}"
+                      if check == "pose" else f"the {check} check finds {subject}'s {name} {_text(value)}, not {_text(after)}")
             return {**row, "status": INFEASIBLE, "found_by": check, "reason": reason}
         if holds or (name == "resource_state" and not setters):
             return {**row, "status": FEASIBLE}
@@ -289,6 +370,11 @@ class _Check:
                     "reason": f"no {self.rid} primitive sets {subject}'s {name} to {_text(after)}"}
         return {**row, "status": INFEASIBLE, "reason": f"{entity} does not act in this event, and no check of it finds "
                                                     f"{subject}'s {name} at {_text(after)}"}
+
+    def part_variable(self, name: str) -> dict | None:
+        """Return a part's variable: the part-scoped ones any resource declares, as the knowledge base lists them."""
+        return next((row for model in self.models.values() for key, row in (model.get("state_variables") or {}).items()
+                     if key == name and row.get("scope") == "part"), None)
 
     def same_value(self, value: Any, stated: Any) -> bool:
         """Return whether a stated value is the one found; a resource may be named by its JID."""
@@ -440,14 +526,15 @@ class _Check:
         if self.mobile():
             if self.base_fits(after):
                 return {"status": FEASIBLE}
-            from cais_spade_llm.resources.kinematic_reach import footprint_obstacles
+            from cais_spade_llm.resources.kinematic_reach import BASE_PADDING_M, footprint_obstacles
 
             footprint = self.cell.scene[self.rid]["platform_overall_dimensions_m"]
             stated = [after.get(axis, 0.0) for axis in ("x", "y", "yaw")] if isinstance(after, dict) else []
             numeric = len(stated) == 3 and all(isinstance(value, (int, float)) for value in stated)
             overlaps = footprint_obstacles(self.cell.floor, footprint, stated) if numeric and self.cell.floor else []
             where = f"overlaps {', '.join(overlaps)} on the floor map" if overlaps else "is not on free, connected floor"
-            return {"status": INFEASIBLE, "reason": f"{self.rid}'s footprint at {_text(after)} {where}"}
+            return {"status": INFEASIBLE,
+                    "reason": f"{self.rid}'s footprint with its {BASE_PADDING_M} m margin at {_text(after)} {where}"}
         target = self.stated_tool_pose(after)
         if target is None:
             return {"status": NEEDS_CONTEXT, "reason": f"{name} {_text(after)} has no orientation to check"}
@@ -709,26 +796,39 @@ class _Check:
                                 point[2])
 
     def reach_with_heights(self, chain: dict, point: list[float], orientation: list[float], bases: list[list[float]],
-                           heights: list[float]) -> dict | None:
-        """Return the reach of a point from the first candidate base that also reaches every height above it.
+                           heights: list[float], *, release: bool = False) -> dict | None:
+        """Return the reach of a point from the first candidate base that also reaches what its owner needs above it.
 
-        Each base is judged on all of them, so a base that only touches the spot does not end the search.
+        Each base is judged on all of them, so a base that only touches the spot does not end the search. A release
+        needs the owner's target and its approach, which the owner moves toward the arm where straight above is out
+        of reach; anything else needs every height straight above the spot.
         """
+        from cais_spade_llm.recovery_framework.kmr_recovery import release_shift, tool_height
         from cais_spade_llm.resources.kinematic_reach import reach_from_base
 
-        def reached(z: float, candidates: list[list[float]]) -> dict:
-            return reach_from_base(chain, self.reference_pose([*point[:2], z], orientation), candidates,
+        def reached(position: list[float], candidates: list[list[float]]) -> dict:
+            return reach_from_base(chain, self.reference_pose(position, orientation), candidates,
                                    base_height_m=chain["root_xyz"][2])
 
+        def arrives(position: list[float], base: list[float]) -> bool:
+            return reached(position, [base])["feasibility_status"] == FEASIBLE
+
+        target = [*point[:2], tool_height(self.cell.scene, point[2])] if release else point
+        first = [*point[:2], heights[0]] if heights and not release else target
         remaining = list(bases)
         for _ in range(_TRANSFER_BASE_TRIES):
-            found = reached(heights[0] if heights else point[2], remaining)
+            found = reached(first, remaining)
             if found["feasibility_status"] != FEASIBLE:
                 return None
             base = found["base_pose"]
-            at_point = reached(point[2], [base]) if heights else found
-            if at_point["feasibility_status"] == FEASIBLE and all(
-                    reached(z, [base])["feasibility_status"] == FEASIBLE for z in heights[1:]):
+            at_point = found if release or not heights else reached(point, [base])
+            if release:
+                pose = [base[0], base[1], chain["root_xyz"][2], *Rotation.from_euler("z", base[2]).as_quat()]
+                fits = release_shift(self.cell.scene, pose, [*target, *orientation],
+                                     lambda tool: arrives(tool[:3], base)) is not None
+            else:
+                fits = at_point["feasibility_status"] == FEASIBLE and all(arrives([*point[:2], z], base) for z in heights[1:])
+            if fits:
                 return at_point
             remaining.remove(base)
             if not remaining:
@@ -763,16 +863,22 @@ class _Check:
         bases = self.event_bases(point)
         if not bases:
             return {"status": NEEDS_CONTEXT, "reason": f"no free, connected base pose for {self.rid} near {what}"}
+        from cais_spade_llm.recovery_framework.kmr_recovery import RELEASE_SHIFTS_M
+
         heights = self.transfer_heights(transfer, place, point)
+        # A release at the dock's own fixture keeps its owner's straight approach.
+        release = bool(transfer == "place" and heights and self.dock_at(place) not in bases)
         # A declared dock that reaches the area is the base used, before any closer grid pose.
         docks = [base for base in bases if base in self.docks()]
         for candidates in ([docks] if docks else []) + [bases]:
             for orientation in self.orientations():
-                checked = self.reach_with_heights(chain, point, orientation, candidates, heights)
+                checked = self.reach_with_heights(chain, point, orientation, candidates, heights, release=release)
                 if checked is not None:
                     return {"status": FEASIBLE, "witness": {"base_pose": checked["base_pose"],
                                                             "joint_positions": checked["joint_positions"]}}
         height = f" and z {heights[0]:.3f} above it" if heights else ""
+        if release:
+            height += f" or up to {RELEASE_SHIFTS_M[-1]:.2f} m toward its arm"
         if len(bases) == 1:
             x, y, yaw = bases[0]
             return {"status": NEEDS_CONTEXT, "reason": f"{self.rid} has no configuration at {what}{height} from its "
@@ -988,7 +1094,24 @@ class _Check:
             rows.append({"check": "primitives", "status": _worst(status for status, _ in failures),
                          "refused_by": "preconditions",
                          "reason": f"{self.rid}'s primitives need " + "; ".join(reason for _, reason in failures)})
+        elif not derived and not rows and self.no_transition(conditions):
+            rows.append({"check": "primitives", "status": INFEASIBLE,
+                         "reason": f"no declared {self.rid} transition makes what this event states, so nothing carries it out"})
         return rows
+
+    def no_transition(self, conditions: list[dict]) -> bool:
+        """Return whether no declared transition of the acting resource supports an event no check and no primitive does.
+
+        Composition builds a program from the transitions that match the event, so an event with none has no program.
+        """
+        from cais_spade_llm.resources.recovery_feasibility import derive_primitive_union
+
+        model = self.models.get(self.jid) or {}
+        if not model.get("events") or any(row.get("producers") for row in conditions):
+            return False
+        support = derive_primitive_union(task={**self.event, "expected_end_state": self.end}, recovery_des_model=model,
+                                         recovery_snapshot=self.resources.get(self.jid, {}))
+        return not support["matching_transitions"]
 
     def capability_rows(self) -> list[dict]:
         rows = ([*self.custody(), *self.unstated_part_location(), *self.unstated_held_part(), *self.unstated_slot()]
@@ -1005,7 +1128,7 @@ class _Check:
             # A stated place can be any JSON value, such as a dict, so the places are compared, not hashed.
             elif not picks_or_places or location not in [row.get("place") for row in rows]:
                 rows.append({"check": "move", **self.reach_place(location, None, location)})
-        return [*rows, *self.pose_from_calculation(rows)]
+        return [*rows, *self.pose_from_calculation(rows), *self.unstated_pose(rows)]
 
     def pose_from_calculation(self, rows: list[dict]) -> list[dict]:
         """Refuse a stated pose where the acting resource's declared calculation gives the target.
@@ -1039,6 +1162,19 @@ class _Check:
             return []
         return [{"check": "stated_pose", "status": INFEASIBLE, "reason": f"{named} gives {self.rid}'s target, so this event "
                                                                          f"takes no pose; it states {_text(self.end['pose'])}"}]
+
+    def unstated_pose(self, rows: list[dict]) -> list[dict]:
+        """Refuse an arm's move with no pick or place that does not state where it ends.
+
+        A pick or a place has its declared calculation and a named posture its joints. A place the arm only moves
+        to gives no target, so the event's pose is the only position composition can bind.
+        """
+        move = next((row for row in rows if row["check"] == "move" and row["status"] == FEASIBLE), None)
+        if move is None or {row["check"] for row in rows} & {"pick", "place"} or "pose" in self.end:
+            return []
+        return [{"check": "pose", "place": move["place"], "status": NEEDS_CONTEXT,
+                 "reason": f"the event moves {self.rid} to {move['place']} with no pick or place but does not state its "
+                           "pose, and no calculation gives that target"}]
 
     def has_geometry(self, place: Any, slot: str | None) -> bool:
         """Return whether a place is one with recorded geometry, not the acting resource or a gripper."""
@@ -1127,7 +1263,8 @@ class _Check:
         located as the model locates a part from its custodian. A transport moves it to its stated slot on
         the acting resource. A move, navigation, pick or place at the stated location leaves the acting
         resource there; a stated pose, at the place whose dock or recorded area holds it, else at no named place.
-        A stated ledger entry that completes the part's unfinished process ends that process.
+        A stated ledger entry that completes the part's unfinished process ends that process. A place the acting
+        resource's model declares a completion for adds that entry to the part's record.
         """
         found: dict[tuple[str | None, str], tuple[Any, str, str]] = {}
         checks = {row["check"]: row["status"] for row in rows if self.part is not None and row.get("part") == self.part}
@@ -1140,8 +1277,12 @@ class _Check:
             if neighbor is not None:
                 found[(neighbor["jid"], neighbor["condition"])] = (
                     self.neighbors[neighbor["jid"]][neighbor["condition"]], "place", checks["place"])
+                for name, value in self.belt_order(neighbor)[0].items():
+                    found[(neighbor["jid"], name)] = (value, "place", checks["place"])
                 place = self.custodian_location(neighbor["jid"])
             found[(None, "part_location")] = (place, "place", checks["place"])
+            if (record := self.record_after_place(place)) is not None:
+                found[(None, "processCompleted")] = (record, "place", checks["place"])
         if "transport" in checks:
             slot = self.own_slot()
             found[(self.jid, slot)] = (self.end[slot], "transport", checks["transport"])
@@ -1160,11 +1301,63 @@ class _Check:
                 found[(None, "current_process")] = (None, "processCompleted", FEASIBLE)
         pose = self.end.get("pose")
         # A stated pose says where the resource ends up; a mobile base is at a named place only on its dock.
-        if (not isinstance(location, str) or self.mobile()) and isinstance(pose, dict) and all(
-                isinstance(pose.get(axis), (int, float)) for axis in ("x", "y")):
-            # The pose's own producer checks that the resource gets there.
-            found[(self.jid, "resource_location")] = (self.place_at(pose), "pose", FEASIBLE)
+        if isinstance(pose, dict) and all(isinstance(pose.get(axis), (int, float)) for axis in ("x", "y")):
+            # The pose's own producer checks that the resource gets there. A stated place has to hold it too.
+            found[(self.jid, "resource_location")] = (self.place_at(pose, location), "pose", FEASIBLE)
         return found
+
+    def record_after_place(self, place: Any) -> list | None:
+        """Return the part's process record after a place the acting resource's model declares a completion for.
+
+        No primitive declares this entry and the recovery model of a robot does not carry it: the runtime model's
+        event that finishes the place does, as an insert does at its assembly target. Code writes nothing here.
+        The event states the record or is refused with this value.
+        """
+        from cais_spade_llm.resources.environment_models import place_completion
+
+        entries = place_completion(self.cell.environment_models.get(self.rid) or {}, place,
+                                   self.cell.assembly_targets.get(self.part))
+        if not entries:
+            return None
+        known, before = self.value(self.jid, "processCompleted", "part")
+        record = list(before) if known and isinstance(before, list) else []
+        return record + [entry for entry in entries if entry not in record]
+
+    def belt_order(self, neighbor: dict) -> tuple[dict, str | None, str | None]:
+        """Return the belt order a place onto a loading position leaves, as the belt's runtime model calculates it.
+
+        The belt's model sets part_order with the placement (``conveyor_load_parameters``), and no primitive
+        declares it. Code writes nothing here: the place check finds the order, and the event states it or is
+        refused with it. A part taken from the belt and put back in one event is placed after its own pick.
+
+        Returns:
+            The order as part_order values, empty for a place that is not a belt's loading position; and, when
+            the belt's model cannot work it out, the status and the fact the capacity check refuses with.
+        """
+        from cais_spade_llm.resources.nominal_conveyor import conveyor_load_parameters
+
+        model = self.cell.environment_models.get(self.name_of(neighbor["jid"])) or {}
+        rows = ((model.get("assignments") or {}).get("loading_positions") or {}).values()
+        position = self.neighbors[neighbor["jid"]][neighbor["condition"]]
+        if neighbor["condition"] != f"part_location.{self.part}" or position not in {
+                row.get("loading_position") for row in rows}:
+            return {}, None, None
+        values = {}
+        for name in self.variables(neighbor["jid"]):
+            known, value = self.value(neighbor["jid"], name)
+            if known:
+                values[name] = value
+        if values.get(f"part_location.{self.part}") is not None:
+            values.update({f"part_location.{self.part}": None, f"part_order.{self.part}": None})
+        place = self.name_of(neighbor["jid"])
+        try:
+            order = conveyor_load_parameters(model, values, self.part, position)
+        except KeyError as missing:
+            return {}, NEEDS_CONTEXT, (f"{place}'s {missing.args[0]} is not recorded, so the order the place "
+                                       "leaves is not known")
+        except ValueError as refused:
+            return {}, INFEASIBLE, str(refused)
+        return {name.removeprefix("next_"): value for name, value in order.items()}, None, None
 
     def location_after(self, rows: list[dict]) -> tuple[Any, str, str] | None:
         """Return where the event's pick or place leaves the acting resource, when the event names no place.
@@ -1187,17 +1380,34 @@ class _Check:
         declared = (self.variables(self.jid).get("resource_location") or {}).get("domain") or []
         return next(((place, check, status) for place in places if place in declared), None)
 
-    def place_at(self, pose: dict) -> str | None:
-        """Return the place a stated pose puts the acting resource at: a mobile base on a dock, else the declared
-        place whose recorded area holds the pose, as the projection locates a stated pose; None when neither does."""
+    def gripper_point(self, pose: Any) -> list[float] | None:
+        """Return where an arm's gripper is at a stated pose, or None when the pose or the tool offset does not say."""
+        tool = self.stated_tool_pose(pose)
+        offset = (self.cell.resources.get(self.rid) or {}).get("tcp_offset_z")
+        if self.mobile() or tool is None or not isinstance(offset, (int, float)):
+            return None
+        return np.add(tool[:3], Rotation.from_quat(tool[3:]).apply([0.0, 0.0, abs(offset)])).tolist()
+
+    def gripper_at(self) -> str:
+        """State the gripper point a place was read at, so a refusal shows the numbers it compared."""
+        point = self.gripper_point(self.end.get("pose"))
+        return "" if point is None else f" (its gripper at ({point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}))"
+
+    def place_at(self, pose: dict, stated: Any = None) -> Any:
+        """Return the place a stated pose puts the acting resource at: a mobile base on a dock, else the place whose
+        recorded area holds its gripper, as composition reads where a program ends; None when neither does."""
         from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_diagnostic import (
             _place_of,
         )
+        from cais_spade_llm.resources.recovery_composition_owner import place_holding
 
         if self.mobile():
             return next((name for name, dock in self.named_docks().items()
                          if math.dist(dock[:2], [pose["x"], pose["y"]]) <= _TOUCH_M), None)
-        return _place_of(pose, self.prepared)
+        point = self.gripper_point(pose)
+        if point is None:
+            return _place_of(pose, self.prepared)
+        return place_holding(dict(zip("xyz", point, strict=True)), self.prepared, stated)
 
     def source_variables(self) -> list[tuple[str, str, Any]]:
         """Return every value in v that names the event's part or is a per-part variable recording it, with the
@@ -1278,7 +1488,8 @@ class _Check:
         if release is None:
             return self.handling_refusal(releases)
         return {"check": "handling", "part": self.part, "status": FEASIBLE,
-                "primitives": [grasp["primitive"], release["primitive"]]}
+                "primitives": [grasp["primitive"], release["primitive"]],
+                "steps": [[row["primitive"], row["alternative"]] for row in (grasp, release)]}
 
     def handling_refusal(self, producers: list[dict]) -> dict:
         status = _best(producer["status"] for producer in producers) if producers else INFEASIBLE
@@ -1526,6 +1737,9 @@ class _Check:
         if holder not in (None, self.part, "unknown"):
             return {"check": "capacity", "place": place, "slot": slot, "status": INFEASIBLE,
                     "reason": f"{place} {slot or condition} holds {holder} in the projected state"}
+        _, status, reason = self.belt_order(neighbor)
+        if status is not None:
+            return {"check": "capacity", "place": place, "slot": slot, "status": status, "reason": reason}
         return {"check": "capacity", "place": place, "slot": slot, "status": FEASIBLE}
 
 
@@ -1773,6 +1987,7 @@ def check_event(event: dict, session: dict, prepared: dict, cell: RecordedCell) 
         rows = check.capability_rows()
         conditions = check.conditions(check.found(rows))
         capability = check.capability(conditions, rows)
+        conditions += check.effect_refusals(conditions, capability)
     finally:
         JOINT_SEARCH_CACHE.reset(token)
     status = _worst([row["status"] for row in conditions] + [row["status"] for row in capability])

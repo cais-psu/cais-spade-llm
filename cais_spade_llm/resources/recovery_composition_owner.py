@@ -54,11 +54,15 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
             recovery_snapshot=recovery_snapshot, physical_input=physical_input)
         evidence = deepcopy(preparation.get("calculated_resource_evidence", evidence))
 
-    hold, advance, picks = None, None, {}
+    hold, advance, access, picks = None, None, None, {}
 
     def capability(**values) -> dict:
         if hold is not None and values["primitive"] == "compute_place_targets":
             hold(values["recovery_snapshot"])
+        if access is not None and values["primitive"] in {"start_job", "resume_job"}:
+            refusal = access(values["params"])
+            if refusal:
+                return refusal
         evaluator = getattr(owner, "check_recovery_primitive_feasibility", None)
         if not callable(evaluator):
             return {"feasibility_status": "NEEDS_CONTEXT", "reason": "Owner capability evaluator is missing"}
@@ -98,7 +102,7 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
         def completion(**values) -> dict:
             return project_composition_completion(**values, primitive_catalog=catalog,
                 resource_evidence=evidence, physical_evidence=physical,
-                locate_pose=lambda pose, stated=None: _locate(pose, prepared, stated))
+                locate_pose=lambda pose, stated=None: _locate(pose, prepared, jid, stated))
     elif entry.get("resource_type") == "kmr":
         from cais_spade_llm.recovery_framework.kmr_composition import (
             advance_kmr_program, preview_kmr_output, project_kmr_completion,
@@ -127,6 +131,23 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
         def completion(**values) -> dict:
             return project_transport_completion(**values, targets=picks, resource_evidence=evidence)
     elif isinstance(evidence.get("processing_observations"), dict) and _scene_machine(evidence) is not None:
+        from cais_spade_llm.resources.environment_recovery import composed_machine_access
+
+        def access(params: dict) -> dict | None:
+            # A job's access is worked out here, where the state of the other resources is, and read by the machine's check.
+            job = evidence["processing_observations"].get("jobs", {}).get(params.get("job_id"), {})
+            part = params.get("part_name", job.get("part_name"))
+            if part is None:
+                # An unknown job is the machine's own refusal, which names it.
+                return None
+            try:
+                observation = composed_machine_access(evidence, physical, grounding_context, part)
+            except (KeyError, TypeError, ValueError) as exc:
+                missing = not isinstance(exc, ValueError) or str(exc).startswith("NEEDS_CONTEXT")
+                return {"feasibility_status": "NEEDS_CONTEXT" if missing else "INFEASIBLE", "allowed": False,
+                        "reason": str(exc)}
+            physical.setdefault("machine_access_observations", {})[evidence["resource_id"]] = observation
+            return None
 
         def completion(*, task: dict, trace: list, projected_snapshot: dict, part_context: dict, **_unused) -> dict:
             # Later events start from the job record the program leaves, awaited completions included.
@@ -151,27 +172,49 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
         captured_snapshot=entry.get("recovery_snapshot"), recorded_facts=recorded_facts)
 
 
-def _locate(pose: dict, prepared: dict, stated: str | None = None) -> str | None:
-    """Name the place a robot's pose is at, as the outline projection and the RA locate a pose.
+def _gripper_point(pose: dict, prepared: dict, jid: str) -> dict | None:
+    """Return where a robot's gripper is at a pose of its controlled link, the inverse of the RA's ``reference_pose``.
 
-    A stated place holds the pose when one of its recorded areas does, named by the area's own prefix or by the
-    body whose surface it is, as the RA names a place's areas; otherwise the first declared place whose recorded
-    area contains the pose (``multi_turn_diagnostic._place_of``), or None.
+    Returns:
+        The point, or None when the recorded tool offset or the pose's orientation is missing.
     """
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_diagnostic import _place_of
+    from cais_spade_llm.recovery_framework.geometry import rotate
+
+    physical = prepared.get("physical_evidence") or {}
+    rid = next((name for name, value in physical.get("jids", {}).items() if value == jid), None)
+    offset = (physical.get("resources", {}).get(rid) or {}).get("tcp_offset_z")
+    values = [pose.get(axis) for axis in ("x", "y", "z", "qx", "qy", "qz", "qw")]
+    if not all(isinstance(value, (int, float)) for value in (offset, *values)):
+        return None
+    along = rotate(values[3:], [0.0, 0.0, abs(offset)])
+    return {axis: values[index] + along[index] for index, axis in enumerate("xyz")}
+
+
+def place_holding(point: dict, prepared: dict, stated: Any = None) -> str | None:
+    """Name the place whose recorded area holds a gripper point, where the RA reaches an area.
+
+    An area belongs to the body whose surface it is, else to the place its name starts with, as the RA names a
+    place's areas (``ra_feasibility._Check.areas``), so a tray beside a machine is its own place. A stated place
+    holds when one of its areas does; otherwise the first declared place with such an area, or None.
+    """
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_facts import (
         _containing_regions,
+        _declared_locations,
     )
 
-    if not isinstance(pose, dict):
-        return None
     regions = prepared.get("diagnostic_regions", {})
-    if stated is not None and any(
-            name.split(".")[0] == stated
-            or str(((regions.get(name) or {}).get("source") or {}).get("surface_collision") or "").split("::")[0] == stated
-            for name in _containing_regions(pose, prepared)):
+    holding = [str((regions[name].get("source") or {}).get("surface_collision") or "").split("::")[0]
+               or name.split(".")[0] for name in _containing_regions(point, prepared)]
+    if stated in holding:
         return stated
-    return _place_of(pose, prepared)
+    places = {place for entry in prepared.get("recovery_resources", {}).values() for place in _declared_locations(entry)}
+    return next((place for place in holding if place in places), None)
+
+
+def _locate(pose: dict, prepared: dict, jid: str, stated: str | None = None) -> str | None:
+    """Name the place a robot is at: the one whose recorded area holds its gripper."""
+    point = _gripper_point(pose, prepared, jid)
+    return None if point is None else place_holding(point, prepared, stated)
 
 
 def _scene_machine(evidence: dict) -> dict | None:

@@ -480,16 +480,15 @@ def test_saved_pick_calculation_requires_recorded_policy_and_matching_tcp_pose()
     evidence = {"execution_mode": "simulation", "frame": "world", "snapshot": deepcopy(snapshot),
         "observed_parts": {"part": {"current_pose": [.2, .1, 1., 0., 0., 0., 1.]}},
         "motion_config": {"pick_tcp_z_bias_min_m": .003, "pick_tcp_z_bias_max_m": .02,
-            "approach_height_m": .2, "min_pick_tcp_z_m": 1.07, "tcp_offset_z": -.218,
-            "tcp_transform_source": "recorded test observation", "controlled_link": "tool0", "tcp_link": "tcp"},
-        "pick_geometry": {"part": {"part_height_m": .05, "board_center": {"z": .975}}},
-        "pick_policy": {"part": {"surface_clearance_override_m": 0., "pick_z_adjustment_m": 0.,
-                                  "use_global_min_pick_tcp_z": True}}}
+            "recovery_observed_pick_approach_height_m": .06, "recovery_observed_pick_surface_clearance_m": .005,
+            "tcp_offset_z": -.218, "tcp_transform_source": "recorded test observation", "controlled_link": "tool0",
+            "tcp_link": "tcp"},
+        "pick_geometry": {"part": {"part_height_m": .05, "board_center": {"z": .975}}}}
     before = deepcopy(evidence)
     row = calculate_recovery_pick_target(task=task, recovery_snapshot=snapshot, resource_evidence=evidence)
     assert row["status"] == "calculated", row
-    assert row["target_pose"]["z"] == pytest.approx(1.288)
-    assert row["approach_pose"]["z"] == 1.5
+    assert row["target_pose"]["z"] == pytest.approx(1.2355)
+    assert row["approach_pose"]["z"] == pytest.approx(1.2855)
     assert row["command_sent"] is False
     assert evidence == before
     public_snapshot = {"current_pose": {axis: snapshot["current_pose"][axis] for axis in ("x", "y", "z")}}
@@ -511,7 +510,7 @@ def test_saved_pick_calculation_requires_recorded_policy_and_matching_tcp_pose()
     transformed = calculate_recovery_pick_target(task=task, recovery_snapshot=rotated, resource_evidence=projected)
     assert transformed["status"] == "calculated"
     assert transformed["tcp_offset_z"] == pytest.approx(.218)
-    assert transformed["target_pose"]["z"] == pytest.approx(.852)
+    assert transformed["target_pose"]["z"] == pytest.approx(.7995)
     projected["motion_config"]["tcp_transform"]["fixed"] = False
     unfixed = calculate_recovery_pick_target(task=task, recovery_snapshot=rotated, resource_evidence=projected)
     assert unfixed["status"] == "NEEDS_CONTEXT"
@@ -1076,10 +1075,9 @@ def test_saved_pick_support_calculates_declared_travel_and_optional_retreat_inde
     evidence = {"resource_type": "robot", "execution_mode": "simulation", "frame": "world", "snapshot": deepcopy(snapshot),
         "observed_parts": {"part": {"current_pose": [.2, .1, 1., 0., 0., 0., 1.]}},
         "motion_config": {"pick_tcp_z_bias_min_m": .003, "pick_tcp_z_bias_max_m": .02,
-            "approach_height_m": .2, "min_pick_tcp_z_m": 1.07, "tcp_offset_z": -.218,
-            "tcp_transform_source": "recorded fixture", "controlled_link": "tool0", "tcp_link": "tcp"},
+            "recovery_observed_pick_approach_height_m": .06, "recovery_observed_pick_surface_clearance_m": .005,
+            "tcp_offset_z": -.218, "tcp_transform_source": "recorded fixture", "controlled_link": "tool0", "tcp_link": "tcp"},
         "pick_geometry": {"part": {"part_height_m": .05, "board_center": {"z": .975}, "width_m": .022}},
-        "pick_policy": {"part": {"surface_clearance_override_m": 0., "pick_z_adjustment_m": 0., "use_global_min_pick_tcp_z": True}},
         "controller_config": {"gripper": {"open": .11, "close": .015}}}
     move = {"primitive": "move_relative", "params": {"dx": 0., "dy": 0.,
         "dz": {"$sub": [{"$state": "_task_ctx", "path": ["travel_z"]},
@@ -1097,7 +1095,7 @@ def test_saved_pick_support_calculates_declared_travel_and_optional_retreat_inde
                                              resource_evidence=evidence, resource_jid="robot")
     assert row["missing_facts"] == []
     assert len(row["parameter_witnesses"]) == 1
-    assert row["parameter_witnesses"][0]["params"]["dz"] == 0.
+    assert row["parameter_witnesses"][0]["params"]["dz"] == pytest.approx(1.2855 - 1.5)
     calculated = row["calculated_resource_evidence"]
     assert calculated["state"]["_task_ctx"]["access_retreat_pose"] is None
     assert "gripper_close_position" not in calculated["state"]["_task_ctx"]

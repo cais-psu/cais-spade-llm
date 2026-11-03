@@ -146,6 +146,15 @@ def test_a_stated_base_pose_is_read_back_from_the_recorded_pose(contract):
     assert refused["feasibility_status"] == "INFEASIBLE" and "Postcondition 'pose'" in refused["reason"]
 
 
+_KMR_TOOL_DOWN = [1.0, 0.0, 0.0, 0.0]
+
+
+def _kmr_scene(transport: list[float]) -> dict:
+    """The KMR settings its composition reads, with the tool position of its transport pose in the base frame."""
+    return {"KMR": {"task_execution": {"position_tolerance_m": 0.006, "orientation_tolerance_rad": 0.02,
+                                       "cartesian_waypoints": {"transport_tcp_position_in_base_frame_m": transport}}}}
+
+
 def _kmr_step(evidence, targets, primitive, *, facts=None, base=None, **params):
     from cais_spade_llm.recovery_framework.kmr_composition import advance_kmr_program
 
@@ -155,7 +164,7 @@ def _kmr_step(evidence, targets, primitive, *, facts=None, base=None, **params):
 
 def test_a_kmr_program_starts_each_step_where_the_last_one_left_it():
     down = [1.0, 0.0, 0.0, 0.0]
-    evidence = {"snapshot": {"current_pose": [1.0, 0.0, 1.0, *down]},
+    evidence = {"inputs": {"scene": _kmr_scene([1.0, 0.0, 1.0])}, "snapshot": {"current_pose": [1.0, 0.0, 1.0, *down]},
                 "observed_parts": {"P": {"current_pose": [3.0, 1.0, 0.9, 0.0, 0.0, 0.0, 1.0]}}}
     targets, here = {}, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     # The arm rides on the base: a tool 1 m ahead of a base that drives to (2, 0) and turns left is 1 m to its left.
@@ -166,7 +175,8 @@ def test_a_kmr_program_starts_each_step_where_the_last_one_left_it():
     assert "preceding owner target calculation" in _kmr_step(evidence, targets, "grasp_part", part_name="P")
     grasp = [3.0, 1.0, 0.925, *down]
     lift = [3.0, 1.0, 1.1, *down]
-    calculated = {"target": grasp, "retreat": lift}
+    clear = [3.0, 1.0, 0.995, *down]
+    calculated = {"target": grasp, "retreat": lift, "lift": lift, "lift_waypoints": [clear]}
     assert _kmr_step(evidence, targets, "compute_pick_targets", facts={"calculated_targets": calculated}) is None
     assert "calculated target pose" in _kmr_step(evidence, targets, "grasp_part", part_name="P")
     assert _kmr_step(evidence, targets, "move_cartesian", target=grasp, facts={"joint_positions": [0.5] * 7}) is None
@@ -183,7 +193,7 @@ def test_a_kmr_program_starts_each_step_where_the_last_one_left_it():
     away = [2.0, 1.0, 0.0]
     assert "calculated event_facts retreat" in _kmr_step(deepcopy(evidence), dict(targets), "move_base", target_pose=away,
                                                          base=evidence["snapshot"]["base_pose"])
-    assert _kmr_step(evidence, targets, "move_cartesian", target=lift) is None
+    assert _kmr_step(evidence, targets, "move_cartesian", target=lift, waypoints=[clear]) is None
     assert "retreat" not in targets
 
 
@@ -195,15 +205,20 @@ def test_a_composed_kmr_release_takes_no_part_pose_of_its_own():
 
 
 def _kmr_completion(*, trace, stated, snapshot, evidence=None, part_context=None, targets=None, physical=None,
-                    start=None):
+                    start=None, neighbors=None):
     from cais_spade_llm.recovery_framework.kmr_composition import project_kmr_completion
+    from cais_spade_llm.recovery_framework.kmr_recovery import transport_pose
 
-    scene = {"Storage": {"KMR_docking_pose": [-5.54, 2.13, 0, 0, 0, 1.57]},
+    scene = {**_kmr_scene([-0.25, 0.5, 1.16]), "Storage": {"KMR_docking_pose": [-5.54, 2.13, 0, 0, 0, 1.57]},
              "machines": [{"resource_id": "M1", "KMR_docking_pose": [-4.7, 2.2, 0, 0, 0, 1.57]}]}
-    recorded = {"inputs": {"scene": scene}, "snapshot": {"current_pose": [0.0] * 7}, **(evidence or {})}
-    return project_kmr_completion(task={"resource_jid": "kmr", "part_name": "P", "expected_end_state": stated},
-        trace=trace, recovery_snapshot=start or {}, projected_snapshot=snapshot, part_context=part_context or {},
-        grounding_context={},
+    recorded = {"inputs": {"scene": scene}, "snapshot": {}, **(evidence or {})}
+    # Unless a test says otherwise the base stays where it is, with the arm parked.
+    base = recorded["snapshot"].setdefault("base_pose", [-5.54, 2.13, 0, 0, 0, 0.70682518, 0.70738827])
+    recorded["snapshot"].setdefault("current_pose", transport_pose(scene, base, [0.0, 0.0, 0.0, *_KMR_TOOL_DOWN]))
+    return project_kmr_completion(task={"resource_jid": "kmr", "part_name": "P", "expected_end_state": stated,
+                                        "neighbor_end_state": neighbors},
+        trace=trace, recovery_snapshot=start or ({} if evidence else {"base_pose": base}), projected_snapshot=snapshot,
+        part_context=part_context or {}, grounding_context={},
         targets=targets or {}, resource_evidence=recorded, physical_evidence=physical or {})
 
 
@@ -214,7 +229,7 @@ def _kmr_completion(*, trace, stated, snapshot, evidence=None, part_context=None
 def test_a_kmr_location_the_event_states_is_compared_with_the_dock_its_base_reached(base, stated, reached):
     # Facing as the docks declare, yaw 1.57.
     snapshot = {"resource_location": "Storage", "current_location": "Storage",
-                "base_pose": [*base, 0, 0, 0, 0.7068, 0.7074]}
+                "base_pose": [*base, 0, 0, 0, 0.70682518, 0.70738827]}
     result = _kmr_completion(trace=[{"step_index": 0, "primitive": "move_base", "resolved_params": {}}], stated=stated,
                              snapshot=snapshot, evidence={"snapshot": {"base_pose": snapshot["base_pose"]}})
     assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
@@ -230,7 +245,7 @@ def test_a_kmr_location_the_event_states_is_compared_with_the_dock_its_base_reac
     ([-3.3, 1.3], {"pose": {"x": -3.3, "y": 1.3, "yaw": 0.0}}, None, "FEASIBLE", None),
     ([-5.54, 2.13], {}, "Storage", "FEASIBLE", None)])
 def test_a_kmr_move_the_event_leaves_out_writes_no_location(base, stated, location, status, reason):
-    snapshot = {"resource_location": location, "base_pose": [*base, 0, 0, 0, 0.7068, 0.7074]}
+    snapshot = {"resource_location": location, "base_pose": [*base, 0, 0, 0, 0.70682518, 0.70738827]}
     start = {"base_pose": snapshot["base_pose"] if base == [-5.54, 2.13] else [-1.0, 1.0, 0, 0, 0, 0, 1]}
     result = _kmr_completion(trace=[{"step_index": 0, "primitive": "move_base", "resolved_params": {}}],
                              stated={"resource_state": "positioned", **stated}, snapshot=snapshot, start=start,
@@ -308,7 +323,139 @@ def test_the_composition_prompt_points_a_job_primitive_at_the_job_record():
 
     guidance = _job_composition_guidance(prepared("pause_job", "resume_job"), "m2")
     assert "/resources/m2/resource_evidence/processing_observations/jobs" in guidance
+    assert "start_job opens a new job, so it takes no job_id" in guidance
     assert _job_composition_guidance(prepared("move_cartesian"), "m2") == ""
+
+
+def _kmr_place(part_xy: list[float]) -> tuple[dict, dict, dict]:
+    """Calculate a release on the real scene as compute_place_targets does, for a KMR parked on the M2 dock."""
+    import json
+
+    from cais_spade_llm.recovery_framework import SCENE_PATH
+    from cais_spade_llm.recovery_framework.kmr_recovery import release_targets, transport_pose
+
+    scene = json.loads(SCENE_PATH.read_text())
+    base = [-2.7, 2.2, 0.0, 0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)]
+    tool = transport_pose(scene, base, [0.0, 0.0, 0.0, *_KMR_TOOL_DOWN])
+    calculated = release_targets(scene, [0.0, 0.0, 0.025, *_KMR_TOOL_DOWN], tool, base,
+                                 [*part_xy, 1.0, 0.0, 0.0, 0.0, 1.0])
+    return {"inputs": {"scene": scene}, "snapshot": {"base_pose": base, "current_pose": tool}}, {}, calculated
+
+
+def test_a_kmr_release_follows_the_routes_calculated_for_it():
+    evidence, targets, calculated = _kmr_place([-2.7, 1.35])
+    # release_heights puts the retreat where the approach stood, so a check on the pose alone would refuse the retreat.
+    assert calculated["retreat"] == calculated["approach"]
+    assert calculated["transfer_waypoints"] and calculated["withdraw_waypoints"]
+
+    def tried(primitive, **params):
+        return _kmr_step(deepcopy(evidence), deepcopy(targets), primitive, **params)
+
+    assert _kmr_step(evidence, targets, "compute_place_targets", facts={"calculated_targets": calculated}) is None
+    assert "transfer_waypoints" in tried("move_cartesian", target=calculated["approach"])
+    assert "transfer_waypoints" in tried("move_cartesian", target=calculated["approach"],
+                                         waypoints=[[0.0, 0.0, 1.0]] * len(calculated["transfer_waypoints"]))
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["approach"],
+                     waypoints=calculated["transfer_waypoints"]) is None
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["target"]) is None
+    assert _kmr_step(evidence, targets, "release_part") is None
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["retreat"]) is None
+    assert "withdraw_waypoints" in tried("move_cartesian", target=calculated["transport"])
+    # A named pose or a relative move reaches the same place by the straight line the waypoints are there to avoid.
+    assert "withdraw_waypoints" in tried("move_to_named_pose", pose_name="home",
+                                         facts={"target": [*calculated["transport"][:3], *calculated["retreat"][3:]]})
+    assert "withdraw_waypoints" in tried("move_relative", offset=[
+        want - have for want, have in zip(calculated["transport"][:3], calculated["retreat"][:3], strict=True)])
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["transport"],
+                     waypoints=calculated["withdraw_waypoints"]) is None
+
+
+def test_a_kmr_release_comes_through_its_calculated_approach():
+    evidence, targets, calculated = _kmr_place([-2.7, 1.35])
+    assert _kmr_step(evidence, targets, "compute_place_targets", facts={"calculated_targets": calculated}) is None
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["target"]) is None
+    assert "calculated approach" in _kmr_step(evidence, targets, "release_part")
+
+
+@pytest.mark.parametrize("left_out", [{}, {"waypoints": None}, {"waypoints": []}])
+def test_a_kmr_turn_under_the_minimum_angle_has_no_waypoints_to_bind(left_out):
+    evidence, targets, calculated = _kmr_place([-3.3, 2.0])
+    assert calculated["transfer_waypoints"] == [] and calculated["withdraw_waypoints"] == []
+    assert _kmr_step(evidence, targets, "compute_place_targets", facts={"calculated_targets": calculated}) is None
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["approach"], **left_out) is None
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["target"]) is None
+    assert _kmr_step(evidence, targets, "release_part") is None
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["retreat"]) is None
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["transport"], **left_out) is None
+
+
+def test_a_kmr_lift_follows_the_route_calculated_for_it():
+    from cais_spade_llm.recovery_framework.kmr_recovery import pick_targets
+
+    evidence, targets, _ = _kmr_place([-2.7, 1.35])
+    state = evidence["snapshot"]
+    part = [-2.7, 1.35, 1.0, 0.0, 0.0, 0.0, 1.0]
+    evidence["observed_parts"] = {"P": {"current_pose": part}}
+    calculated = pick_targets(evidence["inputs"]["scene"], "P", part, state["current_pose"], state["base_pose"],
+                              location=None)
+    assert calculated["lift"] == calculated["retreat"] and calculated["lift_waypoints"]
+    assert _kmr_step(evidence, targets, "compute_pick_targets", facts={"calculated_targets": calculated}) is None
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["target"]) is None
+    assert _kmr_step(evidence, targets, "grasp_part", part_name="P") is None
+
+    def tried(primitive, **params):
+        return _kmr_step(deepcopy(evidence), deepcopy(targets), primitive, **params)
+
+    assert "lift_waypoints" in tried("move_cartesian", target=calculated["lift"])
+    assert "lift_waypoints" in tried("move_to_named_pose", pose_name="transport", facts={"target": calculated["lift"]})
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["lift"],
+                     waypoints=calculated["lift_waypoints"]) is None
+
+
+def test_a_kmr_base_moves_only_with_its_arm_at_the_transport_pose():
+    base = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    scene = _kmr_scene([-0.25, 0.5, 1.16])
+    out = {"inputs": {"scene": scene}, "snapshot": {"base_pose": base, "current_pose": [0.5, 0.0, 1.16, *_KMR_TOOL_DOWN]}}
+    reason = _kmr_step(out, {}, "move_base", target_pose=[1.0, 0.0, 0.0], base=base)
+    assert "0.901 m from the transport pose" in reason
+    parked = {"inputs": {"scene": scene},
+              "snapshot": {"base_pose": base, "current_pose": [-0.25, 0.5, 1.16, *_KMR_TOOL_DOWN]}}
+    assert _kmr_step(parked, {}, "move_base", target_pose=[1.0, 0.0, 0.0], base=base) is None
+
+
+@pytest.mark.parametrize("offset, status", [
+    (0.0, "FEASIBLE"), (0.005, "FEASIBLE"), (0.007, "INFEASIBLE"), (0.2, "INFEASIBLE")])
+def test_a_kmr_program_ends_with_the_arm_at_the_transport_pose_of_its_base(offset, status):
+    from cais_spade_llm.recovery_framework.kmr_recovery import transport_pose
+
+    base = [-5.54, 2.13, 0, 0, 0, 0.70682518, 0.70738827]
+    parked = transport_pose(_kmr_scene([-0.25, 0.5, 1.16]), base, [0.0, 0.0, 0.0, *_KMR_TOOL_DOWN])
+    tool = [parked[0] + offset, *parked[1:]]
+    result = _kmr_completion(trace=[], stated={"resource_state": "positioned"}, snapshot={"base_pose": base},
+                             evidence={"snapshot": {"base_pose": base, "current_pose": tool}}, start={"base_pose": base})
+    assert result["feasibility_status"] == status
+    if status == "INFEASIBLE":
+        assert f"{offset:.3f} m from the transport pose" in result["reason"]
+
+
+def test_a_kmr_tool_left_tilted_is_refused_with_the_fact():
+    base = [-5.54, 2.13, 0, 0, 0, 0.70682518, 0.70738827]
+    tool = [-6.0, 1.9, 1.16, 0.0, 0.0, 0.0, 1.0]
+    result = _kmr_completion(trace=[], stated={"resource_state": "positioned"}, snapshot={"base_pose": base},
+                             evidence={"snapshot": {"base_pose": base, "current_pose": tool}}, start={"base_pose": base})
+    assert result["feasibility_status"] == "INFEASIBLE" and "downward" in result["reason"]
+
+
+def test_the_composition_prompt_names_the_kmr_facts_and_gives_no_recipe():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _kmr_composition_guidance,
+    )
+
+    guidance = _kmr_composition_guidance("kmr")
+    for name in ("lift_waypoints", "transfer_waypoints", "withdraw_waypoints"):
+        assert name in guidance
+    for recipe in ("Bind ", "bind ", "Whatever resource_state", "Custody completion", "adapt its"):
+        assert recipe not in guidance
 
 
 def test_a_kmr_grasp_gives_it_custody_and_needs_its_retreat():
@@ -335,12 +482,19 @@ def test_a_kmr_release_gives_the_part_to_the_slot_that_receives_it():
     pose = [0.2, 0.5, 1.0, 0.0, 0.0, 0.0, 1.0]
     result = _kmr_completion(trace=[release, motion], stated={"held_part": None, "part_location": "Rack"},
                              snapshot={"held_part": None}, physical=physical,
-                             targets={"compute_place_targets": {"destination": pose}})
+                             targets={"compute_place_targets": {"destination": pose}},
+                             neighbors={"rack": {"zone_2_part": "P"}})
     assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
     assert result["projected_resources"]["rack"] == {"zone_1_part": None, "zone_2_part": "P"}
+    # A slot the event leaves out is not written; the RA refuses such a place (unstated_slot).
+    unstated = _kmr_completion(trace=[release, motion], stated={"held_part": None, "part_location": "Rack"},
+                               snapshot={"held_part": None}, physical=physical,
+                               targets={"compute_place_targets": {"destination": pose}})
+    assert "rack" not in unstated.get("projected_resources", {})
     assert result["projected_part_context"]["part_location"] == "Rack"
     assert result["projected_part_context"]["pose_source"] == "validated_composition_projection"
     assert result["resource_evidence"]["observed_parts"]["P"]["current_pose"] == pose
+    assert result["resource_evidence"]["observed_parts"]["P"]["part_location"] == "Rack"
     # A zone holding another part takes no more.
     physical["environment_valuation"]["Rack"]["zone_2_part"] = "Q"
     occupied = _kmr_completion(trace=[release, motion], stated={"held_part": None, "part_location": "Rack"},
@@ -369,6 +523,66 @@ def test_a_part_an_accepted_program_put_down_is_there_for_every_resource():
     assert arm["Q"] == {"current_pose": [8.0, 8.0, 8.0]}
     # The KMR's docks are a lookup, as [x, y, yaw].
     assert context["resources"]["kmr"]["docks"] == {"Storage": [-5.54, 2.13, 1.57]}
+
+
+def test_the_served_model_is_the_same_text_at_every_event_of_a_resource(contract):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _serve_context_requests,
+    )
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import _compact_json
+
+    prepared = _prepared(contract)
+    model = prepared["recovery_resources"]["owner"]["recovery_des_model"]
+    model["current_valuation"] = {"mode": "fault"}
+
+    def block(session):
+        served, errors = _serve_context_requests(session_state=session, prepared_recovery_request=prepared,
+            outline_event=contract["task"], context_requests=["/resources/owner/recovery_des_model"])
+        assert errors == []
+        return _compact_json(served)
+
+    # This block carries a prompt cache point, so an accepted program must not change a byte of it.
+    assert block({}) == block({"composition_prefix": [_row(contract)]})
+    assert "current_valuation" not in block({})
+    # The owner check reads the prepared model, which keeps the capture's valuation.
+    assert model["current_valuation"] == {"mode": "fault"}
+
+
+def test_a_projected_snapshot_is_the_resources_state_at_the_active_event(contract):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _resolve_context_ref,
+    )
+
+    prepared = _prepared(contract)
+    prepared["recovery_resources"]["machine"] = {"recovery_snapshot": {"part_name": None, "resource_state": "idle"}}
+
+    def accepted(outline_id, jid, snapshot, **evidence):
+        return {"outline_id": outline_id, "resource_jid": jid, "part_name": None, "composition_validation": {
+            "feasibility_status": "FEASIBLE", "projected_snapshot": snapshot, **evidence}}
+
+    # The machine's own last program paused it with R, and a later robot event loaded K on it. Each event ran in
+    # its own batch session, so these rows are the prefix and this session has accepted nothing itself.
+    session = {"accepted_primitive_program": [], "composition_prefix": [
+        accepted("pause", "machine", {"part_name": "R", "resource_state": "paused"}),
+        accepted("load", "owner", {"mode": "idle"},
+                 projected_resources={"machine": {"part_name": "K", "resource_state": "loaded"}})]}
+
+    def serve(ref):
+        return _resolve_context_ref(ref=ref, session_state=session, prepared_recovery_request=prepared,
+                                    outline_event=contract["task"])
+
+    assert serve("/projected_snapshot/machine") == ({"part_name": "K", "resource_state": "loaded"}, None)
+    assert serve("/projected_snapshot/machine") == serve("/resources/machine/snapshot")
+    # With no name it is the active event's own resource.
+    assert serve("/projected_snapshot") == serve("/resources/owner/snapshot") == ({"mode": "idle"}, None)
+    # A capture field no program updates is not served, where it would contradict the projected held_part.
+    session["composition_prefix"].append(accepted("release", "machine", {
+        "held_part": None, "occupancy": {"held_parts": ["K"]}, "resource_core": {"occupancy": {"held_parts": ["K"]}},
+        "held_part_location": "machine", "task_ctx.part_name": "K"}))
+    assert serve("/projected_snapshot/machine") == serve("/resources/machine/snapshot")
+    served = serve("/projected_snapshot/machine")[0]
+    assert served["held_part"] is None
+    assert not {"occupancy", "resource_core", "held_part_location", "task_ctx.part_name"} & set(served)
 
 
 def test_null_is_a_fact_and_missing_is_unknown(contract):
@@ -452,11 +666,15 @@ def test_an_owner_validated_program_binds_the_catalog_the_owner_checked(contract
     from cais_spade_llm.resources.resource_primitives import INTERNAL_GRIPPER_PRIMITIVES
 
     # A recorded robot or KMR catalog keeps its internal gripper controls; recovery hides them from the owner check.
+    base = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    contract["recovery_snapshot"]["base_pose"] = base
     prepared = _prepared(contract)
     entry = prepared["recovery_resources"]["owner"]
     entry.update(resource_type="kmr", execution_primitive_catalog=[
         *contract["primitive_catalog"],
-        {"name": sorted(INTERNAL_GRIPPER_PRIMITIVES)[0], "params": {}, "preconditions": {}, "effects": {}}])
+        {"name": sorted(INTERNAL_GRIPPER_PRIMITIVES)[0], "params": {}, "preconditions": {}, "effects": {}}],
+        resource_evidence={"inputs": {"scene": _kmr_scene([-0.25, 0.5, 1.16])},
+                           "snapshot": {"base_pose": base, "current_pose": [-0.25, 0.5, 1.16, *_KMR_TOOL_DOWN]}})
     owner = SimpleNamespace(jid="owner", check_recovery_primitive_feasibility=lambda **_: {
         "allowed": True, "feasibility_status": "FEASIBLE"})
     evidence = validate_owner_composition(owner, task=contract["task"], primitive_steps=contract["primitive_steps"],
@@ -467,6 +685,12 @@ def test_an_owner_validated_program_binds_the_catalog_the_owner_checked(contract
     row = {**deepcopy(contract["task"]), "primitive_steps": deepcopy(contract["primitive_steps"]),
            "composition_validation": evidence}
     assert composition_program_error([contract["task"]], [row], prepared=prepared, session={}) is None
+
+
+# What the grasp check reads: the TCP on the part's origin, for a grasp 0.1 m above it.
+_TCP = {"tcp_offset_z": -0.1}
+_GRIP_EVIDENCE = {"controller_config": {"move_group": {"position_tolerance_m": .005}}}
+_PART_GEOMETRY = {"geometry": {"parts": {"P": {"local_bounds": [[-.01, .01], [-.01, .01], [-.025, .025]]}}}}
 
 
 def test_robot_pick_completion_reads_the_aligned_part_model(monkeypatch):
@@ -489,7 +713,7 @@ def test_robot_pick_completion_reads_the_aligned_part_model(monkeypatch):
     grasp = {"x": 0.1, "y": 0.2, "z": 0.3, "qx": 0., "qy": 1., "qz": 0., "qw": 0.}
     retreat = {**grasp, "z": 0.4}
     target = {"target_pose": grasp, "retreat_pose": retreat, "model_name": "P_model",
-              "observed_pose": {**grasp, "z": 0.25}}
+              "observed_pose": {**grasp, "z": 0.2}, **_TCP}
     trace = [{"step_index": 0, "primitive": "compute_pick_targets", "params": {}, "resolved_params": {"part_name": "P"},
               "preview_output": target, "start_snapshot": {}},
              {"step_index": 1, "primitive": "grasp_part", "params": {}, "resolved_params": {"part_name": "P"},
@@ -502,7 +726,7 @@ def test_robot_pick_completion_reads_the_aligned_part_model(monkeypatch):
               "expected_end_state": {"resource_location": "Exit"}}, trace=trace,
         recovery_des_model=model, recovery_snapshot={"resource_state": "at_pick"},
         projected_snapshot={"resource_state": "at_pick", "current_pose": retreat}, part_context={"part_location": "Exit"},
-        grounding_context={}, primitive_catalog=[], resource_evidence={}, physical_evidence={})
+        grounding_context={}, primitive_catalog=[], resource_evidence=_GRIP_EVIDENCE, physical_evidence=_PART_GEOMETRY)
     assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
     # The completion adds the part's new location and the pickup location; held_part is grasp_part's own effect.
     assert result["projected_part_context"]["part_location"] == "robot"
@@ -522,7 +746,7 @@ def test_a_robot_may_move_on_after_the_retreat_that_follows_its_transfer(monkeyp
     model = {"events": [pick_grasp], "state_variables": {"part_location": {"scope": "part", "domain": ["robot"]}}}
     grasp = {"x": 0.1, "y": 0.2, "z": 0.3, "qx": 0., "qy": 1., "qz": 0., "qw": 0.}
     retreat, elsewhere = {**grasp, "z": 0.4}, {**grasp, "x": 0.5, "z": 0.4}
-    target = {"target_pose": grasp, "retreat_pose": retreat, "model_name": "P_model", "observed_pose": {**grasp, "z": 0.25}}
+    target = {"target_pose": grasp, "retreat_pose": retreat, "model_name": "P_model", "observed_pose": {**grasp, "z": 0.2}, **_TCP}
     trace = [{"step_index": 0, "primitive": "compute_pick_targets", "params": {}, "resolved_params": {"part_name": "P"},
               "preview_output": target, "start_snapshot": {}},
              {"step_index": 1, "primitive": "grasp_part", "params": {}, "resolved_params": {"part_name": "P"},
@@ -535,9 +759,54 @@ def test_a_robot_may_move_on_after_the_retreat_that_follows_its_transfer(monkeyp
     result = project_composition_completion(
         task={"outline_id": "pick", "event_name": "pick", "resource_jid": "robot", "part_name": "P"}, trace=trace,
         recovery_des_model=model, recovery_snapshot={}, projected_snapshot={"current_pose": elsewhere},
-        part_context={"part_location": None}, grounding_context={}, primitive_catalog=[], resource_evidence={},
-        physical_evidence={})
+        part_context={"part_location": None}, grounding_context={}, primitive_catalog=[], resource_evidence=_GRIP_EVIDENCE,
+        physical_evidence=_PART_GEOMETRY)
     assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
+
+
+def test_a_grasp_that_misses_its_part_is_refused_with_the_numbers(monkeypatch):
+    from cais_spade_llm.resources.robot import robot_primitives
+    from cais_spade_llm.resources.robot.recovery_composition import project_composition_completion
+
+    pick_grasp = {"event_name": "pick_grasp", "updates": {"part_location": {"set": "robot"}},
+        "composition_contract": {"steps": [{"op": "grasp_part", "params": {}}, {"op": "move_relative", "params": {
+            "dx": 0., "dy": 0., "dz": {"$sub": [{"$state": "_task_ctx", "path": ["travel_z"]},
+                                                {"$state": "_position", "path": ["z"]}]}}}]}}
+    model = {"events": [pick_grasp], "state_variables": {"part_location": {"scope": "part", "domain": ["robot"]}}}
+    grasp = {"x": 0.3, "y": 0.5, "z": 1.3, "qx": 0., "qy": 1., "qz": 0., "qw": 0.}
+    lift = {**grasp, "z": 1.4}
+    upright = {"qx": 0., "qy": 0., "qz": 0., "qw": 1.}
+    physical = {"geometry": {"parts": {"P": {"local_bounds": [[-.002, .002], [-.002, .002], [0., .05]]}}}}
+
+    def complete(tcp_z, part_x=0.3, physical=physical, evidence=_GRIP_EVIDENCE):
+        target = {"target_pose": grasp, "retreat_pose": lift, "model_name": "P_model",
+                  "observed_pose": {"x": part_x, "y": 0.5, "z": 1.0, **upright}, "tcp_offset_z": tcp_z - grasp["z"]}
+        trace = [{"step_index": 0, "primitive": "compute_pick_targets", "params": {}, "resolved_params": {"part_name": "P"},
+                  "preview_output": target, "start_snapshot": {}},
+                 {"step_index": 1, "primitive": "grasp_part", "params": {}, "resolved_params": {"part_name": "P"},
+                  "start_snapshot": {"current_pose": grasp}},
+                 {"step_index": 2, "primitive": "move_cartesian", "params": {}, "resolved_params": {},
+                  "start_snapshot": {"current_pose": grasp}, "projected_snapshot": {"current_pose": lift}}]
+        return project_composition_completion(
+            task={"outline_id": "pick", "event_name": "pick", "resource_jid": "robot", "part_name": "P"}, trace=trace,
+            recovery_des_model=model, recovery_snapshot={}, projected_snapshot={"current_pose": lift},
+            part_context={"part_location": None}, grounding_context={}, primitive_catalog=[], resource_evidence=evidence,
+            physical_evidence=physical)
+
+    monkeypatch.setattr(robot_primitives, "robot_primitive_sequence_validator", lambda **_: [])
+    assert complete(1.0175)["feasibility_status"] == "FEASIBLE"
+    # Within the recorded tolerance of the part's top, as the controller's payload check has it.
+    assert complete(1.054)["feasibility_status"] == "FEASIBLE"
+    above = complete(1.07)
+    assert above["feasibility_status"] == "INFEASIBLE"
+    assert "is 0.0200 m from P" in above["reason"] and "tolerance 0.005 m" in above["reason"]
+    assert "size [0.004, 0.004, 0.05]" in above["reason"]
+    # The TCP is where the grasp pose puts it, not where the part was observed.
+    beside = complete(1.0175, part_x=0.31)
+    assert beside["feasibility_status"] == "INFEASIBLE" and "is 0.0080 m from P" in beside["reason"]
+    # Evidence the check needs is asked for, not passed over.
+    assert complete(1.0175, physical={})["feasibility_status"] == "NEEDS_CONTEXT"
+    assert complete(1.0175, evidence={})["feasibility_status"] == "NEEDS_CONTEXT"
 
 
 @pytest.mark.parametrize("last", ["move_cartesian", "move_to_named_pose"])
@@ -582,7 +851,7 @@ def test_one_event_takes_a_part_and_puts_it_down_with_each_transfer_checked(monk
     down = {"qx": 0., "qy": 1., "qz": 0., "qw": 0.}
     grasp, lift = {"x": 0.0, "y": 0.5, "z": 1.1, **down}, {"x": 0.0, "y": 0.5, "z": 1.3, **down}
     place, away = {"x": 0.2, "y": 0.5, "z": 1.1, **down}, {"x": 0.2, "y": 0.5, "z": 1.3, **down}
-    pick = {"target_pose": grasp, "retreat_pose": lift, "model_name": "P_model", "observed_pose": {**grasp, "z": 1.0}}
+    pick = {"target_pose": grasp, "retreat_pose": lift, "model_name": "P_model", "observed_pose": {**grasp, "z": 1.0}, **_TCP}
     put = {"target_pose": place, "retreat_pose": away, "destination_location": "Rack",
            "target_reference": {"surface_role": "support"}, "target_origin_pose": {"x": 0.2, "y": 0.5, "z": 1.0},
            "support_placement": {"part_pose": [0.2, 0.5, 1.0, 0., 0., 0., 1.]}}
@@ -601,16 +870,17 @@ def test_one_event_takes_a_part_and_puts_it_down_with_each_transfer_checked(monk
                     "assignments": {"zones": [{"zone": 1, "pose": [0.0, 0.5, 1.0]}, {"zone": 2, "pose": [0.2, 0.5, 1.0]}]}}},
                 "environment_valuation": {"Rack": {"zone_1_part": "P", "zone_2_part": None}}}
     monkeypatch.setattr(robot_primitives, "robot_primitive_sequence_validator", lambda **_: [])
-    def complete(end):
+    def complete(end, neighbors=None):
         return project_composition_completion(
             task={"outline_id": "move", "event_name": "move", "resource_jid": "robot", "part_name": "P",
-                  "expected_end_state": end}, trace=trace,
+                  "expected_end_state": end, "neighbor_end_state": neighbors}, trace=trace,
             recovery_des_model=model, recovery_snapshot={"resource_state": "idle"},
             projected_snapshot={"resource_state": "idle", "current_pose": away}, part_context={"part_location": "Rack"},
             grounding_context={"resources": {"rack": {"zone_1_part": "P", "zone_2_part": None}}}, primitive_catalog=[],
-            resource_evidence={}, physical_evidence=physical)
+            resource_evidence=_GRIP_EVIDENCE, physical_evidence={**physical, **_PART_GEOMETRY})
 
-    result = complete({"resource_location": "Rack", "resource_state": "placed"})
+    stated = {"rack": {"zone_1_part": None, "zone_2_part": "P"}}
+    result = complete({"resource_location": "Rack", "resource_state": "placed"}, stated)
     if not lifted:
         # The motion right after the grasp must reach the grasp's calculated retreat pose.
         assert result["feasibility_status"] == "INFEASIBLE" and "retreat_pose" in result["reason"]
@@ -618,10 +888,15 @@ def test_one_event_takes_a_part_and_puts_it_down_with_each_transfer_checked(monk
     assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
     # The part leaves its source slot and is received by the slot under the place target, in one record.
     assert result["projected_resources"]["rack"] == {"zone_1_part": None, "zone_2_part": "P"}
+    # A source slot the event leaves out keeps its value: code writes none, and the RA refuses such an event.
+    unstated = complete({"resource_location": "Rack", "resource_state": "placed"}, {"rack": {"zone_2_part": "P"}})
+    assert unstated["projected_resources"]["rack"]["zone_1_part"] == "P"
     assert result["projected_part_context"]["part_location"] == "Rack"
     assert result["projected_snapshot"]["resource_location"] == "Rack"
     assert result["projected_snapshot"]["resource_state"] == "placed"
     assert result["resource_evidence"]["attachment"] == {}
+    # A later pick reads where the part now rests from the row this place leaves.
+    assert result["resource_evidence"]["observed_parts"]["P"]["part_location"] == "Rack"
     # What the event leaves out, composition does not write for it.
     left_out = complete({})
     assert left_out["feasibility_status"] == "FEASIBLE", left_out.get("reason")
@@ -629,6 +904,65 @@ def test_one_event_takes_a_part_and_puts_it_down_with_each_transfer_checked(monk
     assert left_out["projected_snapshot"]["resource_state"] == "idle"
     # A stated location the place does not end at takes where it ends, so the postcondition refuses it.
     assert complete({"resource_location": "home"})["projected_snapshot"]["resource_location"] == "Rack"
+
+@pytest.mark.parametrize("stated", [True, False])
+def test_an_insert_takes_a_stated_record_from_its_runtime_model_and_adds_none_left_out(monkeypatch, stated):
+    from cais_spade_llm.resources.robot import robot_primitives
+    from cais_spade_llm.resources.robot.recovery_composition import project_composition_completion
+
+    retreat_step = {"op": "move_relative", "params": {"dx": 0., "dy": 0., "dz": {"$sub": [
+        {"$state": "_task_ctx", "path": ["travel_z"]}, {"$state": "_position", "path": ["z"]}]}}}
+    place_insert = {"event_name": "place_insert", "updates": {"part_location": {"set_from_param": "destination_location"}},
+                    "composition_contract": {"steps": [{"op": "release_part", "params": {}}, retreat_step]}}
+    # As in a robot's recovery model, nothing here declares the process record.
+    model = {"events": [place_insert], "state_variables": {"part_location": {"scope": "part", "domain": ["Board", "robot"]}}}
+    down = {"qx": 0., "qy": 1., "qz": 0., "qw": 0.}
+    place, away = {"x": 0.2, "y": 0.5, "z": 1.1, **down}, {"x": 0.2, "y": 0.5, "z": 1.3, **down}
+    slot = {"slot_x": 0.2, "slot_y": 0.5, "part_height": 0.02, "board_top_z": 1.0}
+    target = {**slot, "target_pose": place, "retreat_pose": away, "destination_location": "Board", "target": "Plate/P",
+              "place_part_origin_z": 1.01, "target_reference": {"surface_role": "assembly_slot"},
+              "target_origin_pose": {"x": 0.2, "y": 0.5, "z": 1.01}}
+    trace = [{"step_index": 0, "primitive": "compute_place_targets", "params": {}, "resolved_params": {"part_name": "P"},
+              "preview_output": target, "start_snapshot": {}},
+             {"step_index": 1, "primitive": "release_part", "params": {},
+              "resolved_params": {"part_name": "P", "assembly_slot": {
+                  **slot, "destination_location": "Board", "part_origin_z": 1.01}},
+              "start_snapshot": {"current_pose": place}},
+             {"step_index": 2, "primitive": "move_cartesian", "params": {}, "resolved_params": {},
+              "start_snapshot": {"current_pose": place}, "projected_snapshot": {"current_pose": away}}]
+    runtime = {"events": [{"parameter_bindings": {"destination_location": {"equals": "Board"}}, "product_effects": {
+        "processCompleted": [{"process": "assembly", "target": {"set_from_param": "target"}}]}}]}
+    printed, assembled = {"process": "print_part"}, {"process": "assembly", "target": "Plate/P"}
+    monkeypatch.setattr(robot_primitives, "robot_primitive_sequence_validator", lambda **_: [])
+    result = project_composition_completion(
+        task={"outline_id": "insert", "event_name": "insert", "resource_jid": "robot", "part_name": "P",
+              "expected_end_state": {"processCompleted": [printed, assembled]} if stated else {}}, trace=trace,
+        recovery_des_model=model, recovery_snapshot={}, projected_snapshot={"current_pose": away},
+        part_context={"part_location": "robot", "processCompleted": [printed]}, grounding_context={}, primitive_catalog=[],
+        resource_evidence={}, physical_evidence={"jids": {"ur5e-3": "robot"}, "environment_models": {"ur5e-3": runtime}})
+    assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
+    assert result["projected_part_context"]["processCompleted"] == ([printed, assembled] if stated else [printed])
+
+
+def test_a_part_s_record_is_compared_when_the_acting_resource_s_model_does_not_list_it():
+    start = {"name": "start_job", "params": {"job_id": {"type": "string"}}, "required_params": ["job_id"],
+             "preconditions": {"resource_state": {"equals": "loaded"}}, "effects": {"resource_state": {"set": "running"}}}
+    declarations = {"resource_state": {"scope": "resource"}, "part_name": {"scope": "resource"}}
+    done = [{"process": "print_part"}]
+    task = {"outline_id": "start", "event_name": "start", "resource_jid": "owner", "part_name": "P",
+            "expected_start_state": {"resource_state": "loaded", "processCompleted": done},
+            "expected_end_state": {"resource_state": "running", "processCompleted": done}}
+
+    def validate(record):
+        return validate_recovery_primitive_composition(
+            task=task, primitive_steps=[{"primitive": "start_job", "params": {"job_id": "job-2"}}],
+            recovery_des_model={"state_variables": declarations},
+            recovery_snapshot={"resource_state": "loaded", "part_name": "P"}, part_context={"processCompleted": record},
+            grounding_context={}, primitive_catalog=[start], validate_primitive=feasible)
+
+    assert validate(done)["feasibility_status"] == "FEASIBLE"
+    assert validate([])["feasibility_status"] != "FEASIBLE"
+
 
 def test_a_supported_placement_is_received_by_the_slot_whose_custody_locates_the_part():
     from cais_spade_llm.resources.robot.recovery_composition import _receiving_slot
@@ -648,7 +982,7 @@ def test_a_supported_placement_is_received_by_the_slot_whose_custody_locates_the
 
 
 
-def test_a_pick_empties_every_value_that_records_the_part_as_the_ra_finds_them():
+def test_a_pick_empties_the_stated_values_that_record_the_part_as_the_ra_finds_them():
     from cais_spade_llm.resources.robot.recovery_composition import _source_records
 
     slot = {"reference": "part_name", "scope": "resource"}
@@ -661,10 +995,15 @@ def test_a_pick_empties_every_value_that_records_the_part_as_the_ra_finds_them()
         "environment_valuation": {"M9": {"part_name": None, "staging_part": "P"},
                                   "Belt": {"part_location.P": "loading_position_2", "part_order.P": 0},
                                   "Store": {"inventory.P": True}, "arm": {"held_part": None}}}
-    records = _source_records("P", "arm", {"resources": {}}, physical)
+    stated = {"m9": {"staging_part": None}, "belt": {"part_location.P": None, "part_order.P": None},
+              "store": {"inventory.P": False}}
+    records = _source_records("P", "arm", {"resources": {}}, physical, stated)
     # A staging slot, a belt slot with its order (0 still records the part), and a storage flag (false: no null).
     assert sorted(records) == [("belt", "part_location.P", None), ("belt", "part_order.P", None),
                                ("m9", "staging_part", None), ("store", "inventory.P", False)]
+    # Code writes no value the event leaves out, so the ones it does not state are not returned.
+    assert _source_records("P", "arm", {"resources": {}}, physical, {"m9": {"staging_part": None}}) == [
+        ("m9", "staging_part", None)]
 
 
 def test_a_destination_receives_into_its_own_slot():
@@ -730,7 +1069,7 @@ def test_where_a_robot_ends_after_its_transfer_and_retreat_decides_its_location(
     down = {"qx": 0., "qy": 1., "qz": 0., "qw": 0.}
     grasp, lift, away = ({"x": 0.0, "y": 0.5, "z": 1.1, **down}, {"x": 0.0, "y": 0.5, "z": 1.3, **down},
                          {"x": 2.0, "y": -1.0, "z": 1.3, **down})
-    pick = {"target_pose": grasp, "retreat_pose": lift, "model_name": "P_model", "observed_pose": {**grasp, "z": 1.0}}
+    pick = {"target_pose": grasp, "retreat_pose": lift, "model_name": "P_model", "observed_pose": {**grasp, "z": 1.0}, **_TCP}
     trace = [{"step_index": 0, "primitive": "compute_pick_targets", "params": {}, "resolved_params": {"part_name": "P"},
               "preview_output": pick, "start_snapshot": {}, "projected_snapshot": {}},
              {"step_index": 1, "primitive": "grasp_part", "params": {}, "resolved_params": {"part_name": "P"},
@@ -752,7 +1091,8 @@ def test_where_a_robot_ends_after_its_transfer_and_retreat_decides_its_location(
               "expected_end_state": {"resource_location": stated}}, trace=trace,
         recovery_des_model=model, recovery_snapshot={"resource_location": "Rack"},
         projected_snapshot={"resource_location": "Rack", "current_pose": away}, part_context={"part_location": "Rack"},
-        grounding_context={}, primitive_catalog=[], resource_evidence={}, physical_evidence={}, locate_pose=locate)
+        grounding_context={}, primitive_catalog=[], resource_evidence=_GRIP_EVIDENCE, physical_evidence=_PART_GEOMETRY,
+        locate_pose=locate)
     assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
     # After its retreat the robot moved on, so its pickup place no longer holds: its final pose decides.
     located = result["projected_snapshot"]["resource_location"]
@@ -827,7 +1167,7 @@ def test_a_pick_leaves_the_robot_where_the_event_states(monkeypatch, part_at, en
         "resource_location": {"scope": "resource", "domain": ["Rack", "Bench"]}}}
     down = {"qx": 0., "qy": 1., "qz": 0., "qw": 0.}
     grasp, lift = {"x": 0.0, "y": 0.5, "z": 1.1, **down}, {"x": 0.0, "y": 0.5, "z": 1.3, **down}
-    pick = {"target_pose": grasp, "retreat_pose": lift, "model_name": "P_model", "observed_pose": {**grasp, "z": 1.0}}
+    pick = {"target_pose": grasp, "retreat_pose": lift, "model_name": "P_model", "observed_pose": {**grasp, "z": 1.0}, **_TCP}
     trace = [{"step_index": 0, "primitive": "compute_pick_targets", "params": {}, "resolved_params": {"part_name": "P"},
               "preview_output": pick, "start_snapshot": {}, "projected_snapshot": {}},
              {"step_index": 1, "primitive": "grasp_part", "params": {}, "resolved_params": {"part_name": "P"},
@@ -840,8 +1180,8 @@ def test_a_pick_leaves_the_robot_where_the_event_states(monkeypatch, part_at, en
               "expected_end_state": end}, trace=trace,
         recovery_des_model=model, recovery_snapshot={"resource_location": "Bench"},
         projected_snapshot={"resource_location": "Bench", "current_pose": lift}, part_context={"part_location": part_at},
-        grounding_context={"resources": {"other@localhost": {}}}, primitive_catalog=[], resource_evidence={},
-        physical_evidence={}, locate_pose=lambda pose, stated=None: stated)
+        grounding_context={"resources": {"other@localhost": {}}}, primitive_catalog=[], resource_evidence=_GRIP_EVIDENCE,
+        physical_evidence=_PART_GEOMETRY, locate_pose=lambda pose, stated=None: stated)
     assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
     assert result["projected_snapshot"]["resource_location"] == expected
 
@@ -863,6 +1203,102 @@ def test_a_restated_location_the_robot_keeps_holds_without_locating_its_pose(mon
         locate_pose=lambda pose, stated=None: None)
     # The RA lets a location the robot already has hold; only a changed one is read from the pose.
     assert result["projected_snapshot"]["resource_location"] == "Rack"
+
+_TOOL_DOWN = {"qx": 0.0, "qy": 1.0, "qz": 0.0, "qw": 0.0}
+_RECORDED_CELL = {
+    "diagnostic_regions": {
+        "M1.staging": {"bounds": [[-4.71, -4.49], [0.99, 1.21], [1.0, 1.12]],
+                       "source": {"surface_collision": "M1 staging tray::link::surface"}},
+        "M1.workholding": {"bounds": [[-4.25, -4.01], [1.7, 1.94], [0.94, 1.18]], "source": {}},
+        "Conveyor.loading_position_1": {"bounds": [[-4.2, -3.9], [0.35, 0.65], [1.015, 1.065]], "source": {}}},
+    "physical_evidence": {"jids": {"ur5e-1": "robot"}, "resources": {"ur5e-1": {"tcp_offset_z": -0.218}}},
+    "recovery_resources": {"robot": {"static_capabilities": {"reachability": ["M1", "M1 staging tray", "Conveyor"]}}}}
+
+
+@pytest.mark.parametrize("wrist, stated, place", [
+    # The gripper is over the tray: one pose is at one place, whatever the event states.
+    ((-4.6, 1.1, 1.30), "M1 staging tray", "M1 staging tray"),
+    ((-4.6, 1.1, 1.30), None, "M1 staging tray"),
+    ((-4.6, 1.1, 1.30), "M1", "M1 staging tray"),
+    # The wrist is inside the tray's area with the fingertips through the tray, which is no place to be.
+    ((-4.6, 1.1, 1.10), "M1 staging tray", None),
+    ((-4.6, 1.1, 1.10), "M1", None),
+    ((-4.6, 1.1, 1.10), None, None),
+    # The same through the belt, where the name's prefix is the place.
+    ((-4.05, 0.5, 1.05), "Conveyor", None),
+    ((-4.05, 0.5, 1.26), "Conveyor", "Conveyor"),
+    # The gripper above an area's top is out of it.
+    ((-4.6, 1.1, 1.35), "M1 staging tray", None),
+    ((-4.13, 1.82, 1.30), "M1", "M1"),
+    ((-4.13, 1.82, 1.30), None, "M1"),
+])
+def test_a_robot_is_at_the_place_whose_own_area_holds_its_gripper(wrist, stated, place):
+    from cais_spade_llm.resources.recovery_composition_owner import _locate
+
+    pose = {**dict(zip("xyz", wrist, strict=True)), **_TOOL_DOWN}
+    assert _locate(pose, _RECORDED_CELL, "robot", stated) == place
+
+
+@pytest.mark.parametrize("pose, jid", [
+    # Read at the wrist these are inside the tray's area, so only a gripper point with no default leaves them out.
+    ({"x": -4.6, "y": 1.1, "z": 1.10}, "robot"),
+    ({"x": -4.6, "y": 1.1, "z": 1.10, **_TOOL_DOWN}, "other"),
+])
+def test_a_robot_with_no_recorded_offset_or_orientation_is_at_no_place(pose, jid):
+    from cais_spade_llm.resources.recovery_composition_owner import _locate
+
+    assert _locate(pose, _RECORDED_CELL, jid, "M1 staging tray") is None
+
+
+def _stated_pose_case(stated_pose, steps):
+    from cais_spade_llm.resources.recovery_composition_owner import validate_owner_composition
+
+    axes = ("x", "y", "z", "qx", "qy", "qz", "qw")
+    catalog = [{"name": "move_cartesian", "params": {axis: {"type": "number"} for axis in axes},
+                "required_params": ["x", "y", "z"], "preconditions": {},
+                "effects": {"current_pose": {"pose_absolute_from_params": ["x", "y", "z"]}}}]
+    declarations = {"resource_location": {"scope": "resource"}, "resource_state": {"scope": "resource"},
+                    "pose": {"scope": "resource", "type": "object", "fields": ["x", "y", "z"], "effect": "current_pose"}}
+    prepared = {**_RECORDED_CELL, "recovery_resources": {"robot": {
+        **_RECORDED_CELL["recovery_resources"]["robot"], "resource_type": "robot", "execution_primitive_catalog": catalog,
+        "recovery_des_model": {"state_variables": declarations, "events": []}}}}
+    task = {"outline_id": "leave", "event_name": "leave", "resource_jid": "robot", "part_name": None,
+            "expected_start_state": {"resource_location": "M1"},
+            "expected_end_state": {"resource_location": "M1 staging tray", "pose": stated_pose}}
+    start = {"resource_location": "M1", "held_part": None, "current_pose": {"x": -4.13, "y": 1.82, "z": 1.35, **_TOOL_DOWN}}
+
+    def check(**_):
+        return {"allowed": True, "feasibility_status": "FEASIBLE", "evidence": {}}
+
+    return validate_owner_composition(SimpleNamespace(jid="robot", check_recovery_primitive_feasibility=check),
+        task=task, primitive_steps=steps, prepared=prepared, recovery_snapshot=start, part_context={},
+        grounding_context={"outline_event": task, "resources": {"robot": dict(start)}})
+
+
+_STATED_POSE_STEP = {"primitive": "move_cartesian", "params": {
+    **{axis: {"context_ref": f"/outline_event/expected_end_state/pose/{axis}"} for axis in "xyz"},
+    **{axis: {"context_ref": f"/resources/robot/current_pose/{axis}"} for axis in _TOOL_DOWN}}}
+
+
+def test_a_program_binds_the_stated_pose_and_the_robot_ends_at_the_stated_place():
+    result = _stated_pose_case({"x": -4.6, "y": 1.1, "z": 1.30}, [_STATED_POSE_STEP])
+    assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
+    assert result["projected_snapshot"]["resource_location"] == "M1 staging tray"
+    assert result["trace"][0]["resolved_params"] == {"x": -4.6, "y": 1.1, "z": 1.30, **_TOOL_DOWN}
+
+
+def test_a_program_that_ends_short_of_the_stated_pose_is_refused():
+    elsewhere = {"primitive": "move_cartesian", "params": {"x": -4.6, "y": 1.1, "z": 1.28}}
+    result = _stated_pose_case({"x": -4.6, "y": 1.1, "z": 1.30}, [elsewhere])
+    assert result["feasibility_status"] == "INFEASIBLE"
+    assert result["reason"].startswith("Postcondition 'pose': achieved")
+
+
+def test_a_stated_pose_whose_gripper_is_out_of_the_stated_place_does_not_end_there():
+    result = _stated_pose_case({"x": -4.6, "y": 1.1, "z": 1.35}, [_STATED_POSE_STEP])
+    assert result["feasibility_status"] == "INFEASIBLE"
+    assert result["reason"] == "Postcondition 'resource_location': achieved None, required 'M1 staging tray'"
+
 
 def test_a_place_target_starts_from_the_zone_the_event_puts_its_part_in():
     from cais_spade_llm.resources.robot.recovery_capability import _stated_zone_origin
@@ -1078,6 +1514,93 @@ def _machine_job_case(steps, snapshot, part_context, end_state):
     return machine, result, seen
 
 
+_PAUSED_ROUND_PART = {"process": "trim", "result": "circle", "status": "paused", "machine": "M2"}
+
+
+def _job_access_case(primitive, params, snapshot, robot_z, part_process=_PAUSED_ROUND_PART):
+    """Run one job step through the owner, with the other resources' state in ``grounding_context``."""
+    import json
+
+    from cais_spade_llm.recovery_framework import SCENE_PATH
+    from cais_spade_llm.resources.machine.machine_jobs import MachineJobs, machine_primitive_contracts
+    from cais_spade_llm.resources.recovery_composition_owner import validate_owner_composition
+
+    scene = json.loads(SCENE_PATH.read_text())
+    machine = scene["machines"][1]
+    part = "RGOCG4-50_Round_4mm"
+    x, y, z = machine["workholding_pose"][:3]
+    jobs = MachineJobs(machine, "run")
+    jobs.command("start_job", {"job_id": "circle-job", "task_id": "circle-job", "part_name": part, "process": "trim",
+                               "result": "circle"}, command_id="circle-job", now=100,
+                 observations={"part_name": part, "correct_part_present": True, "robot_access_clear": True})
+    jobs.command("pause_job", {"job_id": "circle-job"}, command_id="pause", now=101,
+                 observations={"part_name": part, "correct_part_present": True, "robot_access_clear": True})
+    scene["KMR"]["task_execution"]["clearance_link_bounds"] = {"tool": [{"center": [0.0, 0.0, 0.0], "radius": 0.01}]}
+    chain = {"root": "base", "reference_link": "tool", "root_xyz": [0.0, 0.0, 0.0], "root_quaternion": [0.0, 0.0, 0.0, 1.0],
+             "joint_names": ["a1"], "joints": [{"name": "a1", "parent": "base", "child": "tool", "type": "revolute",
+                                                "axis": [0.0, 0.0, 1.0], "xyz": [0.0, 0.0, 0.5], "rpy": [0.0, 0.0, 0.0]}]}
+    kmr = {"base_pose": [x + 2.0, y, 0.0, 0.0, 0.0, 0.0, 1.0], "joint_positions": [0.0],
+           "current_pose": [x + 2.0, y, 0.5, 0.0, 0.0, 0.0, 1.0]}
+    contracts = machine_primitive_contracts(machine)
+    catalog = [{"name": primitive, "params": {name: {} for name in params}, "required_params": list(params),
+                **contracts[primitive][0]}]
+    evidence = {"resource_id": "M2", "inputs": {"scene": scene}, "processing_observations": jobs.snapshot()}
+    prepared = {"physical_evidence": {"jids": {"ur5e-2": "robot", "KMR": "kmr"},
+                                      "resource_models": {"KMR": {"configuration": chain}}},
+                "recovery_resources": {"owner": {"resource_type": "resource", "execution_primitive_catalog": catalog,
+                                                 "resource_evidence": evidence, "recovery_des_model": {
+                                                     "state_variables": {**_JOB_DECLARATIONS,
+                                                                         "selected_program": {"scope": "resource"}}}}}}
+    seen = []
+
+    def check(*, physical_evidence, **_):
+        seen.append(physical_evidence.get("machine_access_observations", {}).get("M2"))
+        return {"allowed": True, "feasibility_status": "FEASIBLE", "evidence": {}}
+
+    process = {"process": "trim", "result": "circle", "status": "running", "machine": "M2"}
+    task = {"outline_id": "job", "event_name": "job", "resource_jid": "owner", "part_name": part,
+            "expected_start_state": {"resource_state": snapshot["resource_state"]},
+            "expected_end_state": {"resource_state": "running", "current_process": process}}
+    context = {"parts": {part: {"observed_pose": {"x": x, "y": y, "z": z}}},
+               "resources": {"robot": {"held_part": None, "current_pose": {"x": x, "y": y, "z": robot_z}},
+                             "kmr": {"held_part": None, "resource_evidence": {"snapshot": kmr}}}}
+    result = validate_owner_composition(SimpleNamespace(jid="owner", check_recovery_primitive_feasibility=check),
+        task=task, primitive_steps=[{"primitive": primitive, "params": params}], prepared=prepared,
+        recovery_snapshot=snapshot, part_context={"part_name": part, "current_process": part_process},
+        grounding_context=context)
+    return result, seen
+
+
+@pytest.mark.parametrize("primitive, params, state, part_process", [
+    ("resume_job", {"job_id": "circle-job"}, "paused", _PAUSED_ROUND_PART),
+    ("start_job", {"part_name": "RGOCG4-50_Round_4mm", "process": "trim", "result": "circle"}, "loaded", None),
+])
+def test_a_job_step_reads_the_access_worked_out_from_the_composition_state(primitive, params, state, part_process):
+    snapshot = {"resource_state": state, "part_name": "RGOCG4-50_Round_4mm", "selected_program": "circle"}
+    result, seen = _job_access_case(primitive, params, snapshot, robot_z=1.34, part_process=part_process)
+    assert result["feasibility_status"] == "FEASIBLE", result["reason"]
+    # A paused job's stored observation is not reused: access is worked out for this step.
+    assert seen and seen[0]["source"]["region"] == "M2.workholding"
+    assert seen[0]["part_name"] == "RGOCG4-50_Round_4mm"
+
+
+def test_an_unknown_job_is_left_to_the_machine_which_names_it():
+    result, seen = _job_access_case("resume_job", {"job_id": "no-such-job"},
+                                    {"resource_state": "paused", "part_name": "RGOCG4-50_Round_4mm",
+                                     "selected_program": "circle"}, robot_z=1.34)
+    assert seen == [None]
+    assert "the position of" not in str(result["reason"])
+
+
+def test_a_refused_access_never_reaches_the_machines_own_check():
+    result, seen = _job_access_case("resume_job", {"job_id": "circle-job"},
+                                    {"resource_state": "paused", "part_name": "RGOCG4-50_Round_4mm",
+                                     "selected_program": "circle"}, robot_z=1.1)
+    assert result["feasibility_status"] == "INFEASIBLE"
+    assert "has not left the declared region M2.workholding" in result["reason"]
+    assert seen == []
+
+
 def test_machine_commands_leave_the_job_record_their_later_steps_and_events_read():
     machine, result, seen = _machine_job_case(
         [{"primitive": "pause_job", "params": {"job_id": "circle-job"}},
@@ -1231,13 +1754,15 @@ def test_rejected_event_does_not_advance_accepted_program(contract, monkeypatch)
     row = _row(contract)
     row["composition_validation"]["feasibility_status"] = "INFEASIBLE"
     async def reject(**kwargs):
-        return {"primitive_events": [row], "turns": [], "feedback": [{"reason": "wrong order"}]}
+        return {"primitive_events": [row], "turns": [], "feedback": [{"reason": "wrong order"}],
+                "session_state": {"primitive_authoring_memo": [{"outline_id": "restore"}]}}
     monkeypatch.setattr(multi_turn, "_run_resource_primitive_batch", reject)
     decision, _, _ = asyncio.run(generate_next_composition_event(planner=SimpleNamespace(), session_state=session,
         prepared_recovery_request=prepared))
     assert decision == "primitive_blocked"
     assert session["accepted_primitive_program"] == []
     assert session["primitive_rejection_feedback"][0]["reason"] == "wrong order"
+    assert "primitive_authoring_memo" not in session
 
 
 def test_composition_carries_history_references_without_copying_full_transcripts(contract, monkeypatch):
@@ -1330,6 +1855,39 @@ def test_composition_stops_after_three_same_cause_rejections(monkeypatch):
     assert result["turns"][-1]["composition_same_cause_failures"] == 3
 
 
+def test_the_robot_guidance_says_where_a_location_comes_from_and_gives_no_recipe(monkeypatch):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_primitive_generation as generation
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_prompts as prompts
+
+    calls = []
+
+    async def ask(prompt, **kwargs):
+        calls.append(prompt)
+        return {"decision": "primitive_steps_ready"}
+
+    async def recorded(fn, **kwargs):
+        return await fn(kwargs["prompt"])
+
+    async def reject(**kwargs):
+        kwargs["session_state"]["primitive_rejection_feedback"] = []
+        return "primitive_blocked", {}
+
+    monkeypatch.setattr(prompts, "build_multi_turn_phase_prompt_input", lambda **kwargs: {})
+    monkeypatch.setattr(prompts, "render_multi_turn_phase_prompt", lambda value: "author")
+    monkeypatch.setattr(generation, "build_primitive_generation_prompt_context", lambda **kwargs: {})
+    monkeypatch.setattr(generation, "recorded_structured_call", recorded)
+    monkeypatch.setattr(generation, "_handle_primitive_generation_phase", reject)
+    monkeypatch.setattr(generation, "_write_primitive_subturn_artifact", lambda **kwargs: {})
+    asyncio.run(generation.generate_primitive_batch_with_llm_agent(
+        llm_agent=SimpleNamespace(ask_llm_structured=ask),
+        prepared_recovery_request={"composition_validation_version": 1, "recovery_resources": {"owner": {"resource_type": "robot"}}},
+        assigned_outline_events=[{"outline_id": "leave", "resource_jid": "owner"}]))
+
+    assert "a location no primitive declares is read from where the program ends" in calls[0]
+    assert "bind" not in calls[0].split("RA composition validation:")[1].split("Use exact primitive identities")[1].split(
+        "Missing facts require")[1]
+
+
 def test_move_home_completion_cannot_override_a_later_motion():
     from cais_spade_llm.resources.robot.recovery_composition import project_composition_completion
 
@@ -1369,6 +1927,23 @@ def test_place_input_binding_uses_recorded_context_before_owner_output_enrichmen
     assert "surface_role" not in recorded["state"]["_task_ctx"]
 
 
+@pytest.mark.parametrize("travel_z, retreat_z", [(1.2855, 1.3455), (1.5, 1.5)])
+def test_a_place_retreat_rises_when_the_place_sits_above_the_picks_travel_height(monkeypatch, travel_z, retreat_z):
+    from cais_spade_llm.resources.robot import recovery_capability
+    from cais_spade_llm.resources.robot.recovery_composition import preview_composition_output
+
+    insert = {"x": 0., "y": 0., "z": 1.2955, "qx": 0., "qy": 1., "qz": 0., "qw": 0.}
+    monkeypatch.setattr(recovery_capability, "calculate_recovery_place_target", lambda **kwargs: {
+        "status": "calculated", "destination_location": "M2", "insert_pose": insert, "target_reference": {"surface_role": "support"}})
+    evidence = {"state": {"_task_ctx": {"part_name": "P", "travel_z": travel_z}},
+                "controller_config": {"parts_tuning": {"insertion_depth_m": .0025}}}
+    result = preview_composition_output(primitive="compute_place_targets",
+        params={"part_name": "P", "destination_location": "M2"}, recovery_snapshot={}, part_context={},
+        task={"part_name": "P", "resource_jid": "robot"}, grounding_context={}, resource_evidence=evidence, physical_evidence={})
+    assert result["output"]["approach_pose"]["z"] == pytest.approx(1.3455)
+    assert result["output"]["retreat_pose"]["z"] == pytest.approx(retreat_z)
+
+
 def test_pick_override_feedback_identifies_all_unsupported_inputs_without_accepting_them(monkeypatch):
     from cais_spade_llm.resources.robot import recovery_capability
     from cais_spade_llm.resources.robot.recovery_composition import preview_composition_output
@@ -1384,6 +1959,34 @@ def test_pick_override_feedback_identifies_all_unsupported_inputs_without_accept
     assert "product_geometry, target_pose, target_pose_source" in result["reason"]
     assert "Omit these parameters" in result["reason"]
     assert preview_composition_output(params={"part_name": "P"}, **values)["status"] == "calculated"
+    # What the robot applies to an observed part stays the owner's: a program can restate it and choose nothing else.
+    values["resource_evidence"] = {"motion_config": {"recovery_observed_pick_approach_height_m": .06,
+                                                     "recovery_observed_pick_surface_clearance_m": .005}}
+    assert preview_composition_output(params={
+        "part_name": "P", "use_global_min_pick_tcp_z": False, "surface_clearance_override_m": .005,
+        "approach_height_override_m": .06, "ignore_current_height_for_travel_z": True,
+        "apply_pick_z_adjustments": False}, **values)["status"] == "calculated"
+    for field, value in (("use_global_min_pick_tcp_z", True), ("surface_clearance_override_m", 0.),
+                         ("approach_height_override_m", .2), ("ignore_current_height_for_travel_z", False),
+                         ("apply_pick_z_adjustments", True), ("min_pick_tcp_z_override_m", 1.)):
+        refused = preview_composition_output(params={"part_name": "P", field: value}, **values)
+        assert refused["status"] == "NEEDS_CONTEXT" and field in refused["reason"]
+
+
+def test_detect_parts_previews_the_observation_the_owner_recorded():
+    from cais_spade_llm.resources.robot.recovery_composition import preview_composition_output
+
+    pose = {"x": 0.1, "y": 0.2, "z": 1.0, "qx": 0., "qy": 0., "qz": 0., "qw": 1.}
+    values = dict(primitive="detect_parts", params={"part_name": "P"}, recovery_snapshot={},
+                  part_context={"observed_pose": None}, grounding_context={},
+                  task={"part_name": "P", "resource_jid": "robot"}, physical_evidence={})
+    # The row the capability check and compute_pick_targets read; failure grounding measured no pose for P.
+    seen = preview_composition_output(resource_evidence={"observed_parts": {"P": {"observed_pose": pose}}}, **values)
+    assert seen["status"] == "calculated" and seen["output"]["pose"] == pose
+    listed = {"observed_parts": {"P": {"current_pose": list(pose.values())}}}
+    assert preview_composition_output(resource_evidence=listed, **values)["output"]["pose"] == pose
+    assert preview_composition_output(resource_evidence={}, **values) == {
+        "status": "NEEDS_CONTEXT", "reason": "Recorded part observation is missing"}
 
 
 _STEP_EFFECT = {"part_pose.x": {"set_from_step": {"primitive": "calculate", "output": "target_x"}}}
@@ -1416,16 +2019,146 @@ def test_a_step_bound_effect_needs_its_calculation_before_it(steps):
     assert "needs an earlier calculate step" in result["reason"]
 
 
-def test_a_transport_program_is_told_it_binds_no_distance():
+def test_the_composition_prompt_states_facts_and_no_recipe():
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
-        _transport_composition_guidance,
+        _PUBLISHED_REF_SCHEMA,
+        _visible_primitive_catalog_names,
+    )
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import (
+        _render_primitive_generation_prompt,
     )
 
-    def prepared(names):
-        return {"composition_validation_version": 1,
-                "recovery_resources": {"r": {"execution_primitive_catalog": [{"name": name} for name in names]}}}
+    event = {"outline_id": "e", "resource_jid": "r", "event_name": "go"}
+    prompt = _render_primitive_generation_prompt({"primitive_active_outline_event_token": event,
+                                                  "primitive_active_outline_event": event})
+    for recipe in ("Prefer adapting", "Author from scratch", "worth pulling", "retrieve the closest", "fragile-but-valid",
+                   "flipped-SG", "store_as", "get_current_pose"):
+        assert recipe not in prompt
+    assert "show how this resource's nominal functions compose primitives" in prompt
+    contract = prompt.split("Output Contract\n")[1]
+    assert sum(line.startswith("- ") for line in contract.splitlines()) == 8
+    assert _visible_primitive_catalog_names([{"name": "grasp_part", "primitive_kind": "pick"}]) == [{"name": "grasp_part"}]
+    assert not any("memo" in row["ref"] for row in _PUBLISHED_REF_SCHEMA)
 
-    guidance = _transport_composition_guidance(prepared(["detect_parts", "compute_transport_targets", "move_relative"]), "r")
-    assert "detect_parts, compute_transport_targets, then move_relative" in guidance
-    assert _transport_composition_guidance(prepared(["move_cartesian"]), "r") == ""
 
+def test_static_capabilities_is_described_by_what_composition_serves():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _PUBLISHED_REF_SCHEMA,
+    )
+
+    rows = {row["ref"]: row["description"] for row in _PUBLISHED_REF_SCHEMA}
+    assert not any(promise in rows["/resources/<jid>/static_capabilities"]
+                   for promise in ("named poses", "workspace bounds", "staging areas"))
+
+
+_DECLARED_MOTION = {
+    "ur5e-1": {"transit_waypoints": [[[-4.6, 1.55, 1.35], [-4.6, 0.7, 1.35]]], "rotation_waypoint": [-4.6, 0.7, 1.35]},
+    "ur5e-3": {"transit_waypoints": [], "rotation_waypoint": [0.0, 0.05, 1.5],
+               "pick_transit_waypoints": [[0.4, 0.15, 1.5], [0.0, 0.05, 1.5], [-0.4, 0.15, 1.5]]},
+    "ur5e-4": {"transit_waypoints": [], "rotation_waypoint": [0.3, -0.35, 1.5], "pick_rotation_at_current_pose": True},
+}
+
+
+def _approach_step(prepared, function_name):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _capability_decomposition_for_resource,
+    )
+
+    decomposition = _capability_decomposition_for_resource(
+        prepared_recovery_request=prepared, resource_jid="arm", function_name=function_name)
+    return next(step for step in decomposition["recovery_visible_steps"] if step["primitive"] == "move_cartesian")
+
+
+@pytest.mark.parametrize("robot, function_name, route", [
+    ("ur5e-1", "place_approach", "transit_waypoints/0"), ("ur5e-3", "pick_approach", "pick_transit_waypoints")])
+def test_a_nominal_approach_names_the_route_its_robot_declares(robot, function_name, route):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _capability_decomposition_for_resource,
+    )
+
+    evidence = {"controller_config": {"cartesian_motion": _DECLARED_MOTION[robot]}}
+    prepared = {"composition_validation_version": 1,
+                "recovery_resources": {"arm": {"resource_type": "robot", "resource_evidence": evidence}}}
+    ref = f"/resources/arm/resource_evidence/controller_config/cartesian_motion/{route}"
+    note = _approach_step(prepared, function_name)["note"]
+    assert ref in note
+    # It says what the nominal function does; the program is the model's to write.
+    assert "move_cartesian" not in note and "add" not in note.split()
+    # The other approach has no route of its own, so it says nothing.
+    other = "pick_approach" if function_name == "place_approach" else "place_approach"
+    assert "note" not in _approach_step(prepared, other)
+    # What the note says to bind, the owner check resolves to a declared point.
+    context = {"resources": {"arm": {"resource_evidence": evidence}}}
+    point = resolve_composition_value({"context_ref": ref}, context)[1]
+    bound = {axis: {"context_ref": f"{ref}/1/{index}"} for index, axis in enumerate("xyz")}
+    assert resolve_composition_value(bound, context) == dict(zip("xyz", point))
+    # Asked for every function at once, it reads the same.
+    every = _capability_decomposition_for_resource(prepared_recovery_request=prepared, resource_jid="arm")
+    assert any(step.get("note") == note for step in every[function_name]["recovery_visible_steps"])
+
+
+def test_a_robot_with_no_route_and_the_task_definitions_stay_as_they_are():
+    from cais_spade_llm.resources.robot.robot_task_registry import robot_task_capability_decompositions
+
+    evidence = {"controller_config": {"cartesian_motion": _DECLARED_MOTION["ur5e-4"]}}
+    entry = {"resource_type": "robot", "resource_evidence": evidence}
+    composition = {"composition_validation_version": 1, "recovery_resources": {"arm": entry}}
+    for function_name in ("pick_approach", "place_approach"):
+        assert "note" not in _approach_step(composition, function_name)
+    # Only composition reads the note. The task definitions are every robot's, so they never carry one robot's route.
+    evidence["controller_config"]["cartesian_motion"] = _DECLARED_MOTION["ur5e-1"]
+    assert "note" not in _approach_step({"recovery_resources": {"arm": entry}}, "place_approach")
+    assert "note" in _approach_step(composition, "place_approach")
+    steps = robot_task_capability_decompositions(function_name="place_approach")["recovery_visible_steps"]
+    assert not any("note" in step for step in steps)
+
+
+def test_a_straight_move_finds_where_it_passes_nearest_an_arms_base_axis():
+    from cais_spade_llm.resources.robot.recovery_capability import _nearest_base_axis
+
+    start, end = {"x": -0.68, "y": 0.5, "z": 1.5}, {"x": 0.25, "y": 0.45, "z": 1.3}
+    nearest = _nearest_base_axis(start, end, [0.0, 0.5, 1.02])
+    assert nearest["x"] == pytest.approx(0.0, abs=2e-3) and nearest["z"] == pytest.approx(1.354, abs=2e-3)
+    assert 0.03 < abs(nearest["y"] - 0.5) < 0.04
+    # A move that only leaves the axis behind has no point of its own to check.
+    assert _nearest_base_axis({"x": 0.3, "y": 0.5, "z": 1.5}, {"x": 0.6, "y": 0.5, "z": 1.5}, [0.0, 0.5, 1.02]) is None
+    assert _nearest_base_axis({"x": 0.3, "y": 0.5, "z": 1.5}, {"x": 0.3, "y": 0.5, "z": 1.2}, [0.0, 0.5, 1.02]) is None
+
+
+@pytest.mark.parametrize("part_yaw", [0.0, 0.6, -1.2])
+def test_a_pick_for_a_mating_slot_leaves_the_fingers_across_the_row(part_yaw):
+    from scipy.spatial.transform import Rotation
+
+    from cais_spade_llm.resources.robot.recovery_capability import _mating_pick_orientation
+
+    axes = ("qx", "qy", "qz", "qw")
+    geometry = {"assembly_board": {"slots": {"near": [0.03, 0.14], "next": [0.0, 0.14], "far": [-0.05, 0.14]},
+                                   "mating_contact_by_part": {"near": {
+                                       "target_yaw_rad": math.pi / 2,
+                                       "ignore_tooth_contact_with": ["next/link/collision", "far/link/collision"]}}}}
+    down = dict(zip(axes, Rotation.from_euler("ZY", [-math.pi / 2, math.pi]).as_quat().tolist(), strict=True))
+    observed = dict(zip(axes, Rotation.from_euler("z", part_yaw).as_quat().tolist(), strict=True))
+    picked = _mating_pick_orientation("near", observed, down, geometry)
+    tool = Rotation.from_quat([picked[axis] for axis in axes])
+    grasp = tool.inv() * Rotation.from_quat([observed[axis] for axis in axes])
+    # As the controller places it: the slot's yaw, with the grasp the pick made.
+    at_slot = Rotation.from_euler("z", math.pi / 2) * grasp.inv()
+    assert abs(at_slot.apply([1.0, 0.0, 0.0])[0]) < 1e-9
+    assert tool.apply([0.0, 0.0, 1.0])[2] == pytest.approx(-1.0)
+    # With no mating contact the orientation stays as it was given.
+    assert _mating_pick_orientation("other", observed, down, geometry) is down
+
+
+def test_an_arms_contracts_list_what_the_catalog_does_not():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _composition_contract,
+    )
+
+    release = {"name": "release_part", "params": {"assembly_slot": {"description": "Configured assembly target."}}}
+    served = _composition_contract(release, "robot")
+    for field in ("slot_x", "slot_y", "part_height", "board_top_z", "place_part_origin_z", "destination_location"):
+        assert field in served["params"]["assembly_slot"]["description"]
+    assert release["params"]["assembly_slot"]["description"] == "Configured assembly target."
+    assert "retreat_pose" in _composition_contract({"name": "compute_pick_targets"}, "robot")["publishes"]
+    assert "insert_pose" in _composition_contract({"name": "compute_place_targets"}, "robot")["publishes"]
+    assert "publishes" not in _composition_contract({"name": "compute_pick_targets"}, "kmr")

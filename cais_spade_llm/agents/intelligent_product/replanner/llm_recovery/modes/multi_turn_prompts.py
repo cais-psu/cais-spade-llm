@@ -3469,27 +3469,13 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             "RA primitive_support records independent capability witnesses. Primitive Composition "
             "must still establish ordering, compatible parameter bindings, and achievement of "
             "the complete expected_end_state. An accepted outline is not an executable program.\n"
-            "The active event body and the surrounding accepted outline are "
-            "provided inline below so you can reason about intent immediately. "
-            "For peripheral facts (poses, contract cards, capability decompositions, "
-            "projected snapshots, prior decompositions), emit decision=need_context "
-            "with refs in context_requests and the recovery will resolve them in the "
-            "next turn under 'Served Context'. Do not guess values. Treat "
-            "/capability_decompositions/<function_name> as the primary modeled "
-            "source for how this resource composes valid low-level actions. When "
-            "capability decompositions are available for the active resource, "
-            "retrieve the closest applicable one before authoring primitive_steps. "
-            "Adapt the retrieved decomposition to the served context instead of "
-            "inventing a fresh sequence. The <function_name> token must be one "
-            "of the names listed under 'Available Capability Decompositions'; "
-            "primitive names such as grasp_part or release_part belong under "
-            "/primitive_contracts/<name>, not /capability_decompositions/<function_name>. "
-            "Examples of refs worth pulling: "
-            "/primitive_contracts/<name> (full contract card), "
-            "/resources/<jid>/current_pose, /parts/<name>/observed_pose, "
-            "/projected_snapshot/<jid>, /capability_decompositions/<function_name> "
-            "(primary modeled task-function decompositions for this resource), /memo/primitive_authoring "
-            "(prior accepted decompositions)."
+            "The active event is provided inline below. For other facts, emit decision=need_context "
+            "with refs in context_requests; they are resolved in the next turn "
+            "under 'Served Context'. Do not guess values. Capability decompositions "
+            "show how this resource's nominal functions compose primitives. The "
+            "<function_name> token must be one of the names listed under 'Available "
+            "Capability Decompositions'; primitive names such as grasp_part or "
+            "release_part belong under /primitive_contracts/<name>."
         ),
     ]
     # What stays the same for a resource comes first, then its served model, which every event of the resource
@@ -3509,7 +3495,7 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
         sections.extend(
             [
                 "",
-                "Available Capability Decompositions (names only; retrieve the closest applicable one before authoring)",
+                "Available Capability Decompositions (names only)",
                 _compact_json(capability_names),
             ]
         )
@@ -3602,12 +3588,6 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             "Named Pose Rules",
             _compact_json(active_resource_named_poses),
             "- move_to_named_pose may only use named poses advertised for the active resource.",
-            (
-                "- Full named-pose details remain retrievable via "
-                f"/resources/{active_resource_jid}/static_capabilities."
-                if active_resource_jid
-                else "- Full named-pose details remain retrievable via /resources/<jid>/static_capabilities."
-            ),
         ]
     )
 
@@ -3618,20 +3598,11 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             "- Keep `thought` to at most two short sentences and `rationale` to one short sentence.",
             "- Author primitive_steps for ONLY the active DES transition shown above.",
             "- outline_id and resource_jid MUST exactly match the active transition.",
-            "- primitive_steps[*].primitive MUST be a name in Visible Primitive Catalog; hidden primitives (e.g. move_pose, get_current_pose) are rejected.",
-            '- Each step MUST include params; bind params to grounded values via {"context_ref": "event_facts.<path>"} referencing deterministic event-local facts from prior data-producing primitives, or via literal values derived from retrieved poses. Do NOT hardcode pose/offset numeric constants.',
-            "- Data-producing primitives publish event_facts automatically: get_current_pose -> event_facts.current_pose; detect_parts(part_name=P) -> event_facts.detected_part.P; compute_pick_targets(part_name=P) -> event_facts.pick_targets.P; compute_place_targets(part_name=P) -> event_facts.place_targets.P.",
-            "- Do not include store_as or any per-step alias field. Action primitives do not publish custom event_facts.",
-            "- If you need a grounded value (current_pose, observed_pose, contract card, projected snapshot, full event body), emit decision=need_context with refs in context_requests and leave primitive_steps empty; do not guess.",
-            "- When capability decompositions are available for the active resource, retrieve the closest applicable /capability_decompositions/<function_name> before authoring primitive_steps.",
-            "- /capability_decompositions/<function_name> accepts only names from Available Capability Decompositions. Primitive names like grasp_part and release_part must be retrieved via /primitive_contracts/<name> instead.",
-            "- Prefer adapting a retrieved capability decomposition to served context over authoring a novel low-level sequence from scratch.",
-            "- Author from scratch only when no retrieved capability decomposition fits; name that gap explicitly in rationale.",
-            "- If retrieved context or input diagnostics still contradict the active event, emit decision=primitive_blocked and explain the blocker; do not send the event back to outline from this phase.",
-            "- Use decision=primitive_steps_ready only when primitive_steps is non-empty AND every param is either a literal known-safe value, a context_ref to a prior step output, or a value derived from previously served context.",
-            "- Use decision=need_primitive_revision with a non-empty rationale when the visible catalog cannot safely satisfy the active event (name the contract gap, e.g. 'no visible primitive establishes part orientation for flipped-SG insert').",
-            "- Use decision=primitive_blocked when the active event is blocked by contradictory or insufficient primitive-side context that should pause for operator inspection.",
-            "- Do not invent observations, resources, parts, or grounded locations. Do not produce a fragile-but-valid trace.",
+            "- primitive_steps[*].primitive MUST be a name in Visible Primitive Catalog.",
+            '- Each step MUST include params: a {"context_ref": ...} or a literal from served context. Do NOT hardcode pose/offset numeric constants.',
+            "- compute_pick_targets publishes event_facts.pick_targets.<part>; compute_place_targets publishes event_facts.place_targets.<part>.",
+            "- need_context: refs in context_requests, primitive_steps empty.",
+            "- primitive_steps_ready: non-empty primitive_steps. need_primitive_revision or primitive_blocked: say why in rationale.",
         ]
     )
     return "\n".join(sections).strip() + "\n"

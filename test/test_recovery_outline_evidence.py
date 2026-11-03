@@ -17,20 +17,55 @@ from cais_spade_llm.resources.recovery_geometry import (
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
 
 
+_PICK_MOTION = {'pick_tcp_z_bias_min_m': .003, 'pick_tcp_z_bias_max_m': .02, 'approach_height_m': .2,
+                'min_pick_tcp_z_m': 1.07, 'recovery_observed_pick_approach_height_m': .06,
+                'recovery_observed_pick_surface_clearance_m': .005}
+
+
+def _robot_pick_targets(geometry: dict, part_pose: dict, tool: dict, *, robot_name: str = 'robot',
+                        cartesian: dict | None = None) -> dict:
+    """Run the robot's own pick of an observed part: its normalisation, then its controller's calculation."""
+    from unittest.mock import Mock
+
+    from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import GazeboPickPlaceController
+
+    agent = SimpleNamespace(motion_config=_PICK_MOTION, _normalized_xyz_pose=RobotAgent._normalized_xyz_pose)
+    params = RobotAgent._inject_observed_pose_for_pick_targets(agent, 'compute_pick_targets', {'part_name': 'P'}, {
+        'origin_resource_location': 'observed_pose', 'part_name': 'P', 'observed_pose': part_pose,
+        'part_geometry': geometry})
+    position = SimpleNamespace(**{axis: tool[axis] for axis in 'xyz'})
+    orientation = SimpleNamespace(**{axis: tool['q' + axis] for axis in 'xyzw'})
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller.__dict__.update(
+        execution_mode='simulation', robot_name=robot_name, controller_config={'cartesian_motion': cartesian or {}},
+        pick_tcp_z_bias_min_m=_PICK_MOTION['pick_tcp_z_bias_min_m'], pick_tcp_z_bias_max_m=_PICK_MOTION['pick_tcp_z_bias_max_m'],
+        min_pick_tcp_z_m=_PICK_MOTION['min_pick_tcp_z_m'], approach_height_m=_PICK_MOTION['approach_height_m'],
+        pick_z_adjustments_m={'P': .01}, pick_tool0_z_adjustment_m=0., gripper_open=.11, gripper_close=.02,
+        wait_for_services=lambda: True, _get_ee_pose=lambda: SimpleNamespace(position=position, orientation=orientation),
+        _get_ee_tcp_world_z_offset=lambda: -.218, _make_pose=lambda *_: None, _log=lambda: Mock())
+    return controller.compute_pick_targets(**params)
+
+
 @pytest.mark.parametrize('resource_id', ['ur5e-1', 'ur5e-2'])
-def test_recovery_uses_the_nominal_handling_robot_access_calculation(resource_id):
+@pytest.mark.parametrize('location_field', ['location', 'part_location'])
+def test_recovery_uses_the_nominal_handling_robot_access_calculation(resource_id, location_field):
     from cais_spade_llm.recovery_framework import SCENE_PATH
     from cais_spade_llm.resources.robot.target_calculations import handling_robot_access_poses
     from cais_spade_llm.resources.robot.recovery_capability import calculate_recovery_pick_target
 
-    machine = next(row for row in json.loads(SCENE_PATH.read_text())['machines']
-                   if row['handling_robot_access']['resource_id'] == resource_id)
-    access = machine['handling_robot_access']
+    scene = json.loads(SCENE_PATH.read_text())
+    machine = next(row for row in scene['machines'] if row['handling_robot_access']['resource_id'] == resource_id)
+    access = {**machine['handling_robot_access'], 'workholding_bounds':
+              scene['safety_preparation']['regions'][machine['resource_id'] + '.workholding']['bounds']}
     pose = [*machine['workholding_pose'][:3], 0., 1., 0., 0.]
     part = 'recorded-part'
-    evidence = {'resource_id': resource_id, 'execution_mode': 'simulation', 'frame': 'world', 'observed_parts': {part: {
-        'current_pose': pose, 'location': machine['resource_id']}},
-        'inputs': {'scene': {'machines': [machine]}}, 'pick_geometry': {part: {'part_height_m': .05}}}
+    # A captured row names the part's place as location; one an accepted program put down, as part_location.
+    cartesian = {'resource_id': resource_id, 'only': True, 'rotation_waypoint': [0., 0., 1.35]}
+    evidence = {'controller_config': {'cartesian_motion': cartesian}, 'execution_mode': 'simulation', 'frame': 'world',
+        'observed_parts': {part: {'current_pose': pose, location_field: machine['resource_id']}},
+        'inputs': {'scene': {'machines': [machine], 'safety_preparation': scene['safety_preparation']}},
+        'pick_geometry': {part: {'part_height_m': .05}}}
     snapshot = {'current_pose': dict(zip(('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'), pose, strict=True))}
     before = deepcopy((evidence, snapshot))
     result = calculate_recovery_pick_target(task={'resource_jid': resource_id+'@localhost', 'part_name': part},
@@ -38,9 +73,62 @@ def test_recovery_uses_the_nominal_handling_robot_access_calculation(resource_id
     expected = handling_robot_access_poses(access, access['tcp_offset_z_m'], tuple(pose[:2]),
                                           access.get('grasp_orientation_xyzw'))
     assert result['status'] == 'calculated', result
+    assert result['source']['calculation'] == 'handling_robot_access_poses'
     assert (result['approach_pose'], result['target_pose']) == expected
-    assert result['access_retreat_pose'] == expected[0]
+    assert result['access_retreat_pose'] == {**expected[0], 'z': 1.35}
     assert (evidence, snapshot) == before
+    robot = _robot_pick_targets({'part_height_m': .05, 'grasp_width_m': .02, 'handling_robot_access': access},
+                                dict(zip('xyz', pose, strict=False)), snapshot['current_pose'],
+                                robot_name=resource_id, cartesian=cartesian)
+    for field in ('approach_pose', 'target_pose', 'access_retreat_pose', 'pick_tcp_z', 'pick_z', 'travel_z'):
+        assert result[field] == pytest.approx(robot[field]), field
+    # A machine's access belongs to the robot it declares.
+    cartesian['resource_id'] = 'another robot'
+    other = calculate_recovery_pick_target(task={'resource_jid': resource_id+'@localhost', 'part_name': part},
+        recovery_snapshot=snapshot, resource_evidence=evidence)
+    assert other['status'] == 'NEEDS_CONTEXT' and 'target_pose' not in other
+
+
+@pytest.mark.parametrize('part_z, part_height', [(1., .05), (1.015, .05), (1.06, .05), (1.017, .05), (1.025, .02)])
+def test_a_composed_pick_calculates_what_the_robot_applies_to_an_observed_part(part_z, part_height):
+    from cais_spade_llm.resources.robot.recovery_capability import calculate_recovery_pick_target
+
+    geometry = {'part_height_m': part_height, 'board_center': {'z': 1.0239916}, 'grasp_width_m': .02}
+    tool = dict(zip(('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'), (.1, .2, 1.5, 0., 1., 0., 0.), strict=True))
+    observed = {'x': .3, 'y': .4, 'z': part_z}
+    evidence = {'execution_mode': 'simulation', 'frame': 'world', 'snapshot': {'current_pose': tool},
+        'observed_parts': {'P': {'current_pose': [.3, .4, part_z, 0., 0., 0., 1.]}}, 'pick_geometry': {'P': geometry},
+        'motion_config': {**_PICK_MOTION, 'tcp_offset_z': -.218, 'tcp_transform_source': 'recorded test observation',
+                          'controlled_link': 'tool0', 'tcp_link': 'tcp'}}
+    composed = calculate_recovery_pick_target(task={'resource_jid': 'robot', 'part_name': 'P'},
+        recovery_snapshot={'current_pose': tool}, resource_evidence=evidence)
+    robot = _robot_pick_targets(geometry, observed, tool)
+    assert composed['status'] == 'calculated', composed
+    for field in ('pick_tcp_z', 'pick_z', 'travel_z'):
+        assert composed[field] == pytest.approx(robot[field], abs=1e-12), field
+    # Neither the TCP minimum nor the tool's current height has a say.
+    assert composed['pick_tcp_z'] == pytest.approx(part_z + max(.003, part_height * .25) + .005)
+    assert composed['approach_pose']['z'] == pytest.approx(composed['travel_z']) and composed['travel_z'] < tool['z']
+    missing = deepcopy(evidence)
+    del missing['motion_config']['recovery_observed_pick_surface_clearance_m']
+    refused = calculate_recovery_pick_target(task={'resource_jid': 'robot', 'part_name': 'P'},
+        recovery_snapshot={'current_pose': tool}, resource_evidence=missing)
+    assert refused['status'] == 'NEEDS_CONTEXT'
+    assert any(ref.endswith('/motion_config/recovery_observed_pick_surface_clearance_m')
+               for ref in refused['context_requests'])
+
+
+def test_a_configured_pick_point_is_judged_by_the_machines_declared_region():
+    from cais_spade_llm.resources.robot.target_calculations import handling_robot_access_poses
+
+    access = {'pose_format': 'xyz_xyzw', 'approach_pose': [.5, .5, 1., 0., 1., 0., 0.],
+              'target_pose': [.5, .5, 1., 0., 1., 0., 0.], 'workholding_bounds': [[0., 1.], [0., 1.], [0., 1.]]}
+    assert handling_robot_access_poses(access, 0., (.99, .01)) is not None
+    with pytest.raises(ValueError, match='disagrees with the observed part'):
+        handling_robot_access_poses(access, 0., (1.01, .5))
+    with pytest.raises(ValueError, match='no declared workholding region'):
+        handling_robot_access_poses({key: value for key, value in access.items() if key != 'workholding_bounds'}, 0.,
+                                    (.5, .5))
 
 
 def _kmr_joint_physical():

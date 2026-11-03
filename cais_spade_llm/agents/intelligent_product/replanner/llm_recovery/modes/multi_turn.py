@@ -2832,6 +2832,8 @@ def _apply_task_effects_to_symbolic_state(  # noqa: C901, PLR0912, PLR0915
             part["current_process"] = _stated_current_process(
                 previous_part.get("current_process"), end_state.get("current_process"),
                 recovery_des_model.get("resource_id") or resource_jid)
+        if "processCompleted" in end_state:
+            part["processCompleted"] = deepcopy(end_state.get("processCompleted"))
         if "part_location" in end_state:
             part["part_location"] = deepcopy(end_state.get("part_location"))
             part["current_location"] = deepcopy(end_state.get("part_location"))

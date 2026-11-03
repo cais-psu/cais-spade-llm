@@ -10,24 +10,24 @@
     "specifications": [
       {
         "id": "SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm",
-        "requirement": "RGOCG4-50_Round_4mm may enter assembly_board-v1 only after assembly of KET4_Square_4mm is completed.",
+        "requirement": "RGOCG4-50_Round_4mm may complete assembly only after assembly of KET4_Square_4mm is completed.",
         "formula": "(!ap001 U (ap002 & !ap001)) | G !ap001",
         "aps": [
           {
             "label": "ap001",
-            "full": "{\"event\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"part_region_entry\"},\"kind\":\"ap_event\",\"process\":\"*\",\"product\":\"$part\",\"resource\":\"*\"}",
-            "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry.",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"assembly\",\"product\":\"$part\",\"resource\":\"*\",\"state\":{\"arguments\":{\"target\":\"$target\"},\"symbol\":\"processCompleted\"}}",
+            "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record.",
             "definition": {
-              "event": {
-                "arguments": {
-                  "region": "$region"
-                },
-                "symbol": "part_region_entry"
-              },
-              "kind": "ap_event",
-              "process": "*",
+              "kind": "ap_state",
+              "process": "assembly",
               "product": "$part",
-              "resource": "*"
+              "resource": "*",
+              "state": {
+                "arguments": {
+                  "target": "$target"
+                },
+                "symbol": "processCompleted"
+              }
             }
           },
           {
@@ -57,7 +57,7 @@
       "physical_ap_bindings": {
         "ap001": {
           "part": "RGOCG4-50_Round_4mm",
-          "region": "assembly_board-v1"
+          "target": "GMC_Laser_Plate_Virtual/RGOCG4-50_Round_4mm"
         },
         "ap002": {
           "part": "KET4_Square_4mm",

@@ -15,6 +15,7 @@ from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.recovery_framework import ROOT
 from cais_spade_llm.recovery_framework.gazebo_worker import GazeboExecutionError, GazeboWorker
 from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
+from cais_spade_llm.resources.machine.machine_jobs import workholding_bounds
 from cais_spade_llm.resources.resource_safety_preparation import (
     resource_model_declarations,
     resource_provider,
@@ -353,6 +354,8 @@ def _pick_geometry(context, part_name: str, origin: str, robot_id: str) -> dict:
         )
     access = dict(source.get("handling_robot_access") or {}) if source else {}
     if access and access.get("resource_id") == robot_id:
+        if "target_pose" in access:
+            access["workholding_bounds"] = workholding_bounds(scene, origin)
         geometry["handling_robot_access"] = access
     return geometry
 

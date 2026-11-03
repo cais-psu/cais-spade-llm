@@ -59,11 +59,11 @@ violates the rule.
                   RGOCG4-50_Round_4mm, RGOCG8-50_8mm, RGOCG12-50_12mm, RGOCG16-50_16mm → circle }
 
 (5a) SAFE_gear_small_before_KET4_Square_4mm
-     a = enters(KET4_Square_4mm, assembly_board-v1)
+     a = assembled(KET4_Square_4mm @ GMC_Laser_Plate_Virtual/KET4_Square_4mm)
      b = assembled(gear_small @ Gear_Plate/Gear_Shaft_1)
 
 (5b) SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm
-     a = enters(RGOCG4-50_Round_4mm, assembly_board-v1)
+     a = assembled(RGOCG4-50_Round_4mm @ GMC_Laser_Plate_Virtual/RGOCG4-50_Round_4mm)
      b = assembled(KET4_Square_4mm @ GMC_Laser_Plate_Virtual/KET4_Square_4mm)
 
 (6) SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing
@@ -72,10 +72,33 @@ violates the rule.
 ```
 
 Taken together:
-- **Board order:** gear_small → KET4 → RGOCG4 (5a, 5b).
+- **Assembly order:** gear_small → KET4 → RGOCG4, by assembly completion (5a, 5b; user decision,
+  2026-11-02).
+- **Board entry:** one resource at a time (1). No rule orders which part enters first: a part may be
+  carried onto a free board before the earlier part is assembled, and only its assembly has to wait.
 - **Machining order:** KET4's trim finishes before RGOCG4's (6).
 - **No untrimmed part on the board** (4).
 - **One resource at a time** at the board, M1 and M2 (1–3).
+
+### How the assembly order reaches a recovery event
+
+Rules 5a and 5b read the part's `processCompleted` record, so a recovery event has to put the entry
+there:
+- A robot's primitives declare no assembly entry. The entry is declared by the runtime model's
+  `place_insert_done`, for a place at `assembly_board-v1`.
+- The RA's place check finds that entry. Code writes nothing: the event states the record, and leaving
+  it out is refused with the fact (`unstated_found`), as for any value left out.
+- The CCA then reads the stated record, so an insert out of order is refused after the event.
+
+### Known limit: the board can deadlock in nominal production
+
+User decision, 2026-11-02: state this as a limit in the paper. Nominal admission checks each step
+(Eq. 13), with no completion search. If the robot with the later part starts first and enters the free
+board, its insert is held by 5a or 5b while the mutex (1) holds the robot with the earlier part out.
+Neither can move, and both sends time out. The nominal plan has no task that backs a robot out. While
+the robot with the earlier part is on the board or its task has started, the mutex holds the other
+robot, so the order comes out right when that robot starts first; no dependency forces it to. Recovery outlines do not have this problem in the same way, because the LLM can state
+a retreat, but Eq. 6 does not check the specifications over the continuation.
 
 ### Why rule 4 is part of the set
 - **Recovery is not constrained by the nominal plan.** The nominal plan orders machining before
@@ -106,8 +129,8 @@ touched by the recovery
 | 2 M1 mutex | ○ | ○ | ● | ● |
 | 3 M2 mutex | ○ | ○ | ● | ○ |
 | 4 Trim before board entry | ○ | ○ | ● | ○ |
-| 5a gear_small before KET4 | ● | ○ | ○ | ○ |
-| 5b KET4 before RGOCG4 | ○ | ○ | ○ | ● |
+| 5a gear_small assembled before KET4 | ● | ○ | ○ | ○ |
+| 5b KET4 assembled before RGOCG4 | ○ | ○ | ○ | ● |
 | 6 KET4 trim before RGOCG4 trim | ○ | ○ | ● | ○ |
 
 - Every specification drives at least one scenario.
@@ -122,11 +145,11 @@ Both rules order KET4 before RGOCG4, but at different stages, and each can be vi
 other holds.
 
 - **Rule 6** constrains when RGOCG4's **trim may finish**.
-- **Rule 5b** constrains when RGOCG4 may **enter the board**.
+- **Rule 5b** constrains when RGOCG4's **assembly may finish**.
 
 | Trace | Rule 6 | Rule 5b |
 | --- | --- | --- |
-| KET4 trimmed → RGOCG4 trimmed → RGOCG4 enters the board while KET4 is still in M1 | satisfied | violated |
+| KET4 trimmed → RGOCG4 trimmed → RGOCG4 assembled while KET4 is still in M1 | satisfied | violated |
 | M1 fails → M2 finishes RGOCG4 first → RGOCG4 waits in the buffer → KET4 trimmed and assembled → RGOCG4 assembled | violated | satisfied |
 
 The first trace is the temptation in the ur5e-1 gripper fault; the second is the temptation in the
