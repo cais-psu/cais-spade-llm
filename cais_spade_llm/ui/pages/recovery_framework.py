@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 
@@ -62,6 +63,35 @@ def _render_experiments(*, is_active: Callable[[], bool]) -> None:
     render_recovery_experiments(is_active=is_active)
 
 
+def _render_paper_export() -> None:
+    """Build the appendix LaTeX and the supplementary material from the runs in appendix_set.json, and download them."""
+    from cais_spade_llm.ui import paper_export
+
+    with ui.card().classes("w-full gap-2"):
+        with ui.row().classes("items-center gap-3"):
+            ui.icon("description").classes("text-primary text-2xl")
+            ui.label("Paper appendix and supplementary material").classes("text-xl font-semibold")
+        ui.label("LaTeX tables for Overleaf and a supplementary zip, built from the runs named in "
+                 "appendix/appendix_set.json. Nothing is run or changed.").classes("text-sm text-slate-600")
+        status = ui.label("").classes("text-sm")
+
+        async def export() -> None:
+            button.disable()
+            status.set_text("Building...")
+            try:
+                overleaf, supplement = await asyncio.to_thread(paper_export.build_paper_export)
+            except (OSError, ValueError, KeyError) as exc:
+                status.set_text(f"Export failed: {exc}")
+            else:
+                status.set_text(f"Built {overleaf.name} and {supplement.name} in {overleaf.parent}")
+                ui.download.file(overleaf)
+                ui.download.file(supplement)
+            finally:
+                button.enable()
+
+        button = ui.button("Export for paper", icon="download", on_click=export)
+
+
 def render(bridge: SystemBridge) -> None:
     """Open run by default and construct its controls once per page client."""
     try:
@@ -100,6 +130,7 @@ def render(bridge: SystemBridge) -> None:
                 elif name == "recovery":
                     from cais_spade_llm.ui.pages import recovery
                     recovery.render(root=_ROOT, is_active=lambda: tabs.value == "recovery", bridge=bridge)
+                    _render_paper_export()
                 elif name == "experiments":
                     _render_experiments(is_active=lambda: tabs.value == "experiments")
                 else:

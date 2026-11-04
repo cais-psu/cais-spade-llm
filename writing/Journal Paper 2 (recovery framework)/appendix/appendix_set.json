@@ -1,0 +1,12 @@
+{
+  "model": "claude-opus-5-5, reasoning effort medium",
+  "outline_commit": "fa88600",
+  "composition_commit": "24de8e9",
+  "scenarios": [
+    {"key": "part_slippage", "scenario": "Part slippage", "outline": "draft_d37d89d931ca4dffaec7eb413cd3974a", "composition": "composition_801c676f9d8d4e1a958af202fd41c561"},
+    {"key": "conveyor", "scenario": "Conveyor breakdown", "outline": "draft_bda7b0f0fe84431884ef49846af4ab0f", "composition": "composition_8c37b9201cbc4527b782c24963e115af"},
+    {"key": "ur5e1", "scenario": "ur5e-1 breakdown", "outline": "draft_9707a5873c9c43d8a126d5e659ca58fb", "reference": "draft_568e7a3a8b1e48c89eaabb8db1355375", "composition": "composition_81863263c8b949c3a337e2916ac8bc4c"},
+    {"key": "machining", "scenario": "Machining breakdown during part processing", "outline": "draft_a9d63a83d00b42469402c3265bdd8696", "reference": "draft_f89b1d942f8b4722a3a6ff64d732e20d", "composition": "composition_80d8e685f53b4558ac0ff4a8a3ec04ea"}
+  ],
+  "worked_example": {"key": "conveyor", "turns": [4, 5, 6]}
+}
