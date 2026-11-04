@@ -274,7 +274,12 @@ def pick_targets(scene: dict, part: str, observed: list, current_pose: list,
     lift = transport_pose(scene, base_pose, target)
     if lift[2] < clearance[2]:
         raise ValueError('Saved KMR carrying height does not clear the picked part')
-    return {'target': target, 'approach': approach, 'lift': lift, 'lift_waypoints': [clearance],
+    # A part away from where the arm faces, such as in a machine beside the dock, is reached by turning the arm about
+    # its mount, as a release is; a straight line would wind the arm back over itself. A part in front of the arm,
+    # as at Storage, turns less than the configured minimum and has no waypoints.
+    return {'target': target, 'approach': approach,
+            'approach_waypoints': transfer_waypoints(scene, base_pose, current_pose, approach),
+            'lift': lift, 'lift_waypoints': [clearance, *transfer_waypoints(scene, base_pose, clearance, lift)],
             'retreat': lift.copy(), 'seed': list(seed),
             'carrying': list(config['carrying_arm_configuration'])}
 
@@ -625,14 +630,75 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
                 # FK used for recorded witnesses; a solver status is not proof.
                 if (math.dist(pose[:3], target[:3]) <= 1e-5
                         and abs(sum(a*b for a, b in zip(pose[3:], target[3:], strict=True))) >= 1 - 1e-10):
+                    path, failure = _cartesian_path(scene, config, names, limits, state, target, params.get('waypoints'))
+                    if failure:
+                        return answer('INFEASIBLE', failure, joint_positions=deepcopy(candidate))
                     return answer('FEASIBLE',
-                        ('Calculated' if calculated else 'Recorded') + ' KMR joint witness reproduces the requested TCP by owner FK; motion interval remains separate',
+                        ('Calculated' if calculated else 'Recorded') + ' KMR joint witness reproduces the requested TCP by owner FK'
+                        + ('; the Cartesian path resolves as the KMR plans it' if path else '; motion interval remains separate'),
                         joint_positions=deepcopy(candidate), calculated_pose=pose,
                         configuration_fingerprint=recovery_validation_fingerprint(config),
+                        **({'path': path} if path else {}),
                         **({'endpoint_calculation': calculated} if calculated else {}))
         return missing('Bounded KMR endpoint search found no independently verified joint witness; reachability is unresolved',
                        'primitive_capability_evidence/' + primitive)
     return missing('KMR owner calculation requires additional recorded parameters', 'state', 'primitive_capability_evidence/' + primitive)
+
+
+def _cartesian_path(scene: dict, config: dict, names: list, limits: dict, state: dict, target: list,
+                    waypoints: list | None) -> tuple[dict | None, str | None]:
+    """Resolve a Cartesian move from the recorded tool pose and joints as the KMR's own planner does.
+
+    The waypoints, the joint-step limit and the timing are the KMR worker's (``kmr_gazebo.plan_motion``); the IK is
+    the bounded joint search the reach checks use. A path that cannot be followed is refused with the fact; one that
+    can is reported with its samples and simulated time. Nothing here bounds the time or the posture.
+
+    Returns:
+        The path summary and None, or None and the reason the path cannot be followed. Without a recorded base and
+        joints there is no start to resolve from, and both are None.
+    """
+    from cais_spade_llm.recovery_framework import ROOT
+    from cais_spade_llm.recovery_framework.kmr_motion import joint_limits
+    from cais_spade_llm.resources.kinematic_reach import bounded_joint_search
+    from cais_spade_llm.resources.robot.cartesian_waypoints import fixed_orientation_waypoints, resolve_waypoints
+
+    from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms, representative_pose
+
+    joints, base = state.get('joint_positions'), state.get('base_pose')
+    if not _pose(base) or not _vector(joints, len(names)):
+        return None, None
+    # As the KMR's planner does, the path starts where its joints put the tool, not at a remembered tool pose.
+    start = representative_pose(kinematic_transforms(config, {name: interval(value) for name, value in
+                                                              zip(names, joints, strict=True)})[config['reference_link']])
+    settings = scene['KMR']['task_execution']
+    steps = settings['cartesian_waypoints']
+    if waypoints:
+        targets = [*deepcopy(waypoints), list(target)]
+    else:
+        middle = steps.get('transfer_orientation_waypoint_xyzw_in_base_frame')
+        targets = fixed_orientation_waypoints(
+            start, target, [], rotation_point=transport_pose(scene, base, start)[:3],
+            angular_step=steps.get('angular_step_rad', .05),
+            rotation_midpoint=compose(base, [0., 0., 0., *middle])[3:] if middle else None) or [list(target)]
+
+    def solve(pose: list, seed: list) -> list:
+        found = bounded_joint_search(config, names, [float(value) for value in pose], [list(seed)], limits)
+        if found is None:
+            raise ValueError(f'no joint configuration reaches {[round(value, 3) for value in pose[:3]]}')
+        return found['joint_positions']
+
+    try:
+        timing = joint_limits(ROOT / 'ros2/cais_lab_robotics/urdf/KMR_recovery.urdf.xacro', names,
+                              settings['joint_acceleration_limits'])
+        rows = resolve_waypoints(start_pose=start, start_joints=joints, waypoints=targets, names=names, limits=timing,
+                                 solve_ik=solve, linear_step=steps['linear_step_m'],
+                                 angular_step=steps.get('angular_step_rad', .05),
+                                 maximum_joint_step=steps['max_joint_step_rad'])
+    except ValueError as exc:
+        return None, f'The KMR cannot follow the Cartesian path to {[round(value, 3) for value in target[:3]]}: {exc}'
+    return {'waypoints': len(targets), 'ik_samples': len(rows),
+            'simulated_duration_s': round(rows[-1]['time_from_start'], 2),
+            'final_joint_positions': [round(value, 4) for value in rows[-1]['positions']]}, None
 
 
 def route_between(scene: dict, part: str | None, source: str, target: str) -> list[list[float]]:

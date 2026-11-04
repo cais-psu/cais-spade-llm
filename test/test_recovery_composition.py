@@ -176,9 +176,12 @@ def test_a_kmr_program_starts_each_step_where_the_last_one_left_it():
     grasp = [3.0, 1.0, 0.925, *down]
     lift = [3.0, 1.0, 1.1, *down]
     clear = [3.0, 1.0, 0.995, *down]
-    calculated = {"target": grasp, "retreat": lift, "lift": lift, "lift_waypoints": [clear]}
+    approach = [3.0, 1.0, 1.025, *down]
+    calculated = {"target": grasp, "approach": approach, "approach_waypoints": [], "retreat": lift, "lift": lift,
+                  "lift_waypoints": [clear]}
     assert _kmr_step(evidence, targets, "compute_pick_targets", facts={"calculated_targets": calculated}) is None
     assert "calculated target pose" in _kmr_step(evidence, targets, "grasp_part", part_name="P")
+    assert _kmr_step(evidence, targets, "move_cartesian", target=approach) is None
     assert _kmr_step(evidence, targets, "move_cartesian", target=grasp, facts={"joint_positions": [0.5] * 7}) is None
     assert evidence["snapshot"]["joint_positions"] == [0.5] * 7
     assert _kmr_step(evidence, targets, "grasp_part", part_name="P") is None
@@ -423,6 +426,31 @@ def test_a_kmr_release_follows_the_routes_calculated_for_it():
                      waypoints=calculated["withdraw_waypoints"]) is None
 
 
+def test_a_kmr_pick_comes_through_its_calculated_approach_route():
+    import json
+
+    from cais_spade_llm.recovery_framework import SCENE_PATH
+    from cais_spade_llm.recovery_framework.kmr_recovery import pick_targets, transport_pose
+
+    scene = json.loads(SCENE_PATH.read_text())
+    m1 = next(row for row in scene["machines"] if row["resource_id"] == "M1")
+    dock, fixture = m1["KMR_docking_pose"], m1["workholding_pose"]
+    base = [dock[0], dock[1], 0.0, 0.0, 0.0, math.sin(dock[5] / 2), math.cos(dock[5] / 2)]
+    tool = transport_pose(scene, base, [0.0, 0.0, 0.0, *_KMR_TOOL_DOWN])
+    part = [*fixture[:3], 0.0, 0.0, 0.0, 1.0]
+    calculated = pick_targets(scene, "KET4_Square_4mm", part, tool, base, location="M1")
+    evidence = {"inputs": {"scene": scene}, "snapshot": {"base_pose": base, "current_pose": tool},
+                "observed_parts": {"KET4_Square_4mm": {"current_pose": part}}}
+    targets = {}
+    assert calculated["approach_waypoints"]
+    assert _kmr_step(evidence, targets, "compute_pick_targets", facts={"calculated_targets": calculated}) is None
+    # A straight approach to a part behind the arm is the one that winds the arm back over itself in Gazebo.
+    assert "approach_waypoints" in _kmr_step(deepcopy(evidence), deepcopy(targets), "move_cartesian",
+                                             target=calculated["approach"])
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["approach"],
+                     waypoints=calculated["approach_waypoints"]) is None
+
+
 def test_a_kmr_release_comes_through_its_calculated_approach():
     evidence, targets, calculated = _kmr_place([-2.7, 1.35])
     assert _kmr_step(evidence, targets, "compute_place_targets", facts={"calculated_targets": calculated}) is None
@@ -453,6 +481,8 @@ def test_a_kmr_lift_follows_the_route_calculated_for_it():
                               location=None)
     assert calculated["lift"] == calculated["retreat"] and calculated["lift_waypoints"]
     assert _kmr_step(evidence, targets, "compute_pick_targets", facts={"calculated_targets": calculated}) is None
+    assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["approach"],
+                     waypoints=calculated["approach_waypoints"]) is None
     assert _kmr_step(evidence, targets, "move_cartesian", target=calculated["target"]) is None
     assert _kmr_step(evidence, targets, "grasp_part", part_name="P") is None
 

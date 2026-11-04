@@ -68,7 +68,7 @@ def _motion_refusal(evidence: dict, targets: dict, primitive: str, waypoints: li
     if not _same_pose(pose[:3], calculated[name][:3]):
         return None
     del targets["pending_move"]
-    route, wanted = waypoints or [], calculated[field]
+    route, wanted = waypoints or [], calculated.get(field) or []
     if len(route) == len(wanted) and all(
             len(have) == len(want) and _same_pose(have, want) for have, want in zip(route, wanted, strict=True)):
         return None
@@ -117,11 +117,15 @@ def advance_kmr_program(evidence: dict, targets: dict, *, task: dict, primitive:
     elif primitive == "move_to_named_pose":
         state["current_pose"] = deepcopy(facts["target"])
     if primitive in {"move_cartesian", "move_relative"} and "joint_positions" in facts:
-        state["joint_positions"] = deepcopy(facts["joint_positions"])
+        # The arm ends where its path leaves it, which may be another branch than the end-pose witness.
+        path = facts.get("path") or {}
+        state["joint_positions"] = deepcopy(path.get("final_joint_positions") or facts["joint_positions"])
     if primitive in _MOTIONS:
         return _motion_refusal(evidence, targets, primitive, params.get("waypoints"))
     if primitive == "compute_place_targets":
         targets["pending_move"] = ("approach", "transfer_waypoints", targets[primitive])
+    elif primitive == "compute_pick_targets":
+        targets["pending_move"] = ("approach", "approach_waypoints", targets[primitive])
     if primitive not in {"grasp_part", "release_part"}:
         return None
     calculated = targets.get("compute_pick_targets" if primitive == "grasp_part" else "compute_place_targets")

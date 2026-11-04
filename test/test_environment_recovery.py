@@ -272,6 +272,29 @@ def test_the_kmr_arm_reaches_from_where_the_base_now_stands():
     assert reach(evidence['snapshot']['base_pose'])['feasibility_status'] != 'FEASIBLE'
 
 
+
+
+def test_the_kmr_path_is_resolved_as_its_planner_resolves_it_and_refused_only_when_it_cannot_be_followed():
+    from cais_spade_llm.recovery_framework.kmr_recovery import check_kmr_primitive_capability
+    from cais_spade_llm.recovery_framework.recovery_observations import read_observations
+
+    observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
+                                         'capture_b7dea70c1db74e1e9e98849380c09655/observations.json'))
+    jid = observations['jids']['KMR']
+    evidence = deepcopy(observations['prepared_recovery_request']['recovery_resources'][jid]['resource_evidence'])
+    dock = [-4.7, 2.2, 0., 0., 0., .7071068, .7071068]
+
+    def check(params):
+        return check_kmr_primitive_capability(primitive='move_cartesian', params=params, task={'resource_jid': jid},
+            recovery_snapshot={'held_part': None, 'base_pose': dock}, resource_evidence=evidence)
+
+    reached = check({'target': [-4.13, 1.82, 1.155, 1., 0., 0., 0.]})
+    path = reached['evidence']['path']
+    assert reached['feasibility_status'] == 'FEASIBLE' and 'Cartesian path resolves' in reached['reason']
+    assert path['ik_samples'] > 1 and path['simulated_duration_s'] > 0 and len(path['final_joint_positions']) == 7
+    # A waypoint no arm configuration reaches cannot be followed, though the end pose itself can be reached.
+    refused = check({'target': [-4.13, 1.82, 1.155, 1., 0., 0., 0.], 'waypoints': [[-4.13, 3.5, 1.155, 1., 0., 0., 0.]]})
+    assert refused['feasibility_status'] == 'INFEASIBLE' and 'cannot follow the Cartesian path' in refused['reason']
 def test_an_empty_belt_keeps_its_movement_and_each_resource_keeps_the_shared_events_it_takes_part_in(owner_context):
     def descriptor(rid):
         owner = owner_for(owner_context, rid)
@@ -655,6 +678,10 @@ def test_uncalibrated_pickup_uses_recorded_owner_settings_and_exact_workholding(
     assert targets['target'][3:] == settings['pick_orientation_xyzw']
     assert targets['approach'][2] == targets['target'][2] + settings['approach_clearance_m']
     assert targets['seed'] == settings['ik_seed_configurations'][0]
+    # The workholding lies behind the arm at the dock, so the approach and the lift turn the arm about its mount,
+    # as a release there does; the lift first rises to its clearance above the part.
+    assert targets['approach_waypoints'] and len(targets['lift_waypoints']) > 1
+    assert targets['lift_waypoints'][0][:2] == targets['target'][:2]
     assert pickup_docking_pose(scene, location, 'KET4_Square_4mm') == [dock[0], dock[1], dock[5]]
     assert scene == original
     observed[0] += .1
