@@ -24,7 +24,8 @@ async def handle_validated_candidates(*, session: dict, prepared: dict, response
     check), each candidate the RA finds feasible is also checked by the CCA against every specification
     (Eq. 13), and the first candidate in the LLM's order that passes both is applied (Eq. 9). With
     ``single_pass_outline``, the reply is a whole outline instead (``_handle_single_pass_outline``). A
-    reply that code cannot read raises, and the draft records that error.
+    reply that proposes nothing code can read, such as one with neither candidates nor a decision, returns
+    to the LLM with what it holds and nothing is applied (``_unreadable_reply``).
 
     Args:
         session: Accepted planning state, updated with the chosen candidate.
@@ -54,7 +55,26 @@ async def handle_validated_candidates(*, session: dict, prepared: dict, response
         response = {key: value for key, value in response.items()
                     if key != "selected_candidate_index" and not (key == "candidate_events" and not value)}
         return await handle_outline_context(prepared=prepared, session=session, response=response, planner=planner)
+    events = response.get("candidate_events")
+    if not isinstance(events, list) or not events or not all(isinstance(row, dict) for row in events):
+        return _unreadable_reply(session, response, "no candidate_events and no decision need_context or recovery_complete")
     return await _apply_candidates(session, prepared, response, planner)
+
+
+def _unreadable_reply(session: dict, response: dict, missing: str) -> tuple[str, dict]:
+    """Return a reply that proposes nothing code can read to the LLM, stating what it holds.
+
+    A reply cut short or closed early, such as a JSON object that ends after ``plan``, is the LLM's to resend:
+    it costs a turn, like any refusal, and does not end the draft.
+    """
+    fields = ", ".join(sorted(str(key) for key in response)) or "no fields"
+    decision = f" (decision {response['decision']!r})" if response.get("decision") is not None else ""
+    reason = f"The reply as read has {fields}{decision}: {missing}, so nothing was applied"
+    findings = [{"phase": "outline", "constraint_code": "candidate_schema_violation", "reason": reason}]
+    session["outline_validation_findings"] = deepcopy(findings)
+    session["status"] = "paused_after_outline_turn"
+    return "need_revision", {"error": reason, "validation_findings": findings, "validation_contract_version": 2,
+                             "outline_diagnostic_bypass": True}
 
 
 async def check_outline(events: list[dict], session: dict, prepared: dict, planner: Any, *,
@@ -100,10 +120,9 @@ async def _handle_single_pass_outline(*, session: dict, prepared: dict, response
 
     The outline is accepted only whole. At its first refusal nothing is applied: the state stays where the
     outline started, and the refused outline and its findings go back to the LLM, which writes a new
-    complete outline. With every check off nothing refuses it, and it is applied as the LLM states it.
-
-    Raises:
-        ValueError: The reply is neither a context request nor a nonempty list of events without a decision.
+    complete outline. With every check off nothing refuses it, and it is applied as the LLM states it. A
+    reply that is neither a context request nor a nonempty list of events without a decision returns to the
+    LLM with what it holds (``_unreadable_reply``).
     """
     from .multi_turn_context import handle_outline_context
 
@@ -112,8 +131,9 @@ async def _handle_single_pass_outline(*, session: dict, prepared: dict, response
         response = {key: value for key, value in response.items() if not (key == "events" and not value)}
         return await handle_outline_context(prepared=prepared, session=session, response=response, planner=planner)
     events = response.get("events")
-    if response.get("decision") is not None or not isinstance(events, list) or not events:
-        raise ValueError("A single-pass reply is a context request, or a nonempty events list without a decision")
+    if (response.get("decision") is not None or not isinstance(events, list) or not events
+            or not all(isinstance(row, dict) for row in events)):
+        return _unreadable_reply(session, response, "no nonempty events list without a decision, and no decision need_context")
     result = await check_outline(events, session, prepared, planner, plan=response.get("plan", ""))
     index = result["refused_event_index"]
     refused = result["decision"] == "need_revision"

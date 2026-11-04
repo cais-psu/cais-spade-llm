@@ -243,11 +243,12 @@ def test_a_nonblocking_search_that_runs_out_is_unresolved_not_a_refusal(observat
 def test_an_unfinished_draft_did_not_finish_and_keeps_its_stop_cause(observations, tmp_path, monkeypatch):
     install_provider(monkeypatch, lambda prompt, schema: GROUNDED if schema.get("name") ==
                      "multi_turn_grounding_response" else {"plan": "Unreadable."})
-    draft = outline_draft.OutlineDraft(observations, [], root=tmp_path, single_pass_outline=True)
+    draft = outline_draft.OutlineDraft(observations, [], root=tmp_path, single_pass_outline=True, max_turns=3)
     asyncio.run(draft.generate())
     audit = outline_audit.audit_draft(draft.directory, observations, [], [])
     assert (audit["status"], audit["outcome"]) == ("audited", "did_not_finish")
-    assert audit["stop_cause"]["cause"] == "error"
+    # An unreadable reply returns to the LLM each turn, so the draft ends at its turn budget, not on an error.
+    assert audit["stop_cause"]["cause"] == "turn_budget"
 
 
 # The batch runner.

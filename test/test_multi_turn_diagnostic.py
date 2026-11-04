@@ -152,9 +152,14 @@ def test_nothing_checks_the_llm_reply_or_its_chosen_event(captured):
             response=response))[0]
 
     candidates = [event("noop", "machine", None, resource_state="loaded"), sequence()[0]]
-    # A reply code cannot read raises; the draft records the error.
-    with pytest.raises(KeyError):
-        propose({"plan": "Neither events nor a decision."})
+    # A reply that proposes nothing code can read, such as a JSON object closed after `plan`, returns to the
+    # LLM with what it holds; nothing is applied.
+    assert propose({"plan": "Neither events nor a decision."}) == "need_revision"
+    assert session["outline_validation_findings"] == [{
+        "phase": "outline", "constraint_code": "candidate_schema_violation",
+        "reason": "The reply as read has plan: no candidate_events and no decision need_context or recovery_complete, "
+                  "so nothing was applied"}]
+    assert not session.get("accepted_outline_prefix")
     # A repeat, a variable the resource does not declare and a stated params are applied as stated.
     for row in (candidates[0], candidates[0], event("slot", "machine", None, zone_1_part="KET4_Square_4mm"),
                 {**sequence()[0], "params": {"x": 1.0}}):

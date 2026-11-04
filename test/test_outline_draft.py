@@ -194,8 +194,8 @@ def test_draft_states_a_resource_s_declared_job_control(observations, tmp_path):
 
 @pytest.mark.parametrize("responses, expected_calls, status", [
     ([response(), DONE], 3, "draft"),
-    # Nothing checks a reply; one code cannot read ends the draft with its error.
-    ([{}, response(), DONE], 2, "draft_incomplete"),
+    # Nothing checks a reply; one that proposes nothing code can read returns to the LLM, and the draft goes on.
+    ([{}, response(), DONE], 4, "draft"),
     # A repeated lookup is answered, so only the turn budget ends the draft.
     ([{"plan": "Need facts", "decision": "need_context", "context_requests": ["/resources"]}] * 8, 6, "draft_incomplete"),
     ([json.JSONDecodeError("bad JSON", "?", 0), response()], 2, "draft_incomplete"),
@@ -702,13 +702,14 @@ def test_single_pass_nonblocking_refusal_names_the_end_of_the_outline(observatio
     {"plan": "Nothing to do.", "events": []},
     {"plan": "No events at all."},
 ])
-def test_single_pass_reply_code_cannot_read_ends_the_draft(observations, tmp_path, monkeypatch, reply):
+def test_single_pass_reply_code_cannot_read_returns_to_the_llm(observations, tmp_path, monkeypatch, reply):
     provider = scripted_provider(monkeypatch, [reply, single_pass_reply(("finish", "completed"))])
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path, single_pass_outline=True)
     asyncio.run(draft.generate())
-    assert provider.await_count == 2
-    assert draft.record["status"] == "draft_incomplete"
-    assert draft.record["stop_cause"]["cause"] == "error" and draft.record["stop_cause"]["exception"] == "ValueError"
+    # The reply comes back with what it holds; the next reply is a whole outline, and the draft finishes.
+    assert provider.await_count == 3
+    assert draft.record["status"] == "draft"
+    assert "candidate_schema_violation" in _outline_prompts(provider)[1] and "The reply as read has" in _outline_prompts(provider)[1]
 
 
 def test_single_pass_lookup_may_carry_an_empty_events_list(observations, tmp_path, monkeypatch):
@@ -720,13 +721,13 @@ def test_single_pass_lookup_may_carry_an_empty_events_list(observations, tmp_pat
 
 
 def test_an_error_after_lookups_still_records_them_and_the_budget(observations, tmp_path, monkeypatch):
-    # Lookups run inside one multi_turn call, so the reply that cannot be read raises in that same call.
-    provider = scripted_provider(monkeypatch, [LOOKUP, {"plan": "Done.", "decision": "recovery_complete"}])
+    # Lookups run inside one multi_turn call, so a reply that is not JSON raises in that same call.
+    provider = scripted_provider(monkeypatch, [LOOKUP, json.JSONDecodeError("bad JSON", "?", 0)])
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path, single_pass_outline=True, max_turns=80)
     asyncio.run(draft.generate())
     assert draft.record["status"] == "draft_incomplete" and provider.await_count == 3
     assert draft.record["retrievals"] == ["/resources/owner/snapshot"]
-    assert draft.record["stop_cause"] == {"cause": "error", "exception": "ValueError", "turn_index": 3, "max_turns": 80}
+    assert draft.record["stop_cause"] == {"cause": "error", "exception": "JSONDecodeError", "turn_index": 3, "max_turns": 80}
     assert draft.record["turn_decision_order"] == ["need_context"]
 
 
