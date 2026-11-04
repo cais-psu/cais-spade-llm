@@ -199,6 +199,10 @@ def test_the_hook_refuses_a_blocking_completion_and_the_prompt_shows_the_refusal
     assert finding["constraint_code"] == "cca_nonblocking"
     assert finding["reason"] == audit["cca_nonblocking"]["reasons"][0]
     assert cell.session["cca_nonblocking_checks"][-1]["nonblocking_status"] == "BLOCKING"
+    # Each refused completion is kept with the events it judged, for the prompts after the next one.
+    history = cell.session["completion_refusal_history"]
+    assert [(row["reason"], row["planned_events"]) for row in history] == [
+        (finding["reason"], len(cell.session.get("accepted_outline_prefix") or []))]
     # The next prompt shows the refusal as the CCA wrote it: what is blocked, never what it needs.
     assert _outline_feedback_for_prompt(finding, set())["reason"] == finding["reason"]
     with pytest.raises(ValueError, match="capture's runtime inputs"):

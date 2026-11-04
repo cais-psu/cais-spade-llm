@@ -766,6 +766,30 @@ def test_events_so_far_are_listed_with_the_reply_format_key_and_resource_names(c
     assert "resource" in reply_keys and "resource_jid" not in reply_keys
 
 
+def test_refusals_of_preferred_candidates_and_earlier_completions_reach_the_next_prompt(captured, tmp_path):
+    prepared = outline_draft.OutlineDraft(captured, [], root=tmp_path / "drafts").prepared
+    session = multi_turn.build_multi_turn_session_seed(prepared)
+    session["current_phase"] = "outline"
+    _apply(sequence()[:1], session, prepared)
+    session["outline_validation_findings"] = [{
+        "phase": "outline", "constraint_code": "ra_feasibility", "validation_category": "RA", "resource_jid": "arm",
+        "part_name": "RGOCG4-50_Round_4mm", "event_name": "place_on_belt", "outline_id": "C1", "task_id": "C1",
+        "candidate_index": 0, "reason": "the belt is full", "applied_instead": "set_down_on_tray"}]
+    session["completion_refusal_history"] = [{"turn_index": 3, "planned_events": 1, "reason": "M2 cannot carry on"}]
+    prompt = multi_turn._build_phase_prompt(prepared, session)[1]
+    feedback = prompt.split("\nValidation Feedback\n", 1)[1]
+    # The applied event is named, and each refusal names its own candidate.
+    assert feedback.startswith("These candidates were refused, and set_down_on_tray, listed after them, was applied.\n")
+    assert "event_name=place_on_belt | constraint_code=ra_feasibility | reason=the belt is full" in feedback
+    # An earlier refused completion stays in view after other feedback replaced it.
+    assert ("Earlier Refused Completions\n- after the first 1 recovery events: recovery_complete was refused "
+            "[CCA/cca_nonblocking]: M2 cannot carry on") in prompt
+    # The latest refusal is the Validation Feedback itself, so it is not listed twice.
+    session["outline_validation_findings"] = [{"phase": "outline", "decision": "recovery_complete",
+                                               "constraint_code": "cca_nonblocking", "reason": "M2 cannot carry on"}]
+    assert "Earlier Refused Completions" not in multi_turn._build_phase_prompt(prepared, session)[1]
+
+
 def test_a_lookup_domain_names_a_resource_listed_by_jid_and_by_name_once(captured):
     prepared, _ = outline_draft._inputs(captured)
     # The arm's part locations list the M2 station by name and the machine M2 itself by JID.
@@ -922,6 +946,12 @@ def test_a_machine_keeps_each_job_by_its_part_so_a_paused_one_stays_in_view():
     multi_turn_diagnostic._project_machine_jobs(
         {"resource_jid": "res-mill", "part_name": "peg", "expected_end_state": {"current_process": None}}, session, prepared)
     assert [job["status"] for job in multi_turn_diagnostic.machine_jobs("res-mill", session, prepared)] == ["paused", "running"]
+    # A job its part's record shows finished is not listed as open; one recorded completed stays as recorded.
+    session["symbolic_parts"]["peg"]["processCompleted"] = [{"process": "trim", "result": "square"}]
+    assert facts._resource_row("res-mill", prepared, session, names).endswith("jobs: blank trim → square paused")
+    multi_turn_diagnostic.machine_jobs("res-mill", session, prepared)[1]["status"] = "completed"
+    assert facts._resource_row("res-mill", prepared, session, names).endswith(
+        "jobs: blank trim → square paused, peg trim → square completed")
 
 
 def test_a_stated_new_job_names_its_machine_by_resource_id_as_the_job_guards_read_it():

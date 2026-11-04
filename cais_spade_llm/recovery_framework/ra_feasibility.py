@@ -747,26 +747,29 @@ class _Check:
             return []
         return free_base_poses(self.cell.floor, footprint, start[:2], around[:2], docks=self.docks())
 
-    def event_bases(self, around: list[float]) -> list[list[float]]:
-        """Return the bases the event leaves a mobile resource to work from.
+    def event_bases(self, around: list[float]) -> tuple[list[list[float]], str]:
+        """Return the bases the event leaves a mobile resource to work from and, when there is none, why.
 
         A stated pose is that base, and a named place is its dock. Only where the event leaves the resource at no
         named place is any free base open: Eq. 12 asks for one, and the LLM never writes the base's parameters.
         """
         stated = self.end.get("pose")
         if isinstance(stated, dict):
-            return [[stated["x"], stated["y"], stated.get("yaw", 0.0)]] if self.base_fits(stated) else []
+            if self.base_fits(stated):
+                return [[stated["x"], stated["y"], stated.get("yaw", 0.0)]], ""
+            return [], f"the stated pose is no free, connected base pose for {self.rid}"
         if "resource_location" in self.end:
             location = self.end["resource_location"]
         else:
             known, pose = self.value(self.jid, "pose")
             if known and isinstance(pose, dict) and all(isinstance(pose.get(axis), (int, float)) for axis in ("x", "y", "yaw")):
-                return [[pose["x"], pose["y"], pose["yaw"]]]
+                return [[pose["x"], pose["y"], pose["yaw"]]], ""
             location = self.value(self.jid, "resource_location")[1]
         if isinstance(location, str):
             dock = self.dock_at(location)
-            return [dock] if dock else []
-        return self.base_candidates(around)
+            return ([dock], "") if dock else ([], f"{location} has no dock for {self.rid}")
+        bases = self.base_candidates(around)
+        return bases, "" if bases else f"no free, connected base pose for {self.rid}"
 
     def base_fits(self, pose: Any) -> bool:
         from cais_spade_llm.resources.kinematic_reach import free_base_poses
@@ -860,9 +863,9 @@ class _Check:
                     return checked
                 results.append(checked)
             return results[-1]
-        bases = self.event_bases(point)
+        bases, missing = self.event_bases(point)
         if not bases:
-            return {"status": NEEDS_CONTEXT, "reason": f"no free, connected base pose for {self.rid} near {what}"}
+            return {"status": NEEDS_CONTEXT, "reason": f"{missing} near {what}"}
         from cais_spade_llm.recovery_framework.kmr_recovery import RELEASE_SHIFTS_M
 
         heights = self.transfer_heights(transfer, place, point)

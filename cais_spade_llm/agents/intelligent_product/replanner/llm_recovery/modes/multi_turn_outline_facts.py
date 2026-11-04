@@ -825,8 +825,9 @@ def _resource_row(jid: str, prepared: dict, session: dict, names: dict[str, str]
     elif "pose" in session.get("diagnostic_unknown_owner_fields", {}).get(jid, []):
         items.append(f"pose {NOT_STATED}")
 
-    # Each job by its part, so a paused job stays in view while another part is processed.
-    if jobs := machine_jobs(jid, session, prepared):
+    # Each job by its part, so a paused job stays in view while another part is processed. A job its part's
+    # planned record shows finished is no longer open, so it is not listed as interrupted or running.
+    if jobs := [job for job in machine_jobs(jid, session, prepared) if not _finished_by_part_record(job, session)]:
         items.append("jobs: " + ", ".join(
             f"{job['part_name']} "
             + (_process_text({"process": job["process"], "result": job.get("result")}, _value_text(job.get("status")), names)
@@ -844,6 +845,13 @@ def _resource_row(jid: str, prepared: dict, session: dict, names: dict[str, str]
         status.append("unavailable")
     head = f"{names.get(jid, jid)} ({entry.get('resource_type') or 'resource'})" + ("  " + ", ".join(status) if status else "")
     return head + ("; " + "; ".join(items) if items else "")
+
+
+def _finished_by_part_record(job: dict, session: dict) -> bool:
+    """Return whether the part's planned processCompleted holds a job its machine lists as not completed."""
+    done = {key: job[key] for key in ("process", "result") if job.get(key) is not None}
+    completed = session.get("symbolic_parts", {}).get(job["part_name"], {}).get("processCompleted") or []
+    return job.get("status") != "completed" and bool(done) and done in completed
 
 
 def _part_text(name: str, prepared: dict, session: dict, names: dict[str, str]) -> str:

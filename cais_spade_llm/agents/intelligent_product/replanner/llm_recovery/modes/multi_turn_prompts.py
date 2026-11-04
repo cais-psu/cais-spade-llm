@@ -1466,6 +1466,9 @@ def _render_des_event_diagnostic(
     reason = str(finding.get("reason") or "Candidate was rejected.").strip()
     label = _candidate_event_label(task=task, finding=finding)
     fields = [f"candidate_event={label}"] if label else []
+    # Candidates may share an outline_id, so the event's own name tells their findings apart.
+    if event_name := str(finding.get("event_name") or "").strip():
+        fields.append(f"event_name={event_name}")
     fields += [f"constraint_code={constraint_code}", f"reason={reason}"]
     evidence = dict(finding.get("evidence") or {})
     state_evidence = "" if evidence else _finding_state_evidence_text(
@@ -2632,6 +2635,18 @@ def _primitive_escalation_diagnostics_summary(rows: list[dict[str, Any]]) -> str
         elif reason:
             lines.append(f"- {label}: {reason}")
     return "\n".join(lines) if lines else "(none)"
+
+
+def _earlier_completion_refusals(session_state: dict[str, Any], findings: list[dict[str, Any]]) -> list[str]:
+    """List every completion the CCA refused before, except the one Validation Feedback shows now."""
+    history = list(session_state.get("completion_refusal_history") or [])
+    if history and any(row.get("constraint_code") == "cca_nonblocking" for row in findings):
+        history = history[:-1]
+    if not history:
+        return []
+    return ["", "Earlier Refused Completions", *(
+        f"- after the first {row['planned_events']} recovery events: recovery_complete was refused "
+        f"[CCA/cca_nonblocking]: {row['reason']}" for row in history)]
 
 
 def _top_validation_feedback_section(
@@ -3849,7 +3864,7 @@ def _outline_feedback_for_prompt(
         "candidate_source", "valid", "event_name", "selection_constraint_codes",
         "cleared_recovery_obligation_ids", "open_recovery_obligation_ids_after",
         "nondominated_candidate_ids", "selection_revision_count", "selection_revision_limit",
-        "feasibility_status", "validation_status",
+        "feasibility_status", "validation_status", "applied_instead",
     }}
     if row.get("candidate_source") == "robot_task_program":
         result.pop("event_name", None)
@@ -4701,13 +4716,17 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
                      "Resources and Parts already include these events. Do not propose them again."]
     if single_pass and session_state.get("single_pass_refused_outline"):
         sections += _refused_outline_section(session_state["single_pass_refused_outline"])
-    sections += _top_validation_feedback_section(
-        summary=_outline_immediate_validation_feedback_summary(
-            outline_validation_findings=list(session_state.get("outline_validation_findings") or []),
-            candidate_rejection_feedback=list(session_state.get("candidate_rejection_feedback") or []),
-            primitive_escalation_diagnostics=list(session_state.get("primitive_escalation_diagnostics") or []),
-            feedback_render_style=_feedback_render_style_token(session_state)),
-        label="Validation Feedback")
+    findings = list(session_state.get("outline_validation_findings") or [])
+    feedback = _outline_immediate_validation_feedback_summary(
+        outline_validation_findings=findings,
+        candidate_rejection_feedback=list(session_state.get("candidate_rejection_feedback") or []),
+        primitive_escalation_diagnostics=list(session_state.get("primitive_escalation_diagnostics") or []),
+        feedback_render_style=_feedback_render_style_token(session_state))
+    applied = next((row["applied_instead"] for row in findings if row.get("applied_instead")), None)
+    if applied and feedback != "(none)":
+        feedback = f"These candidates were refused, and {applied}, listed after them, was applied.\n{feedback}"
+    sections += _top_validation_feedback_section(summary=feedback, label="Validation Feedback")
+    sections += _earlier_completion_refusals(session_state, findings)
     sections += [
         "", "Resources", f"{recorded} Every resource is listed the same way: its state, then the capabilities it "
         "declares (reachable locations, where it places parts, workspace bounds, positions it moves to, processes it "

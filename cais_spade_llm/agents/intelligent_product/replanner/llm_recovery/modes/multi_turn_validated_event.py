@@ -151,6 +151,11 @@ def _declare_complete(session: dict, prepared: dict, response: dict, planner: An
                                                                  **deepcopy(check)})
         if check["nonblocking_status"] == cca_nonblocking.BLOCKING:
             findings = cca_nonblocking.refusal_findings(check)
+            # Every refused completion stays in view, with the events it judged, not only the latest.
+            session.setdefault("completion_refusal_history", []).append({
+                "turn_index": session.get("turn_index"),
+                "planned_events": len(session.get("accepted_outline_prefix") or []),
+                "reason": findings[0]["reason"]})
             session["outline_validation_findings"] = deepcopy(findings)
             session["status"] = "paused_after_outline_turn"
             return "need_revision", {"decision": "recovery_complete", "cca_nonblocking": check,
@@ -182,7 +187,9 @@ async def _apply_candidates(session: dict, prepared: dict, response: dict, plann
                                      "validation_stages": _validation_stages(checks, safety),
                                      "validation_findings": findings, "validation_contract_version": 2,
                                      "outline_diagnostic_bypass": True}
-        session["outline_validation_findings"] = []
+        refused = [row for row in checks if row["feasibility_status"] != ra_feasibility.FEASIBLE]
+        session["outline_validation_findings"] = _refused_before(
+            events, choice, ra_feasibility.refusal_findings(events, refused) + cca_safety.refusal_findings(events, safety))
     elif session.get("check_ra_feasibility") is True:
         from cais_spade_llm.recovery_framework import ra_feasibility
 
@@ -201,7 +208,9 @@ async def _apply_candidates(session: dict, prepared: dict, response: dict, plann
             return "need_revision", {"candidate_events": deepcopy(events), "llm_selected_candidate_index": llm_choice,
                                      "ra_feasibility": checks, "validation_findings": findings,
                                      "validation_contract_version": 2, "outline_diagnostic_bypass": True}
-        session["outline_validation_findings"] = []
+        refused = [row for row in checks if row["feasibility_status"] != ra_feasibility.FEASIBLE]
+        session["outline_validation_findings"] = _refused_before(events, choice,
+                                                                 ra_feasibility.refusal_findings(events, refused))
     decision, audit = await handle_event(session=session, prepared=prepared,
         response={"plan": response["plan"], "next_transition": deepcopy(events[choice])}, planner=planner)
     audit.update(candidate_events=deepcopy(events), selected_candidate_index=choice, llm_selected_candidate_index=llm_choice,
@@ -213,6 +222,16 @@ async def _apply_candidates(session: dict, prepared: dict, response: dict, plann
         audit["cca_safety"] = [cca_safety.recorded(row) for row in safety]
         audit["validation_stages"] = _validation_stages(checks, safety)
     return decision, audit
+
+
+def _refused_before(events: list[dict], choice: int, findings: list[dict]) -> list[dict]:
+    """Mark the refusals of the candidates ranked above the applied one with the event that was applied.
+
+    The first candidate in the LLM's order that every check passes is applied (R_neural ∩ R_feasible). The
+    facts that refused the candidates it preferred still go back to it, so a later turn can state them.
+    """
+    applied = events[choice].get("event_name")
+    return [{**finding, "applied_instead": applied} for finding in findings]
 
 
 def _check_feasible_and_safe(events: list[dict], llm_choice: int, session: dict, prepared: dict,

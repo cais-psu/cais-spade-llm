@@ -178,7 +178,10 @@ two passing outlines has a value written by code; both load for composition with
   `/home/jongh/recovery_archives/20261103_wrong_code_outline_run/` and removed (receipt
   `recapture_v2_20261015/wrong_code_outline_run_20261103_deletion_list.json`). Then `thought` was renamed `plan` in the
   outline and composition prompts and response schemas, because the provider's `reasoning_extraction` refusal had stopped two
-  runs (user go). Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
+  runs (user go). The rerun from `a3f3418` (19:06–19:42, no provider refusals in 128 calls): Part slippage `draft_b84a29fb…`
+  5 events, Conveyor `draft_01090eb6…` 7 events, ur5e-1 `draft_6415f806…` 12 events, all passed and in `outline_drafts`;
+  Machining did not finish twice at the 40-turn budget (`draft_cf0e496b…` 34 events, `draft_3c71ddb2…` 26 events, every
+  declared completion BLOCKING). Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
   or also merging picks with places) is decided after that; compositions on a separate go. Open before composition: event
   lookups on one line, the two target contracts, the `detect_parts` publish key.
 - Earlier (November 2, 23:30): in `draft_compositions`, Part slippage `composition_ae42057d…` on `6cdab5fd`,
@@ -2707,6 +2710,8 @@ read this first).**
   does not declare, so this is the RA's own result, not a PA form check.
 - Decision 2, fallback: kept. The first feasible candidate in the LLM's order is applied (R_neural ∩ R_feasible);
   the LLM is not told its pick was refused. Only when every candidate fails do the facts return as feedback.
+  Changed November 3, evening (user approved): the applied candidate stays the first feasible one, but the
+  refusals of the candidates ranked above it now return as feedback, and refused completions stay listed.
 - Decision 3: NEEDS_CONTEXT refuses like INFEASIBLE. Every known limit that answers NEEDS_CONTEXT now refuses.
 - Decision 4: the `approached_part` name skip (`_BOOKKEEPING`) is removed. Its part-name domain already makes it a
   place condition; a shadow replay of the three drafts that state it gives the same verdicts.

@@ -573,6 +573,9 @@ def test_the_hook_applies_the_first_feasible_candidate_and_returns_facts_when_no
     assert (audit["selected_candidate_index"], audit["llm_selected_candidate_index"]) == (1, 0)
     assert [row["feasibility_status"] for row in audit["ra_feasibility"]] == ["INFEASIBLE", "FEASIBLE"]
     assert session["ra_feasibility_checks"][-1]["applied_candidate_index"] == 1
+    # The refusal of the candidate the LLM preferred goes back to it with the event that was applied.
+    assert [(row["event_name"], row["applied_instead"], row["constraint_code"])
+            for row in session["outline_validation_findings"]] == [("half_open", "release_into_zone_1", "ra_feasibility")]
 
     response = {"plan": "t", "candidate_events": [refused], "selected_candidate_index": 0}
     decision, audit = asyncio.run(handle_validated_candidates(
@@ -1108,12 +1111,17 @@ def test_a_mobile_base_works_from_the_event_s_pose_or_place_and_a_free_base_only
     def check(end):
         return _Check(_event(KMR, end, part="P1"), session, {}, kmr_cell)
 
-    assert check({"resource_location": "M2"}).event_bases(tray) == [dock]
-    assert check({"resource_location": "Conveyor"}).event_bases(tray) == []
+    assert check({"resource_location": "M2"}).event_bases(tray) == ([dock], "")
+    assert check({"resource_location": "Conveyor"}).event_bases(tray) == ([], "Conveyor has no dock for KMR")
     stated = {"x": -3.3, "y": 1.35, "yaw": 1.5707963267948966}
-    assert check({"pose": stated}).event_bases(tray) == [[stated["x"], stated["y"], stated["yaw"]]]
+    assert check({"pose": stated}).event_bases(tray) == ([[stated["x"], stated["y"], stated["yaw"]]], "")
     # 5 cm closer to the Conveyor the base clears its box, and the base controller, which pads the footprint, refuses it.
-    assert check({"pose": {**stated, "y": 1.3}}).event_bases(tray) == []
+    # No search runs then, so the refusal names the stated pose, not a missing free base.
+    assert check({"pose": {**stated, "y": 1.3}}).event_bases(tray) == (
+        [], "the stated pose is no free, connected base pose for KMR")
+    unfit = check({"held_part": None, "pose": {**stated, "y": 1.3}}).reach_area(
+        {"frame": "world", "bounds": [[-2.62, -2.58], [1.08, 1.12], [1.0, 1.04]], "capacity": 1}, "the tray")
+    assert unfit == {"status": "NEEDS_CONTEXT", "reason": "the stated pose is no free, connected base pose for KMR near the tray"}
     # Left out, the location stays, so the base does: the M2 dock does not reach the tray, and the refusal says so.
     session["symbolic_resources"][KMR]["resource_location"] = "M2"
     area = {"frame": "world", "bounds": [[-2.62, -2.58], [1.08, 1.12], [1.0, 1.04]], "capacity": 1}

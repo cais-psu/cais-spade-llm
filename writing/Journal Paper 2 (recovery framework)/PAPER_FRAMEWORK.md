@@ -120,8 +120,10 @@ name the section or equation it implements. If it maps to none, ask the user fir
     leaves it at no named place opens the search for a free base: that base is a parameter $\theta$ of Eq. 12, which
     the RA finds and the LLM never writes (user, October 31).
   - Candidates are checked in the LLM's order and the first feasible one is applied
-    ($R_{\text{neural}}\cap R_{\text{feasible}}$). Facts return as feedback only when every candidate
-    fails.
+    ($R_{\text{neural}}\cap R_{\text{feasible}}$). The facts that refused the candidates ranked above it
+    return with it as feedback, and every refused completion stays in view (user, November 3, evening;
+    before, facts returned only when every candidate failed, and only the latest refusal was shown). This
+    needs a sentence in the paper.
   - An unresolved search (NEEDS_CONTEXT) is a rejection, like INFEASIBLE: a finite search does not
     prove a pose reachable. A name the model does not declare is rejected, because Algorithm 1 has
     nothing to derive from it.
