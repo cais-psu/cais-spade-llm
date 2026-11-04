@@ -187,7 +187,28 @@ two passing outlines has a value written by code; both load for composition with
   The other three were rerun from `d65a3de` (user go), all passed first try: Part slippage `draft_ae747ab2…` 5 events,
   Conveyor `draft_92540bfb…` 12 events (4–7 a loop: backward fallbacks applied after true refusals), ur5e-1 `draft_dda5d302…`
   10 events. The four `d65a3de` outlines are the appendix candidates; the `a3f3418` copies of Part slippage, Conveyor and ur5e-1
-  stay in `outline_drafts` until the user decides. Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
+  stay in `outline_drafts` until the user decides. Then (user go) the prompt states which candidate becomes the next
+  event (`fa88600`); every earlier outline run of the night was archived to
+  `/home/jongh/recovery_archives/20261103_outlines_before_protocol_rule/` and removed; all four rerun from `fa88600` passed:
+  Part slippage `draft_d37d89d9…` 5 events (on its retry; try 1 `draft_eb723cd9…` crashed on a malformed completion reply,
+  KeyError 'candidate_events'), Conveyor `draft_bda7b0f0…` 7, ur5e-1 `draft_9707a587…` 10 (5–6 two KMR repositions),
+  Machining `draft_a9d63a83…` 17 (15–16 unload and reload RGOCG4 after event 12 left M2 `completed`). These are the appendix
+  candidates. A reply with neither candidates nor a decision now returns to the model instead of ending the draft
+  (user go, commit after `fa88600`; the four outlines never sent one, so they stand). Reference copies for composition
+  (user: "remove odd events and just have the necessary events for all outlines for primitives"), labelled `hand_edit`,
+  every value the model's, script `/home/jongh/recovery_review_1030/handkit/trim_outlines.py`: ur5e-1 `draft_568e7a3a…`
+  9 events (KMR moves 5 and 6 joined), Machining `draft_f89b1d94…` 15 events (event 12 takes M2 `loaded` from 16; 15, 16
+  removed). Both pass the replay and the audit. Part slippage `draft_d37d89d9…` and Conveyor `draft_bda7b0f0…` need no
+  edit. Free hand check (user go "yes", no model call, `handkit/h_kmr4.py corrected` with `HAND_DETECT` and
+  `HAND_PICKCTX`, logs `handkit/logs/hand_final_*`): Conveyor 7/7 and ur5e-1 9/9 as written; Part slippage 5/5 and Machining
+  15/15 once the arms' declared routes are bound (ur5e-3 pick route at event 3; ur5e-1 place route at Machining event 4;
+  ur5e-2 route toward M2 at event 7 and toward the Conveyor at event 11), which the straight lines refuse near the base
+  axis. This shows only that the composition checks accept such programs. Paid compositions (user go, Opus 5.5 medium,
+  frozen `24de8e9`, once each), all complete and loading with their outlines: Part slippage `composition_801c676f…` 5/5
+  (14 calls, 186,026 tokens), Conveyor `composition_8c37b920…` 7/7 (17, 120,958), ur5e-1 `composition_81863263…` 9/9
+  (23, 201,299), Machining `composition_80d8e685…` 15/15 (38, 488,835); the model bound the declared arm routes itself.
+  Not executed in Gazebo; KMR drive paths still checked only at the end pose and floor connectivity.
+  Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
   or also merging picks with places) is decided after that; compositions on a separate go. Open before composition: event
   lookups on one line, the two target contracts, the `detect_parts` publish key.
 - Earlier (November 2, 23:30): in `draft_compositions`, Part slippage `composition_ae42057d…` on `6cdab5fd`,

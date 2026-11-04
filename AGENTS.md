@@ -45,6 +45,9 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   That evening the user had the four batches of a rerun that ran on October 31
   code removed; they are archived in
   `/home/jongh/recovery_archives/20261103_wrong_code_outline_run/`.
+  Later that night the user had every outline run from `a3f3418` and `d65a3de`
+  removed before rerunning on `fa88600`; they are archived in
+  `/home/jongh/recovery_archives/20261103_outlines_before_protocol_rule/`.
 - Protect active work and the current partial attempt still needed for debugging,
   including work owned by another chat or process. Remove abandoned attempts once
   their useful findings are recorded and their required dependencies are retained.
