@@ -190,7 +190,7 @@ def test_the_hook_refuses_a_blocking_completion_and_the_prompt_shows_the_refusal
     )
 
     _set(cell, "KMR", resource_state="positioned", resource_location=None)
-    declare = {"thought": "The failure is overcome.", "decision": "recovery_complete"}
+    declare = {"plan": "The failure is overcome.", "decision": "recovery_complete"}
     planner = SimpleNamespace(product_agent=SimpleNamespace(cca_capture=cell.capture))
     decision, audit = asyncio.run(handle_validated_candidates(
         session=cell.session, prepared=cell.prepared, response=deepcopy(declare), planner=planner))

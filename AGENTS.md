@@ -42,6 +42,9 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   Later that day the user had the remaining Opus 5.5 batches, outlines and
   compositions removed before a final Opus 5.5 rerun from one commit; they are
   archived in `/home/jongh/recovery_archives/20261103_opus55_results_before_final_rerun/`.
+  That evening the user had the four batches of a rerun that ran on October 31
+  code removed; they are archived in
+  `/home/jongh/recovery_archives/20261103_wrong_code_outline_run/`.
 - Protect active work and the current partial attempt still needed for debugging,
   including work owned by another chat or process. Remove abandoned attempts once
   their useful findings are recorded and their required dependencies are retained.

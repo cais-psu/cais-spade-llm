@@ -91,11 +91,11 @@ def test_real_multi_turn_retrieval_and_six_events_bypass_all_admission(captured,
 
     forbidden = Mock(side_effect=AssertionError("Diagnostic must not invoke validators or execution"))
     monkeypatch.setattr(primitive_composition, "start_composition_attempt", forbidden)
-    replies = [{"thought": "Use recorded facts.", "decision": "grounded", "observations": []},
-        {"thought": "Request facts.", "decision": "need_context",
+    replies = [{"plan": "Use recorded facts.", "decision": "grounded", "observations": []},
+        {"plan": "Request facts.", "decision": "need_context",
          "context_requests": ["/resources/machine/snapshot", "/safety_rules"]},
-        *[{"thought": "Propose one task-level event.", "candidate_events": [row]} for row in sequence()],
-        {"thought": "The failure is overcome.", "decision": "recovery_complete"}]
+        *[{"plan": "Propose one task-level event.", "candidate_events": [row]} for row in sequence()],
+        {"plan": "The failure is overcome.", "decision": "recovery_complete"}]
     provider = AsyncMock(side_effect=replies)
     monkeypatch.setattr(outline_draft.SavedRecoveryProduct, "ask_llm_structured", provider)
     execute = AsyncMock(wraps=multi_turn.execute_multi_turn_recovery)
@@ -130,7 +130,7 @@ def test_llm_choice_is_committed_and_candidates_stay_isolated(captured, reverse)
     before = deepcopy(prepared)
     status, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-        response={"thought": "Compare supplied alternatives.", "candidate_events": candidates}))
+        response={"plan": "Compare supplied alternatives.", "candidate_events": candidates}))
     assert status == "need_next_task"
     # The LLM lists its candidates most preferred first; with no check on, the first is applied.
     assert audit["llm_selected_candidate_index"] == 0
@@ -154,15 +154,15 @@ def test_nothing_checks_the_llm_reply_or_its_chosen_event(captured):
     candidates = [event("noop", "machine", None, resource_state="loaded"), sequence()[0]]
     # A reply code cannot read raises; the draft records the error.
     with pytest.raises(KeyError):
-        propose({"thought": "Neither events nor a decision."})
+        propose({"plan": "Neither events nor a decision."})
     # A repeat, a variable the resource does not declare and a stated params are applied as stated.
     for row in (candidates[0], candidates[0], event("slot", "machine", None, zone_1_part="KET4_Square_4mm"),
                 {**sequence()[0], "params": {"x": 1.0}}):
-        assert propose({"thought": "Choose it.", "candidate_events": [row]}) == "need_next_task"
+        assert propose({"plan": "Choose it.", "candidate_events": [row]}) == "need_next_task"
     assert [row["event_name"] for row in session["accepted_outline_prefix"]] == ["noop", "noop", "slot", "pause"]
     assert session["accepted_outline_prefix"][2]["expected_end_state"] == {"zone_1_part": "KET4_Square_4mm"}
     # Recovery is complete when the LLM says so, whatever else the reply carries.
-    assert propose({"thought": "Done.", "decision": "recovery_complete", "candidate_events": candidates}) == "outline_ready"
+    assert propose({"plan": "Done.", "decision": "recovery_complete", "candidate_events": candidates}) == "outline_ready"
 
 
 def test_handoff_requires_replaced_work_and_restored_part(captured):
@@ -204,7 +204,7 @@ def test_a_position_is_a_pose_condition(captured):
     def propose(row):
         return asyncio.run(multi_turn_validated_event.handle_validated_candidates(
             session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-            response={"thought": "Explore a pose.", "candidate_events": [row]}))[0]
+            response={"plan": "Explore a pose.", "candidate_events": [row]}))[0]
 
     # A position is the pose condition; an event carries no params.
     assert propose({**drive, "params": {"x": -1.2}}) == "need_next_task"
@@ -377,7 +377,7 @@ def test_a_resumed_entry_runs_whichever_declared_variant_its_state_enables(share
 
 def test_prompt_states_recorded_facts_for_every_robot_without_tuned_targets(shared_cell, tmp_path, monkeypatch):
     record, specs = shared_cell
-    provider = AsyncMock(side_effect=[{"thought": "Use recorded facts.", "decision": "grounded", "observations": []},
+    provider = AsyncMock(side_effect=[{"plan": "Use recorded facts.", "decision": "grounded", "observations": []},
                                       RuntimeError("stop after the first outline prompt")])
     monkeypatch.setattr(outline_draft.SavedRecoveryProduct, "ask_llm_structured", provider)
     draft = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts")
@@ -449,7 +449,7 @@ def test_the_prompt_asks_for_a_plan_and_dates_the_failure_facts_once_events_exis
                 "already running keeps running until an event pauses or stops it.") in prompt
         assert ("Plan how to get from the current state to the Recovery Goal. Propose 2–5 different ways to do the next step "
                 "of that plan, most preferred first.") in prompt
-        assert "Give your plan in `thought` (two short sentences)" in prompt
+        assert "Give your plan in `plan` (two short sentences)" in prompt
     # Drafts offer neighbor_end_state right after the event's own end state.
     event_schema = multi_turn._get_response_schema("outline", session)["schema"]["$defs"]["outline_event"]
     names = list(event_schema["properties"])
@@ -466,7 +466,7 @@ def test_a_changed_resource_snapshot_leaves_out_its_failure_time_values(shared_c
     # Accepted through the real handler, which switches lookups to the projected rows.
     decision, _ = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-        response={"thought": "Set the peg down.", "candidate_events": [set_down], "selected_candidate_index": 0}))
+        response={"plan": "Set the peg down.", "candidate_events": [set_down], "selected_candidate_index": 0}))
     assert decision != "need_revision"
     changed = multi_turn_context.resolve_outline_context(prepared, session, "/resources/arm_a/snapshot")["value"]
     unchanged = multi_turn_context.resolve_outline_context(prepared, session, "/resources/arm_b/snapshot")["value"]
@@ -484,7 +484,7 @@ def test_handoff_status_is_recorded_for_review_and_never_told_to_the_llm(shared_
     assert "cannot take over" not in prompt and "Goal reached" not in prompt
     decision, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-        response={"thought": "The failure is overcome.", "decision": "recovery_complete"}))
+        response={"plan": "The failure is overcome.", "decision": "recovery_complete"}))
     # The LLM's declaration ends the recovery; why nominal work cannot take over is only recorded.
     assert decision == "outline_ready" and session["status"] == "ready_for_primitive_generation"
     handoff = audit["diagnostic_nominal_handoff"]
@@ -577,7 +577,7 @@ def _candidate_limit(value):
 
 def test_llm_always_chooses_a_candidate_in_a_draft(shared_cell, tmp_path, monkeypatch):
     record, specs = shared_cell
-    provider = AsyncMock(side_effect=[{"thought": "Use recorded facts.", "decision": "grounded", "observations": []},
+    provider = AsyncMock(side_effect=[{"plan": "Use recorded facts.", "decision": "grounded", "observations": []},
                                       RuntimeError("stop after the first outline prompt")])
     monkeypatch.setattr(outline_draft.SavedRecoveryProduct, "ask_llm_structured", provider)
     draft = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts")
@@ -725,7 +725,7 @@ def test_resource_names_round_trip_through_prompt_schema_and_response(captured):
     schema = facts.schema_with_resource_names({"properties": {"resource_jid": {"enum": ["machine"]}},
                                                "required": ["resource_jid"]}, names)
     assert schema == {"properties": {"resource": {"enum": ["M2"]}}, "required": ["resource"]}
-    response = facts.response_with_jids({"thought": "t", "context_requests": ["/resources/M2/snapshot"],
+    response = facts.response_with_jids({"plan": "t", "context_requests": ["/resources/M2/snapshot"],
         "candidate_events": [
             {"outline_id": "load", "resource": "M2", "part_name": "KET4_Square_4mm",
              "expected_end_state": {"part_location": "M2", "part_state": "loaded"}},
@@ -737,12 +737,12 @@ def test_resource_names_round_trip_through_prompt_schema_and_response(captured):
     # A station named like its resource stays a location; only taking hold maps to the JID.
     assert load["expected_end_state"]["part_location"] == "M2"
     assert hold["expected_end_state"]["part_location"] == "machine"
-    placed = facts.response_with_jids({"thought": "t", "candidate_events": [
+    placed = facts.response_with_jids({"plan": "t", "candidate_events": [
         {"outline_id": "unload", "resource": "M2", "part_name": "KET4_Square_4mm", "expected_end_state": {},
          "neighbor_end_state": {"M2": {"part_name": None}}}]}, prepared)
     assert placed["candidate_events"][0]["neighbor_end_state"] == {"machine": {"part_name": None}}
     # A single-pass outline's events map back the same way.
-    outline = facts.response_with_jids({"thought": "t", "events": [
+    outline = facts.response_with_jids({"plan": "t", "events": [
         {"outline_id": "unload", "resource": "M2", "part_name": "KET4_Square_4mm", "expected_end_state": {},
          "neighbor_end_state": {"M2": {"part_name": None}}}]}, prepared)
     assert outline["events"][0]["resource_jid"] == "machine" and "resource" not in outline["events"][0]
@@ -789,7 +789,7 @@ def test_a_lookup_reply_may_carry_an_empty_candidate_list_and_a_choice_index(cap
     session = multi_turn.build_multi_turn_session_seed(prepared)
     status, turn = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-        response={"thought": "Look up the machine first.", "decision": "need_context",
+        response={"plan": "Look up the machine first.", "decision": "need_context",
                   "context_requests": ["/resources/M2/snapshot"], "candidate_events": [],
                   "selected_candidate_index": 0}))
     assert status == "need_context" and turn["context_errors"] == []
@@ -800,13 +800,13 @@ def test_a_lookup_reply_may_carry_an_empty_candidate_list_and_a_choice_index(cap
 
 def test_lookup_errors_name_what_is_wrong():
     error = multi_turn_context._context_request_error
-    assert error({"thought": "t", "context_requests": []}) == "need_context requires context_requests with 1 to 8 references"
-    assert error({"thought": "t", "context_requests": ["/a"] * 9}) == "need_context allows at most 8 references; 9 were requested"
-    assert error({"thought": "t", "context_requests": ["parts"]}) == (
+    assert error({"plan": "t", "context_requests": []}) == "need_context requires context_requests with 1 to 8 references"
+    assert error({"plan": "t", "context_requests": ["/a"] * 9}) == "need_context allows at most 8 references; 9 were requested"
+    assert error({"plan": "t", "context_requests": ["parts"]}) == (
         "each context request must be a reference starting with /: parts")
-    assert error({"thought": "t", "context_requests": ["/parts"], "candidate_events": [{}]}) == (
+    assert error({"plan": "t", "context_requests": ["/parts"], "candidate_events": [{}]}) == (
         "need_context cannot also carry candidate_events; propose events in a later reply")
-    assert error({"thought": "t", "context_requests": ["/parts"]}) is None
+    assert error({"plan": "t", "context_requests": ["/parts"]}) is None
 
 
 def test_feedback_rows_name_their_event_and_carry_no_placeholders():
@@ -1083,12 +1083,12 @@ def test_nominal_events_take_over_once_the_interrupted_outcome_holds(shared_cell
     planner = SimpleNamespace(product_agent=SimpleNamespace())
     decision, _ = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=planner,
-        response={"thought": "Insert the gear.", "candidate_events": [recovery[3]]}))
+        response={"plan": "Insert the gear.", "candidate_events": [recovery[3]]}))
     # Reaching the outcome does not end the recovery; the LLM decides that.
     assert decision == "need_next_task"
     decision, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=planner,
-        response={"thought": "The failure is overcome.", "decision": "recovery_complete"}))
+        response={"plan": "The failure is overcome.", "decision": "recovery_complete"}))
     # The LLM never retakes the peg; the declared nominal moves reach the next nominal task.
     assert decision == "outline_ready" and session["status"] == "ready_for_primitive_generation"
     connection = audit["diagnostic_nominal_handoff"]["nominal_connection"]
@@ -1142,7 +1142,7 @@ def test_a_nominal_step_s_own_bookkeeping_guards_are_recorded_as_assumed(shared_
     _apply(_cell_recovery()[:4], session, prepared)
     decision, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-        response={"thought": "The failure is overcome.", "decision": "recovery_complete"}))
+        response={"plan": "The failure is overcome.", "decision": "recovery_complete"}))
     handoff = audit["diagnostic_nominal_handoff"]
     assert decision == "outline_ready" and handoff["complete"] is True
     assert [step["event_name"] for step in handoff["nominal_connection"]] == ["move_home", "pick_approach", "pick_grasp"]
@@ -1164,7 +1164,7 @@ def test_a_resource_still_reported_faulted_never_connects(shared_cell, tmp_path)
 
 def test_recovery_complete_ends_the_recovery_and_records_whether_nominal_work_can_take_over(shared_cell, tmp_path):
     planner = SimpleNamespace(product_agent=SimpleNamespace())
-    declare = {"thought": "The failure is overcome.", "decision": "recovery_complete"}
+    declare = {"plan": "The failure is overcome.", "decision": "recovery_complete"}
     prepared, session = _draft(_with_pick_events(_resume_only_cell(shared_cell)), tmp_path / "declared")
     prepared["llm_input"]["fault_event"]["detected_signals"] = [
         {"signal": "device_fault_report", "resource_id": "arm_b", "resource_state": "failed"}]
@@ -1191,7 +1191,7 @@ def test_recovery_complete_ends_the_recovery_and_records_whether_nominal_work_ca
 
 def test_nominal_work_may_redo_the_interrupted_task_once_its_part_is_at_a_declared_place(shared_cell, tmp_path):
     planner = SimpleNamespace(product_agent=SimpleNamespace())
-    declare = {"thought": "Nominal work can finish it.", "decision": "recovery_complete"}
+    declare = {"plan": "Nominal work can finish it.", "decision": "recovery_complete"}
     prepared, session = _draft(_with_pick_events(_resume_only_cell(shared_cell)), tmp_path / "loose")
     # The gear lies at no declared place, so no nominal pick can take it.
     decision, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
@@ -1273,7 +1273,7 @@ def test_custody_is_never_enforced_and_code_releases_no_part_the_event_keeps(sha
     take = event("take", "arm_a", "gear", resource_state="picked", held_part="gear", part_state="in_gripper",
                  part_location="arm_a")
     decision, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
-        session=session, prepared=prepared, planner=planner, response={"thought": "t", "candidate_events": [take]}))
+        session=session, prepared=prepared, planner=planner, response={"plan": "t", "candidate_events": [take]}))
     # Nothing judges the LLM's event: arm_a takes the gear while it still holds the peg, and no note is kept.
     assert decision == "need_next_task" and [row["event_name"] for row in session["accepted_outline_prefix"]] == ["take"]
     assert "custody_notes" not in json.dumps(audit)
@@ -1281,7 +1281,7 @@ def test_custody_is_never_enforced_and_code_releases_no_part_the_event_keeps(sha
     prepared, session = _draft(shared_cell, tmp_path / "released")
     set_down = event("set_down", "arm_a", "peg", resource_state="idle", part_state="ready", part_location="buffer")
     decision, _ = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
-        session=session, prepared=prepared, planner=planner, response={"thought": "t", "candidate_events": [set_down]}))
+        session=session, prepared=prepared, planner=planner, response={"plan": "t", "candidate_events": [set_down]}))
     assert decision == "need_next_task" and session["symbolic_resources"]["arm_a"]["held_part"] == "peg"
     # Each changed variable records who set it, and code sets none of them.
     changes = session["accepted_outline_prefix"][-1]["condition_changes"]
@@ -1304,7 +1304,7 @@ def test_a_resource_that_takes_a_part_holds_it_whatever_location_it_states(share
         # A take may give the part no location (live draft_df4f2479: the KMR took KET4 with part_location null).
         take = event("take", "arm_b", part, resource_state="picked", held_part=part, part_location=None)
         decision, _ = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
-            session=session, prepared=prepared, planner=planner, response={"thought": "t", "candidate_events": [take]}))
+            session=session, prepared=prepared, planner=planner, response={"plan": "t", "candidate_events": [take]}))
         assert decision == "need_next_task", directory
         part_row = session["symbolic_parts"][part]
         assert (part_row["part_holder_resource_jid"], part_row["current_holder_resource_jid"]) == ("arm_b", "arm_b")
@@ -1459,7 +1459,7 @@ def test_candidates_that_share_a_label_are_accepted_in_the_llm_s_order(captured)
     second = {**second, "outline_id": first["outline_id"]}
     status, _ = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-        response={"thought": "Two options under one label.", "candidate_events": [second, first]}))
+        response={"plan": "Two options under one label.", "candidate_events": [second, first]}))
     assert status == "need_next_task" and session["accepted_outline_prefix"][0]["event_name"] == second["event_name"]
 
 
@@ -1844,7 +1844,7 @@ def test_a_resource_lookup_states_current_values_and_what_events_left_unstated(t
     def accept(row):
         decision, _ = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
             session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-            response={"thought": "Next step.", "candidate_events": [row], "selected_candidate_index": 0}))
+            response={"plan": "Next step.", "candidate_events": [row], "selected_candidate_index": 0}))
         assert decision != "need_revision"
 
     # Recorded values; pose is the measured pose in its declared fields; part variables stay on the parts.
@@ -1873,7 +1873,7 @@ def test_a_snapshot_reads_not_stated_for_what_an_accepted_event_left_unstated(tm
     # Accepted through the real handler, which switches lookups to the projected rows.
     decision, _ = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-        response={"thought": "Set the peg down.", "candidate_events": [set_down], "selected_candidate_index": 0}))
+        response={"plan": "Set the peg down.", "candidate_events": [set_down], "selected_candidate_index": 0}))
     assert decision != "need_revision" and "buffer" in session["derived_resource_snapshots"]
     # A recovery event's unstated values stay as they were; only what is marked unknown reads "not stated".
     snapshot = multi_turn_context.resolve_outline_context(prepared, session, "/resources/buffer/snapshot")["value"]

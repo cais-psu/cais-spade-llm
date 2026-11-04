@@ -57,9 +57,9 @@ def test_single_attempt_disables_sdk_and_application_retries(tmp_path, monkeypat
 def test_a_reply_after_text_with_a_number_range_is_read_as_its_object():
     # A real reply: a sentence holding [0.971, 1.121], then the object, which the first bracket used to hide.
     reply = ('so a tool pose at z=1.121 (max of z_range [0.971, 1.121]) puts fingertips at z=0.903.\n\n```json\n'
-             '{"thought": "t", "decision": "need_context", "context_requests": ["/geometry"]}\n```')
+             '{"plan": "t", "decision": "need_context", "context_requests": ["/geometry"]}\n```')
     assert llm_agent._parse_structured_json_text(reply) == {
-        "thought": "t", "decision": "need_context", "context_requests": ["/geometry"]}
+        "plan": "t", "decision": "need_context", "context_requests": ["/geometry"]}
 
 
 _REQUEST = httpx.Request("POST", "https://api.example")
@@ -68,7 +68,7 @@ _REQUEST = httpx.Request("POST", "https://api.example")
 @pytest.mark.parametrize("failure", [openai.APIConnectionError(request=_REQUEST), httpx.ConnectError("no route")])
 @pytest.mark.parametrize("drops, sent, answered", [(1, 2, True), (2, 3, True), (3, 3, False)])
 def test_a_gpt_call_that_got_no_answer_is_tried_again_with_one_attempt(tmp_path, monkeypatch, failure, drops, sent, answered):
-    create = Mock(side_effect=[failure] * drops + [_response('{"thought": "t"}')])
+    create = Mock(side_effect=[failure] * drops + [_response('{"plan": "t"}')])
     limited = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     monkeypatch.setattr(llm_agent, "_client", SimpleNamespace(with_options=Mock(return_value=limited)))
     monkeypatch.setattr(llm_agent.time, "sleep", lambda _: None)
@@ -79,7 +79,7 @@ def test_a_gpt_call_that_got_no_answer_is_tried_again_with_one_attempt(tmp_path,
                 include_agent_instructions=False, max_tool_rounds=0, max_attempts=1)
 
     if answered:
-        assert asyncio.run(ask()) == {"thought": "t"}
+        assert asyncio.run(ask()) == {"plan": "t"}
     else:
         with pytest.raises(RuntimeError, match=type(failure).__name__):
             asyncio.run(ask())
@@ -125,7 +125,7 @@ def test_composition_records_retrieval_rejection_revision_and_cancellation(tmp_p
     steps = deepcopy(case["primitive_steps"])
     steps[1]["params"]["count"] = 3
     event = case["task"]
-    reply = {"thought": "Contract fixture", "outline_id": event["outline_id"], "resource_jid": event["resource_jid"]}
+    reply = {"plan": "Contract fixture", "outline_id": event["outline_id"], "resource_jid": event["resource_jid"]}
     replies = [{**reply, "decision": "primitive_steps_ready", "primitive_steps": list(reversed(steps))},
                {**reply, "decision": "need_context", "context_requests": ["/resources/owner/recovery_des_model"]},
                {**reply, "decision": "primitive_steps_ready", "primitive_steps": steps}]
@@ -169,7 +169,7 @@ def test_outline_schema_at_provider_boundary_accepts_retrieval(tmp_path, monkeyp
     )
 
     calls = []
-    reply = {"thought": "Read recorded part facts", "decision": "need_context", "context_requests": ["/parts"]}
+    reply = {"plan": "Read recorded part facts", "decision": "need_context", "context_requests": ["/parts"]}
     def create(**kwargs):
         calls.append(deepcopy(kwargs))
         response_format = kwargs["response_format"]["json_schema"]
@@ -210,7 +210,7 @@ def test_outline_provider_schema_keeps_declared_null_and_omission(
     end_state = {"job_state": "paused"}
     if include_active_job:
         end_state["active_job"] = None
-    reply = {"thought": "Recorded declaration fixture", "next_transition": {
+    reply = {"plan": "Recorded declaration fixture", "next_transition": {
         "outline_id": "local_fixture", "event_name": "pause_job", "resource_jid": jid,
         "part_name": part_name, "expected_end_state": end_state, "rationale": "Local schema check"}}
     original_reply = deepcopy(reply)
@@ -225,7 +225,7 @@ def test_outline_provider_schema_keeps_declared_null_and_omission(
         assert actual_schema["schema"]["type"] == "object"
         assert not {"anyOf", "oneOf", "allOf", "enum", "const", "not"} & actual_schema["schema"].keys()
         jsonschema.validate(reply, actual_schema["schema"])
-        jsonschema.validate({"thought": "Read recorded facts", "decision": "need_context",
+        jsonschema.validate({"plan": "Read recorded facts", "decision": "need_context",
                              "context_requests": [f"/resources/{jid}/state_variables"]}, actual_schema["schema"])
         return _response(json.dumps(reply))
 
@@ -247,7 +247,7 @@ def test_outline_schema_at_provider_boundary_accepts_explicit_candidate_markers(
         multi_turn_phase_response_schema,
     )
 
-    reply = {"thought": "Use recorded resource facts", "decision": None, "context_requests": [],
+    reply = {"plan": "Use recorded resource facts", "decision": None, "context_requests": [],
              "candidate_events": [{"outline_id": "recorded-1", "event_name": "recorded_event",
                                     "resource_jid": "recorded-resource", "rationale": "Recorded support",
                                     "expected_end_state": {"resource_state": "idle"}}]}
@@ -279,7 +279,7 @@ def test_candidate_markers_keep_candidate_validation_and_response_intact(monkeyp
     monkeypatch.setattr(multi_turn_outline_generation, "_handle_outline_incremental_candidates_validated", handler)
     session = {"outline_context_retrieval": True, "outline_mode": "incremental_candidates_validated",
                "recovery_selection_mode": "neurosymbolic"}
-    response = {"thought": "Use recorded facts", "candidate_events": [{"outline_id": "review"}], **markers}
+    response = {"plan": "Use recorded facts", "candidate_events": [{"outline_id": "review"}], **markers}
     before = deepcopy(response)
     asyncio.run(multi_turn_outline_generation._handle_outline_phase(
         session_state=session, prepared_recovery_request={}, planner=object(), parsed_response=response))
@@ -300,7 +300,7 @@ def test_invalid_candidate_markers_cannot_reach_candidate_validation(monkeypatch
     monkeypatch.setattr(multi_turn_outline_generation, "_handle_outline_incremental_candidates_validated", handler)
     session = {"outline_context_retrieval": True, "outline_mode": "incremental_candidates_validated",
                "recovery_selection_mode": "neurosymbolic"}
-    response = {"thought": "Use recorded facts", "candidate_events": [{"outline_id": "review"}], **markers}
+    response = {"plan": "Use recorded facts", "candidate_events": [{"outline_id": "review"}], **markers}
     decision, turn = asyncio.run(multi_turn_outline_generation._handle_outline_phase(
         session_state=session, prepared_recovery_request={}, planner=object(), parsed_response=response))
     assert decision == "need_revision" and turn["validation_findings"]
@@ -318,7 +318,7 @@ def test_actual_retrieval_cannot_include_candidate_fields(monkeypatch, candidate
     handler = AsyncMock(side_effect=AssertionError("Mixed response reached candidate validation"))
     monkeypatch.setattr(multi_turn_context, "resolve_outline_context", resolve)
     monkeypatch.setattr(multi_turn_outline_generation, "_handle_outline_incremental_candidates_validated", handler)
-    response = {"thought": "Read facts", "decision": "need_context", "context_requests": ["/parts"],
+    response = {"plan": "Read facts", "decision": "need_context", "context_requests": ["/parts"],
                 "candidate_events": candidates}
     session = {"outline_context_retrieval": True}
     _, turn = asyncio.run(multi_turn_outline_generation._handle_outline_phase(
@@ -445,12 +445,12 @@ def test_claude_model_gets_the_same_prompt_and_schema_as_a_hint_and_is_recorded(
     from cais_spade_llm.ui.components.recovery_turns import _response_choices
 
     calls = []
-    reply = {"thought": "Need facts", "decision": "need_context", "context_requests": ["/resources"]}
+    reply = {"plan": "Need facts", "decision": "need_context", "context_requests": ["/resources"]}
     client = _claude_client(_claude_message(json.dumps(reply)), calls)
     monkeypatch.setattr(llm_agent, "_claude_client", lambda: client)
     # Drafts borrow the method on an object that is not an LlmAgent (SavedRecoveryProduct).
     borrower = SimpleNamespace(model="claude-sonnet-5-5", reasoning_effort="medium", instructions="")
-    schema = {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}
+    schema = {"type": "object", "properties": {"plan": {"type": "string"}}, "required": ["plan"]}
     with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
         response = asyncio.run(llm_agent.LlmAgent.ask_llm_structured(borrower, "Read recorded facts",
             include_agent_instructions=False, response_format={"name": "outline", "schema": schema, "strict": False},
@@ -474,7 +474,7 @@ def test_claude_model_gets_the_same_prompt_and_schema_as_a_hint_and_is_recorded(
 
 def test_claude_prompt_is_split_before_its_first_changing_section_for_the_cache(monkeypatch, tmp_path):
     calls = []
-    client = _claude_client(_claude_message(json.dumps({"thought": "t"})), calls)
+    client = _claude_client(_claude_message(json.dumps({"plan": "t"})), calls)
     monkeypatch.setattr(llm_agent, "_claude_client", lambda: client)
     borrower = SimpleNamespace(model="claude-opus-4-7", reasoning_effort="medium", instructions="")
     prompt = "Task and Role\nPlan.\n\nKnowledge Base\n- /parts\n\nValidation Feedback\n- refused\n\nResources\nM2 idle"
@@ -494,7 +494,7 @@ def _dropping_claude_client(calls, failure, failures):
         def __enter__(self):
             if len(calls) <= failures:
                 raise failure
-            return SimpleNamespace(get_final_message=lambda: _claude_message(json.dumps({"thought": "t"})))
+            return SimpleNamespace(get_final_message=lambda: _claude_message(json.dumps({"plan": "t"})))
 
         def __exit__(self, *exc):
             return False
@@ -525,7 +525,7 @@ def test_a_claude_call_that_got_no_answer_is_tried_again_with_one_attempt(tmp_pa
                 response_format={"name": "outline", "schema": {}}, max_attempts=1))
 
     if answered:
-        assert ask() == {"thought": "t"}
+        assert ask() == {"plan": "t"}
     else:
         with pytest.raises(RuntimeError, match=type(failure).__name__):
             ask()
@@ -543,7 +543,7 @@ def test_more_application_attempts_are_kept_for_a_call_that_got_no_answer(tmp_pa
     borrower = SimpleNamespace(model="claude-opus-4-7", reasoning_effort="medium", instructions="")
     with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
         assert asyncio.run(llm_agent.LlmAgent.ask_llm_structured(borrower, "draft", include_agent_instructions=False,
-            response_format={"name": "outline", "schema": {}}, max_attempts=5)) == {"thought": "t"}
+            response_format={"name": "outline", "schema": {}}, max_attempts=5)) == {"plan": "t"}
     assert len(calls) == 5
 
 

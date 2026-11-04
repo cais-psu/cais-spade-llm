@@ -173,7 +173,12 @@ two passing outlines has a value written by code; both load for composition with
   rerun from one commit, every outline, composition and Experiments batch was archived to
   `/home/jongh/recovery_archives/20261103_opus55_results_before_final_rerun/` and removed (receipt
   `recapture_v2_20261015/opus55_results_before_final_rerun_20261103_deletion_list.json`); captures and legacy records stay.
-  Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
+  The first "final" rerun ran on October 31 code (`b8e57d6`): `wt_final` already existed, and the failed `git worktree add`
+  was hidden by a pipe. At the user's request its four batches and logs were archived to
+  `/home/jongh/recovery_archives/20261103_wrong_code_outline_run/` and removed (receipt
+  `recapture_v2_20261015/wrong_code_outline_run_20261103_deletion_list.json`). Then `thought` was renamed `plan` in the
+  outline and composition prompts and response schemas, because the provider's `reasoning_extraction` refusal had stopped two
+  runs (user go). Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
   or also merging picks with places) is decided after that; compositions on a separate go. Open before composition: event
   lookups on one line, the two target contracts, the `detect_parts` publish key.
 - Earlier (November 2, 23:30): in `draft_compositions`, Part slippage `composition_ae42057d…` on `6cdab5fd`,

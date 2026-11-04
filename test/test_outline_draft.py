@@ -20,9 +20,9 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes impo
 from cais_spade_llm.agents.shared_information.llm_request_records import RequestRecords
 
 
-GROUNDED = {"thought": "Use the retained facts.", "decision": "grounded", "observations": []}
+GROUNDED = {"plan": "Use the retained facts.", "decision": "grounded", "observations": []}
 # Only the LLM ends a draft, by declaring the recovery complete.
-DONE = {"thought": "The failure is overcome.", "decision": "recovery_complete"}
+DONE = {"plan": "The failure is overcome.", "decision": "recovery_complete"}
 
 
 def scripted_provider(monkeypatch, responses):
@@ -86,7 +86,7 @@ def observations(tmp_path):
 
 def response():
     # Drafts propose two to five ways to do the next step, most preferred first.
-    return {"thought": "A supplied test draft, not a generated recovery.",
+    return {"plan": "A supplied test draft, not a generated recovery.",
             "candidate_events": [{
                 "outline_id": "draft_step", "event_name": "Arbitrary task event", "resource": "M2",
                 "part_name": "KET4_Square_4mm", "expected_end_state": {"resource_state": "completed"},
@@ -102,7 +102,7 @@ def test_draft_retrieval_generation_and_reload_never_validate(observations, tmp_
     forbidden = Mock(side_effect=AssertionError("No admission, projection, or composition in draft generation"))
     monkeypatch.setattr(primitive_composition, "start_composition_attempt", forbidden)
     original = deepcopy(observations)
-    provider = scripted_provider(monkeypatch, [{"thought": "Need facts", "decision": "need_context",
+    provider = scripted_provider(monkeypatch, [{"plan": "Need facts", "decision": "need_context",
         "context_requests": ["/resources/owner/snapshot", "/safety_rules", "/parts/KET4_Square_4mm/observed_pose"]}, response(), DONE])
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path / "drafts")
     asyncio.run(draft.generate())
@@ -197,7 +197,7 @@ def test_draft_states_a_resource_s_declared_job_control(observations, tmp_path):
     # Nothing checks a reply; one code cannot read ends the draft with its error.
     ([{}, response(), DONE], 2, "draft_incomplete"),
     # A repeated lookup is answered, so only the turn budget ends the draft.
-    ([{"thought": "Need facts", "decision": "need_context", "context_requests": ["/resources"]}] * 8, 6, "draft_incomplete"),
+    ([{"plan": "Need facts", "decision": "need_context", "context_requests": ["/resources"]}] * 8, 6, "draft_incomplete"),
     ([json.JSONDecodeError("bad JSON", "?", 0), response()], 2, "draft_incomplete"),
 ])
 def test_draft_budget_and_formatting_failures(observations, tmp_path, monkeypatch, responses, expected_calls, status):
@@ -547,12 +547,12 @@ def test_claude_token_usage_reads_like_openai_usage():
     assert outline_draft._token_usage(openai) is openai
 
 
-LOOKUP = {"thought": "Need facts", "decision": "need_context", "context_requests": ["/resources/owner/snapshot"]}
+LOOKUP = {"plan": "Need facts", "decision": "need_context", "context_requests": ["/resources/owner/snapshot"]}
 
 
 def single_pass_reply(*steps):
     # A single-pass reply is the whole outline: every event, in order, and nothing to choose.
-    return {"thought": "A supplied test outline, not a generated recovery.", "events": [
+    return {"plan": "A supplied test outline, not a generated recovery.", "events": [
         {"outline_id": f"R{index}", "event_name": name, "resource": "M2", "part_name": "KET4_Square_4mm",
          "expected_end_state": {"resource_state": state}, "rationale": "Supplied test step."}
         for index, (name, state) in enumerate(steps, 1)]}
@@ -644,7 +644,7 @@ def test_single_pass_prompt_differs_from_the_incremental_one_only_in_its_reply_f
         ("\nCandidate Rules\n", "\nEvent Rules\n"),
         ("- One event per candidate, by one resource: ", "- Each event, by one resource: "),
         ("- When you judge that normal production can carry on its remaining work from the state your events leave, "
-         "return only `thought` and `decision: \"recovery_complete\"`; normal production then takes over.",
+         "return only `plan` and `decision: \"recovery_complete\"`; normal production then takes over.",
          "- End `events` where you judge that normal production can carry on its remaining work from the state your "
          "events leave; normal production then takes over."),
     ):
@@ -696,9 +696,9 @@ def test_single_pass_nonblocking_refusal_names_the_end_of_the_outline(observatio
 
 
 @pytest.mark.parametrize("reply", [
-    {"thought": "Done.", "decision": "recovery_complete"},
-    {"thought": "Nothing to do.", "events": []},
-    {"thought": "No events at all."},
+    {"plan": "Done.", "decision": "recovery_complete"},
+    {"plan": "Nothing to do.", "events": []},
+    {"plan": "No events at all."},
 ])
 def test_single_pass_reply_code_cannot_read_ends_the_draft(observations, tmp_path, monkeypatch, reply):
     provider = scripted_provider(monkeypatch, [reply, single_pass_reply(("finish", "completed"))])
@@ -719,7 +719,7 @@ def test_single_pass_lookup_may_carry_an_empty_events_list(observations, tmp_pat
 
 def test_an_error_after_lookups_still_records_them_and_the_budget(observations, tmp_path, monkeypatch):
     # Lookups run inside one multi_turn call, so the reply that cannot be read raises in that same call.
-    provider = scripted_provider(monkeypatch, [LOOKUP, {"thought": "Done.", "decision": "recovery_complete"}])
+    provider = scripted_provider(monkeypatch, [LOOKUP, {"plan": "Done.", "decision": "recovery_complete"}])
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path, single_pass_outline=True, max_turns=80)
     asyncio.run(draft.generate())
     assert draft.record["status"] == "draft_incomplete" and provider.await_count == 3

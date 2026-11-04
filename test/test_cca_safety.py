@@ -178,7 +178,7 @@ def _run(events, session, choice=0):
     )
 
     planner = SimpleNamespace(product_agent=SimpleNamespace(recorded_cell=object(), cca_safety_capture={}))
-    response = {"thought": "t", "candidate_events": [{"event_name": name, "resource_jid": UR} for name in events],
+    response = {"plan": "t", "candidate_events": [{"event_name": name, "resource_jid": UR} for name in events],
                 "selected_candidate_index": choice}
     return asyncio.run(handle_validated_candidates(session=session, prepared={"offline_recovery": True},
                                                    response=deepcopy(response), planner=planner))

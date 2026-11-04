@@ -141,7 +141,7 @@ def test_outline_response_schema_accepts_event_for_open_declared_field():
         type=["string", "null"], domain_complete=False)
     event["expected_end_state"] = {"held_part": "gear_small"}
     schema = _get_response_schema("outline", session)["schema"]
-    Draft202012Validator(schema).validate({"thought": "Recorded declaration fixture", "next_transition": event})
+    Draft202012Validator(schema).validate({"plan": "Recorded declaration fixture", "next_transition": event})
 
 
 @pytest.mark.parametrize("outline_mode", ["incremental", "incremental_candidates_validated", "single_pass"])

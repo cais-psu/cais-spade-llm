@@ -566,7 +566,7 @@ def test_the_hook_applies_the_first_feasible_candidate_and_returns_facts_when_no
     planner = SimpleNamespace(product_agent=SimpleNamespace(recorded_cell=cell))
     refused = _event(UR, {"gripper_state": "half"})
     refused["event_name"] = "half_open"
-    response = {"thought": "t", "candidate_events": [refused, _release()], "selected_candidate_index": 0}
+    response = {"plan": "t", "candidate_events": [refused, _release()], "selected_candidate_index": 0}
     decision, audit = asyncio.run(handle_validated_candidates(
         session=session, prepared={"offline_recovery": True}, response=deepcopy(response), planner=planner))
     assert (decision, applied) == ("need_next_task", ["release_into_zone_1"])
@@ -574,7 +574,7 @@ def test_the_hook_applies_the_first_feasible_candidate_and_returns_facts_when_no
     assert [row["feasibility_status"] for row in audit["ra_feasibility"]] == ["INFEASIBLE", "FEASIBLE"]
     assert session["ra_feasibility_checks"][-1]["applied_candidate_index"] == 1
 
-    response = {"thought": "t", "candidate_events": [refused], "selected_candidate_index": 0}
+    response = {"plan": "t", "candidate_events": [refused], "selected_candidate_index": 0}
     decision, audit = asyncio.run(handle_validated_candidates(
         session=session, prepared={"offline_recovery": True}, response=response, planner=planner))
     findings = session["outline_validation_findings"]

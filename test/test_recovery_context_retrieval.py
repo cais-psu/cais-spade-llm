@@ -428,7 +428,7 @@ def test_safety_renderer_preserves_legacy_rules_and_explicit_empty_selection():
 
 def test_retrieval_expands_prompt_and_never_commits_an_event(context):
     prepared, session, jids, names = context
-    response = {"thought": "Retrieve recorded facts", "decision": "need_context", "context_requests": [f"/resources/{jids[2]}/snapshot", "/parts"]}
+    response = {"plan": "Retrieve recorded facts", "decision": "need_context", "context_requests": [f"/resources/{jids[2]}/snapshot", "/parts"]}
     before = deepcopy(session["accepted_outline_prefix"])
     decision, turn = asyncio.run(multi_turn_outline_generation._handle_outline_phase(
         session_state=session, prepared_recovery_request=prepared, planner=object(), parsed_response=response))
@@ -524,7 +524,7 @@ def test_missing_or_private_context_never_invokes_live_observation(context, monk
     prepared, session, _, _ = context
     live = AsyncMock(side_effect=AssertionError("offline retrieval invoked a live observation"))
     monkeypatch.setattr(multi_turn, "_handle_grounding_phase", live)
-    response = {"thought": "Retrieve recorded facts", "decision": "need_context", "context_requests": [ref]}
+    response = {"plan": "Retrieve recorded facts", "decision": "need_context", "context_requests": [ref]}
     _, turn = asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
                                                                   response=response, planner=object()))
     assert turn["context_errors"] and not turn["served_context"]
@@ -641,7 +641,7 @@ def test_prompt_retains_all_retrieved_facts_but_displays_repeated_pose_once(cont
     refs = [f"/resources/{jids[0]}/current_pose", f"/resources/{jids[0]}/snapshot"]
     async def retrieve(ref):
         await multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-            response={"thought": "Read the saved fact", "decision": "need_context", "context_requests": [ref]},
+            response={"plan": "Read the saved fact", "decision": "need_context", "context_requests": [ref]},
             planner=object())
     for ref in refs:
         asyncio.run(retrieve(ref))
@@ -683,7 +683,7 @@ def test_brief_explanations_are_prompt_guidance_without_truncation(context, phas
     if phase != "grounding":
         assert "one short sentence" in prompt
     schema = multi_turn_prompts.multi_turn_phase_response_schema("grounding")["schema"]
-    jsonschema.validate({"thought": "Recorded facts. " * 100, "decision": "grounded", "observe_requests": []}, schema)
+    jsonschema.validate({"plan": "Recorded facts. " * 100, "decision": "grounded", "observe_requests": []}, schema)
 
 
 def test_retrieved_projection_and_revision_are_recomputed(context):
@@ -708,7 +708,7 @@ def test_stale_live_revision_is_rejected(context):
     planner = SimpleNamespace(product_agent=SimpleNamespace(environment_runtime=SimpleNamespace(context=SimpleNamespace(revision=2))))
     with pytest.raises(ValueError, match="observations changed"):
         asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-            response={"thought": "Retrieve recorded facts", "decision": "need_context", "context_requests": ["/parts"]}, planner=planner))
+            response={"plan": "Retrieve recorded facts", "decision": "need_context", "context_requests": ["/parts"]}, planner=planner))
 
 
 def test_observed_empty_custody_is_not_treated_as_a_missing_fact(context):
@@ -736,27 +736,27 @@ def test_pending_tasks_are_retrievable_without_exposing_internal_fields(context,
 def test_schema_accepts_retrieval_and_legacy_candidates(mode):
     schema = multi_turn_prompts.multi_turn_phase_response_schema("outline", outline_mode=mode,
         outline_context_retrieval=True, recovery_selection_mode="neurosymbolic")["schema"]
-    jsonschema.validate({"thought": "A recorded pose is required", "decision": "need_context", "context_requests": ["/parts"]}, schema)
-    jsonschema.validate({"thought": "", "decision": "need_context", "context_requests": []}, schema)
-    for invalid in ({"thought": "", "decision": "need_context", "context_requests": [False]},):
+    jsonschema.validate({"plan": "A recorded pose is required", "decision": "need_context", "context_requests": ["/parts"]}, schema)
+    jsonschema.validate({"plan": "", "decision": "need_context", "context_requests": []}, schema)
+    for invalid in ({"plan": "", "decision": "need_context", "context_requests": [False]},):
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate(invalid, schema)
     original = multi_turn_prompts.multi_turn_phase_response_schema("outline", outline_mode=mode,
         recovery_selection_mode="neurosymbolic")["schema"]
-    assert schema["required"] == ["thought"]
+    assert schema["required"] == ["plan"]
     assert schema["type"] == "object"
     assert not {"anyOf", "oneOf", "allOf", "enum", "const", "not"} & schema.keys()
     assert all(schema["properties"][key] == value for key, value in original["properties"].items())
 
 
 @pytest.mark.parametrize("response", [
-    {"thought": "", "decision": "need_context", "context_requests": []},
-    {"thought": "", "decision": "need_context", "context_requests": [False]},
-    {"thought": "", "decision": "need_context", "context_requests": ["/parts"], "candidate_events": []},
-    {"thought": "", "decision": "need_context", "context_requests": ["/parts"], "next_transition": {}},
-    {"thought": "", "decision": "need_context", "context_requests": ["/parts"], "selected_candidate_index": 0},
+    {"plan": "", "decision": "need_context", "context_requests": []},
+    {"plan": "", "decision": "need_context", "context_requests": [False]},
+    {"plan": "", "decision": "need_context", "context_requests": ["/parts"], "candidate_events": []},
+    {"plan": "", "decision": "need_context", "context_requests": ["/parts"], "next_transition": {}},
+    {"plan": "", "decision": "need_context", "context_requests": ["/parts"], "selected_candidate_index": 0},
     {"decision": "need_context", "context_requests": ["/parts"]},
-    {"thought": None, "decision": "need_context", "context_requests": ["/parts"]},
+    {"plan": None, "decision": "need_context", "context_requests": ["/parts"]},
 ])
 def test_local_validation_rejects_mixed_or_invalid_retrieval_before_serving(context, monkeypatch, response):
     prepared, session, _, _ = context
@@ -784,7 +784,7 @@ def test_local_candidate_validation_retains_original_required_fields(context, mo
     handler = AsyncMock(return_value=("need_revision", {}))
     monkeypatch.setattr(multi_turn_outline_generation, handler_name, handler)
     candidate = {key: [] for key in schema["required"]}
-    candidate["thought"] = "Use recorded state"
+    candidate["plan"] = "Use recorded state"
     if "selected_candidate_index" in candidate:
         candidate["selected_candidate_index"] = 0
     async def run():
@@ -818,7 +818,7 @@ def test_grounding_observation_is_used_only_for_missing_live_pose(context, monke
     monkeypatch.setattr(multi_turn, "_handle_grounding_phase", live)
     ref = f"/parts/{names[0]}/observed_pose"
     _, turn = asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-        response={"thought": "Retrieve recorded facts", "decision": "need_context", "context_requests": [ref]}, planner=object()))
+        response={"plan": "Retrieve recorded facts", "decision": "need_context", "context_requests": [ref]}, planner=object()))
     assert turn["served_context"][ref]["value"] == {"x": 1, "y": 2, "z": 3}
     assert turn["served_context"][ref]["source"] == "resource_observation"
     live.assert_awaited_once()
@@ -838,7 +838,7 @@ def test_missing_robot_pose_uses_only_its_owner_and_never_calls_live_offline(con
         jids[0]: SimpleNamespace(get_recovery_snapshot=unrelated), jids[1]: SimpleNamespace(get_recovery_snapshot=observe)})
     ref = f"/resources/{jids[1]}/current_pose"
     _, turn = asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-        response={"thought": "Retrieve recorded facts", "decision": "need_context", "context_requests": [ref]}, planner=object()))
+        response={"plan": "Retrieve recorded facts", "decision": "need_context", "context_requests": [ref]}, planner=object()))
     unrelated.assert_not_called()
     if offline:
         observe.assert_not_called()
@@ -854,7 +854,7 @@ def test_multi_turn_loop_records_retrieval_and_stops_at_the_turn_budget_without_
     prepared["recovery_debug"] = {"per_turn_debug_dir": str(tmp_path)}
     prepared["recovery_session"]["session_id"] = "retrieval-test"
     session.update(current_phase="outline", max_turns=2)
-    llm = AsyncMock(return_value={"thought": "Need the recorded part identities", "decision": "need_context", "context_requests": ["/parts"]})
+    llm = AsyncMock(return_value={"plan": "Need the recorded part identities", "decision": "need_context", "context_requests": ["/parts"]})
     planner = SimpleNamespace(product_agent=SimpleNamespace(ask_llm_structured=llm))
     monkeypatch.setattr(multi_turn, "_try_handle_modeled_continuation", AsyncMock(return_value=None))
     asyncio.run(multi_turn.execute_multi_turn_recovery(planner, prepared, session_state=session))
@@ -881,7 +881,7 @@ def test_missing_declarations_never_request_a_new_observation(context, monkeypat
     monkeypatch.setattr(multi_turn_context, "_observe_missing", observe)
     ref = reference.format(jid=jids[0])
     _, turn = asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-        response={"thought": "Read saved declarations", "decision": "need_context", "context_requests": [ref]}, planner=object()))
+        response={"plan": "Read saved declarations", "decision": "need_context", "context_requests": [ref]}, planner=object()))
     assert not turn["served_context"]
     assert turn["context_errors"]
     assert "requires a new observation capture" not in json.dumps(turn["context_errors"])
@@ -898,7 +898,7 @@ def test_task_contract_retrieval_keeps_alternative_resource_available(context, m
     monkeypatch.setattr(multi_turn_context, "_observe_missing", live)
     ref = f"/task_contracts/{jids[2]}/alternative_public_event"
     _, turn = asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-        response={"thought": "Read an alternative declaration", "decision": "need_context", "context_requests": [ref]}, planner=object()))
+        response={"plan": "Read an alternative declaration", "decision": "need_context", "context_requests": [ref]}, planner=object()))
     assert not turn["served_context"] and turn["context_errors"]
     assert session["accepted_outline_prefix"] == []
     assert jids[2] in {row["resource_jid"] for row in multi_turn_context.resource_index(prepared)}
@@ -907,7 +907,7 @@ def test_task_contract_retrieval_keeps_alternative_resource_available(context, m
     assert "alternative_public_event" not in prompt
     public_ref = f"/resources/{jids[2]}/static_capabilities"
     _, turn = asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-        response={"thought": "Read alternative capabilities", "decision": "need_context", "context_requests": [public_ref]}, planner=object()))
+        response={"plan": "Read alternative capabilities", "decision": "need_context", "context_requests": [public_ref]}, planner=object()))
     assert public_ref in turn["served_context"]
     assert jids[2] in multi_turn_context.select_outline_context(prepared, session)["resource_jids"]
     live.assert_not_called()
@@ -930,7 +930,7 @@ def test_retrieval_prompt_states_request_limits_and_separates_declared_contracts
     session.update(current_phase="outline", outline_mode="incremental_candidates_validated")
     prompt = multi_turn._build_phase_prompt(prepared, session)[1]
     assert "When required facts are available" in prompt
-    assert 'only `thought`, `decision`="need_context", `context_requests` (1 to 8 refs)' in prompt
+    assert 'only `plan`, `decision`="need_context", `context_requests` (1 to 8 refs)' in prompt
     assert "Omit all candidate fields, even null/empty" in prompt
     assert "state_variables,pending_tasks" in prompt
     assert "/task_contracts/" not in prompt and "/primitive_catalog/" not in prompt and "/primitive_contracts/" not in prompt
@@ -952,7 +952,7 @@ def test_outline_retrieval_answers_reordered_or_subset_known_facts_without_stopp
     refs = [f"/resources/{jid}/snapshot" for jid in jids[:2]]
     async def retrieve(requested):
         return await multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-            response={"thought": "Read saved facts", "decision": "need_context", "context_requests": requested}, planner=object())
+            response={"plan": "Read saved facts", "decision": "need_context", "context_requests": requested}, planner=object())
     _, first = asyncio.run(retrieve(refs))
     assert session["status"] != "NEEDS_CONTEXT"
     requested = [refs[index] for index in last_indices]
@@ -971,7 +971,7 @@ def test_outline_retrieval_allows_new_information_among_known_references(context
     new = "/parts/gear_small/observed_pose" if missing else f"/resources/{jids[1]}/snapshot"
     async def retrieve(refs):
         return await multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-            response={"thought": "Read saved facts", "decision": "need_context", "context_requests": refs}, planner=object())
+            response={"plan": "Read saved facts", "decision": "need_context", "context_requests": refs}, planner=object())
     asyncio.run(retrieve([known]))
     _, mixed = asyncio.run(retrieve([known, new]))
     assert session["status"] != "NEEDS_CONTEXT"
@@ -989,7 +989,7 @@ def test_outline_retrieval_allows_new_information_among_known_references(context
 def test_outline_retrieval_refreshes_after_an_accepted_transition(context, missing):
     prepared, session, jids, _ = context
     ref = "/parts/gear_small/observed_pose" if missing else f"/resources/{jids[0]}/static_capabilities"
-    response = {"thought": "Read saved capabilities", "decision": "need_context", "context_requests": [ref]}
+    response = {"plan": "Read saved capabilities", "decision": "need_context", "context_requests": [ref]}
     async def retrieve():
         return await multi_turn_context.handle_outline_context(prepared=prepared, session=session, response=response, planner=object())
     _, before = asyncio.run(retrieve())
@@ -1014,7 +1014,7 @@ def test_outline_retrieval_retains_changed_fact_evidence_at_same_revision(contex
     fact = multi_turn_context.resolve_outline_context(prepared, session, ref)
     resolve = Mock(side_effect=lambda *args: deepcopy(fact))
     monkeypatch.setattr(multi_turn_context, "resolve_outline_context", resolve)
-    response = {"thought": "Read recorded pose evidence", "decision": "need_context", "context_requests": [ref]}
+    response = {"plan": "Read recorded pose evidence", "decision": "need_context", "context_requests": [ref]}
     async def retrieve():
         return await multi_turn_context.handle_outline_context(prepared=prepared, session=session, response=response, planner=object())
     asyncio.run(retrieve())
@@ -1035,7 +1035,7 @@ def test_multi_turn_loop_answers_alternating_known_requests_until_the_turn_budge
     session.update(current_phase="outline", max_turns=3)
     refs = ([f"/parts/{name}/target" for name in ("gear_small", "KET4_Square_4mm")] if missing else
             [f"/resources/{jid}/snapshot" for jid in jids[:2]])
-    responses = [{"thought": "Read recorded facts", "decision": "need_context", "context_requests": [ref]}
+    responses = [{"plan": "Read recorded facts", "decision": "need_context", "context_requests": [ref]}
                  for ref in (refs[0], refs[1], refs[0])]
     llm = AsyncMock(side_effect=responses)
     planner = SimpleNamespace(product_agent=SimpleNamespace(ask_llm_structured=llm))
@@ -1238,7 +1238,7 @@ def test_nonrobot_initial_context_and_offline_retrieval_preserve_declared_facts(
     refs = [f'/resources/{jid}/snapshot', f'/resources/{jid}/state_variables',
             f'/resources/{jid}/task_contracts', f'/task_contracts/{jid}/{event["event_name"]}']
     _, turn = asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-        response={'thought': 'Read saved declarations', 'decision': 'need_context', 'context_requests': refs}, planner=object()))
+        response={'plan': 'Read saved declarations', 'decision': 'need_context', 'context_requests': refs}, planner=object()))
     assert [row['ref'] for row in turn['context_errors']] == refs[2:]
     assert turn['served_context'][refs[0]]['value'][field] is None
     assert set(turn['served_context']) == set(refs[:2])
@@ -1316,7 +1316,7 @@ def test_outline_rejects_recorded_execution_catalogs_without_live_calls(context,
     monkeypatch.setattr(multi_turn_context, "_observe_missing", observe)
     before = deepcopy(prepared)
     _, turn = asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-        response={"thought": "Read context", "decision": "need_context", "context_requests": [ref]}, planner=object()))
+        response={"plan": "Read context", "decision": "need_context", "context_requests": [ref]}, planner=object()))
     assert not turn["served_context"]
     assert turn["context_errors"][0]["ref"] == ref
     assert "Unsupported outline" in turn["context_errors"][0]["error"]
@@ -1628,7 +1628,7 @@ def test_validated_outline_uses_exact_declared_fields_without_robot_state_requir
     assert findings == []
     assert task["expected_start_state"] == {"temperature": 10, "inspection_result": None}
     schema = multi_turn._get_response_schema("outline", session)["schema"]
-    jsonschema.validate({"thought": "Use supplied state declarations", "next_transition": event}, schema)
+    jsonschema.validate({"plan": "Use supplied state declarations", "next_transition": event}, schema)
     assert "temperature" in multi_turn._build_phase_prompt(prepared, session)[1]
     assert '"inspection_result": null' in multi_turn._build_phase_prompt(prepared, session)[1]
     fact = multi_turn_context.resolve_outline_context(prepared, session, f"/parts/{names[0]}/inspection_result")
@@ -1649,7 +1649,7 @@ def test_validated_outline_does_not_force_undeclared_part_location_for_custody(c
     task, findings = multi_turn._derive_candidate_outline_task(candidate_task=event,
         session_state=session, prepared_recovery_request=prepared)
     assert findings == [] and task["expected_start_state"] == {"held_part": None}
-    jsonschema.validate({"thought": "Propose the declared field", "next_transition": event},
+    jsonschema.validate({"plan": "Propose the declared field", "next_transition": event},
                         multi_turn._get_response_schema("outline", session)["schema"])
 
 
@@ -1700,7 +1700,7 @@ def test_validated_retrieval_renders_public_facts_once_and_sanitizes_errors(cont
     prepared["recovery_resources"][jids[0]]["static_capabilities"]["named_poses"] = {"home": {"x": 0.24681357}}
     refs = [f"/resources/{jids[0]}/static_capabilities", f"/task_contracts/{jids[0]}/PRIVATE_CONTRACT_CANARY"]
     _, turn = asyncio.run(multi_turn_context.handle_outline_context(prepared=prepared, session=session,
-        response={"thought": "Read the recorded public facts", "decision": "need_context", "context_requests": refs}, planner=object()))
+        response={"plan": "Read the recorded public facts", "decision": "need_context", "context_requests": refs}, planner=object()))
     session["outline_context_errors"].append({"ref": f"/parts/gear_small/observed_pose", "error": "PRIVATE_RUNTIME_ERROR_CANARY"})
     before = deepcopy(session["outline_context_errors"])
     payload, prompt = multi_turn._build_phase_prompt(prepared, session)

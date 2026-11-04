@@ -1,5 +1,5 @@
 {
-  "thought": "Evaluate the supplied candidate effects.",
+  "plan": "Evaluate the supplied candidate effects.",
   "selected_candidate_index": 0,
   "candidate_events": [
     {

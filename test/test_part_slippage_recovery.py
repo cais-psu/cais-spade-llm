@@ -1700,7 +1700,7 @@ def test_generation_debug_sync_covers_start_resume_and_exhausted_budgets(
 
     async def ask(*args, **kwargs):
         assert saved[-1]["multi_turn_session"]["facts"]["pose"] == [0, 1, 2]
-        return {"thought": "Recorded facts"}
+        return {"plan": "Recorded facts"}
 
     async def recorded(call, **kwargs):
         return await call()

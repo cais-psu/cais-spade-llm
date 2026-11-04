@@ -1,5 +1,5 @@
 {
-  "thought": "Locate the misplaced part using saved observation evidence.",
+  "plan": "Locate the misplaced part using saved observation evidence.",
   "decision": "observe",
   "observe_requests": [
     {

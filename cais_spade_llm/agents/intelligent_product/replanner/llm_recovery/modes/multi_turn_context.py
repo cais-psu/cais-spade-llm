@@ -925,8 +925,8 @@ def _context_request_error(response: dict) -> str | None:
     proposals = [key for key in _PROPOSAL_FIELDS if key in response]
     if proposals:
         return "need_context cannot also carry " + ", ".join(proposals) + "; propose events in a later reply"
-    if not isinstance(response.get("thought"), str):
-        return "need_context requires thought as a string"
+    if not isinstance(response.get("plan"), str):
+        return "need_context requires plan as a string"
     return None
 
 

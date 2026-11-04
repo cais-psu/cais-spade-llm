@@ -592,14 +592,14 @@ def _outline_incremental_response_schema(
             "type": "object",
             "$defs": schema_definitions,
             "properties": {
-                "thought": {"type": "string"},
+                "plan": {"type": "string"},
                 "next_transition": deepcopy(outline_event),
                 "transition_suffix": {
                     "type": "array",
                     "items": deepcopy(outline_event),
                 },
             },
-            "required": ["thought", "next_transition"],
+            "required": ["plan", "next_transition"],
         },
     }
 
@@ -666,7 +666,7 @@ def _outline_candidates_response_schema(
         declared_fields_only=declared_fields_only,
     )
     candidate_item_schema = {"$ref": "#/$defs/outline_event"}
-    required = ["thought"]
+    required = ["plan"]
     if normalized_selection_mode == "pure_llm":
         required.append("selected_candidate_index")
     if normalized_horizon == "1":
@@ -703,7 +703,7 @@ def _outline_candidates_response_schema(
             },
         }
     response_properties: dict[str, Any] = {
-        "thought": {"type": "string"},
+        "plan": {"type": "string"},
         candidate_property_name: candidate_property,
     }
     if normalized_selection_mode == "pure_llm":
@@ -743,13 +743,13 @@ def _outline_single_pass_response_schema(
             "type": "object",
             "$defs": schema_definitions,
             "properties": {
-                "thought": {"type": "string"},
+                "plan": {"type": "string"},
                 "transition_trace": {
                     "type": "array",
                     "items": {"$ref": "#/$defs/outline_event"},
                 },
             },
-            "required": ["thought", "transition_trace"],
+            "required": ["plan", "transition_trace"],
         },
     }
 
@@ -762,7 +762,7 @@ def _grounding_response_schema() -> dict[str, Any]:
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "thought": {"type": "string"},
+                "plan": {"type": "string"},
                 "decision": {"type": "string", "enum": ["observe", "grounded"]},
                 "observe_requests": {
                     "type": "array",
@@ -778,7 +778,7 @@ def _grounding_response_schema() -> dict[str, Any]:
                     },
                 },
             },
-            "required": ["thought", "decision", "observe_requests"],
+            "required": ["plan", "decision", "observe_requests"],
         },
     }
 
@@ -790,7 +790,7 @@ def _primitive_generation_response_schema() -> dict[str, Any]:
         "schema": {
             "type": "object",
             "properties": {
-                "thought": {"type": "string"},
+                "plan": {"type": "string"},
                 "decision": {
                     "type": "string",
                     "enum": [
@@ -824,7 +824,7 @@ def _primitive_generation_response_schema() -> dict[str, Any]:
                 },
             },
             "required": [
-                "thought",
+                "plan",
                 "decision",
                 "outline_id",
                 "resource_jid",
@@ -840,10 +840,10 @@ def _finalize_response_schema() -> dict[str, Any]:
         "schema": {
             "type": "object",
             "properties": {
-                "thought": {"type": "string"},
+                "plan": {"type": "string"},
                 "decision": {"type": "string"},
             },
-            "required": ["thought"],
+            "required": ["plan"],
         },
     }
 
@@ -858,7 +858,7 @@ def _with_outline_context(schema: dict[str, Any]) -> dict[str, Any]:
                           "description": "Use [] for proposed events; need_context requires 1 to 8 references and no candidate fields.",
                           "items": {"type": "string", "pattern": "^/"}},
     )
-    body["required"] = ["thought"]
+    body["required"] = ["plan"]
     return schema
 
 
@@ -3357,7 +3357,7 @@ def _render_grounding_prompt(payload: dict[str, Any]) -> str:
         [
             "",
             "Decision Rules",
-            "- Keep `thought` to at most two short sentences.",
+            "- Keep `plan` to at most two short sentences.",
             "- If the current resource facts and part facts provide enough grounded "
             'information to plan recovery, set decision to "grounded".',
             '- When decision is "grounded", leave observe_requests empty.',
@@ -3597,7 +3597,7 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
         [
             "",
             "Output Contract",
-            "- Keep `thought` to at most two short sentences and `rationale` to one short sentence.",
+            "- Keep `plan` to at most two short sentences and `rationale` to one short sentence.",
             "- Author primitive_steps for ONLY the active DES transition shown above.",
             "- outline_id and resource_jid MUST exactly match the active transition.",
             "- primitive_steps[*].primitive MUST be a name in Visible Primitive Catalog.",
@@ -3995,8 +3995,8 @@ def _render_validated_event_prompt(payload: dict[str, Any], session: dict[str, A
     sections = [
         "Task and Role",
         (("Propose every materially distinct supported next recovery event you can ground, from one up to 5; do not pad the list. "
-          "Return thought and candidate_events. Do not select or rank the candidates; validated projected DES product states are compared after generation. ")
-         if candidates else "Propose one next recovery event from the supplied facts. Return thought and next_transition. ")
+          "Return plan and candidate_events. Do not select or rank the candidates; validated projected DES product states are compared after generation. ")
+         if candidates else "Propose one next recovery event from the supplied facts. Return plan and next_transition. ")
         + "Each event describes a task-level outcome for one resource. ResourceAgent checks backward and forward feasibility; "
         "Central Controller Agent checks the selected safety specifications. The runtime checks nominal continuation.",
         *(["Unfinished recorded tasks remain available for nominal continuation. Final goals must hold after "
@@ -4004,7 +4004,7 @@ def _render_validated_event_prompt(payload: dict[str, Any], session: dict[str, A
            "A recorded task's resource assignment is not itself a goal; accepted matching product-completion evidence "
            "may satisfy its product work through another resource. Explicit resource goals remain required."]
           if session.get("nominal_continuation_semantics") == "recorded_unfinished_tasks" else []),
-        "Keep thought to at most two short sentences and rationale to one sentence.",
+        "Keep plan to at most two short sentences and rationale to one sentence.",
         "Choose a condition change that enables unfinished work. Use rejection feedback to revise unsupported conditions; "
         "avoid repeating accepted state changes without advancing recovery. Respect recorded resource availability.",
         "Observation source", _inline_json(payload.get("outline_observation_source") or {}),
@@ -4262,8 +4262,8 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     sections: list[str] = [
         "Task and Role",
         role_text,
-        "Limit `thought` to two short sentences; each `rationale` to one." if scope
-        else "Keep `thought` to at most two short sentences and each `rationale` to one short sentence.",
+        "Limit `plan` to two short sentences; each `rationale` to one." if scope
+        else "Keep `plan` to at most two short sentences and each `rationale` to one short sentence.",
     ]
     if payload.get("outline_context"):
         sections += ["", "Fault Event", _inline_json(_slim_fault_event(llm_input.get("fault_event") or {}))]
@@ -4452,18 +4452,18 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
 
         if recovery_selection_mode == "neurosymbolic" and llm_selects_next_event(session_state):
             response_rules = [
-                f"{response_action} one JSON object with `thought` and exactly one `candidate_events` "
+                f"{response_action} one JSON object with `plan` and exactly one `candidate_events` "
                 "item, the next event you choose; do not return `selected_candidate_index`."
             ]
         elif recovery_selection_mode == "neurosymbolic":
             response_rules = [
-                f"{response_action} one JSON object with `thought` and one to 5 materially "
+                f"{response_action} one JSON object with `plan` and one to 5 materially "
                 "distinct `candidate_events`; do not return `selected_candidate_index` "
                 "or padding."
             ]
         else:
             response_rules = [
-                f"{response_action} one JSON object with `thought`, {candidate_property_name}, and "
+                f"{response_action} one JSON object with `plan`, {candidate_property_name}, and "
                 "an integer `selected_candidate_index` pointing at your chosen candidate.",
                 *(
                     ["- `candidate_events` must contain exactly three candidates."]
@@ -4585,7 +4585,7 @@ _NEIGHBOR_END_STATE_RULE = (
 _FAILURE_OUTLINE_CLOSING_RULES = (
     "- Use variable names exactly as declared. Look up any fact or variable you rely on that is not shown.",
     "- When you judge that normal production can carry on its remaining work from the state your events leave, "
-    "return only `thought` and `decision: \"recovery_complete\"`; normal production then takes over.",
+    "return only `plan` and `decision: \"recovery_complete\"`; normal production then takes over.",
 )
 # A single-pass reply is the whole outline, so its last event is where the recovery ends.
 _SINGLE_PASS_COMPLETION_RULE = (
@@ -4670,7 +4670,7 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
         "over, only your recovery events change the planned state; a job already running keeps running until "
         "an event pauses or stops it.",
         selection,
-        "Give your plan in `thought` (two short sentences) and keep each `rationale` to one.",
+        "Give your plan in `plan` (two short sentences) and keep each `rationale` to one.",
         "", "Failure", measured,
         *template["failure"],
         "", "Recovery Goal", *(template["goal"] or ["(none recorded)"]),
@@ -4681,7 +4681,7 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
         "", "Event Rules" if single_pass else "Candidate Rules",
         *_failure_outline_candidate_rules(neighbor_end_state=llm_selects_next_event(session_state), single_pass=single_pass),
         "", "Knowledge Base",
-        "Request facts from the knowledge base by returning only `thought`, `decision: \"need_context\"` and 1–8 "
+        "Request facts from the knowledge base by returning only `plan`, `decision: \"need_context\"` and 1–8 "
         "`context_requests` from the list below; they are added to the next prompt before you propose events. When "
         "proposing events, omit `decision` and `context_requests`.",
         *template["refs"],
@@ -4802,7 +4802,7 @@ def _render_retrieved_context(payload: dict[str, Any], *, outline: bool) -> str:
     if outline:
         sections += ["", "Context retrieval",
             "Proposing events: omit `decision`/`context_requests` or use null/[]; never combine with need_context.",
-            'Missing facts: return only `thought`, `decision`="need_context", `context_requests` (1 to 8 refs). Omit all candidate fields, even null/empty.',
+            'Missing facts: return only `plan`, `decision`="need_context", `context_requests` (1 to 8 refs). Omit all candidate fields, even null/empty.',
             "Refs: /resources; /parts; /resources/<jid>/{snapshot,current_pose,held_part,static_capabilities,capability_evidence,state_variables,pending_tasks}; /parts/<name>/{snapshot,observed_pose,target}. Expand braces to one field.",
             *(["/safety_rules; /safety_rules/{specification}; /safety_rules/{specification}/instances; /regions; /regions/{region}/occupancy."]
               if "outline_safety_context" in payload else []),

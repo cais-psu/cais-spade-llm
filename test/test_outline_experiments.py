@@ -20,8 +20,8 @@ from cais_spade_llm.recovery_framework import (
     recovery_observations,
 )
 
-GROUNDED = {"thought": "Use the retained facts.", "decision": "grounded", "observations": []}
-DONE = {"thought": "The failure is overcome.", "decision": "recovery_complete"}
+GROUNDED = {"plan": "Use the retained facts.", "decision": "grounded", "observations": []}
+DONE = {"plan": "The failure is overcome.", "decision": "recovery_complete"}
 SCENARIO = "Machining breakdown during part processing"
 
 
@@ -68,10 +68,10 @@ def reply_for(prompt, schema):
     if schema.get("name") == "multi_turn_grounding_response":
         return GROUNDED
     if "events" in schema["schema"]["properties"]:
-        return {"thought": "Whole outline.", "events": [event("finish", "completed"), event("release", "idle")]}
+        return {"plan": "Whole outline.", "events": [event("finish", "completed"), event("release", "idle")]}
     if "Recovery Events So Far" in prompt:
         return DONE
-    return {"thought": "Next step.", "candidate_events": [event("finish", "completed")]}
+    return {"plan": "Next step.", "candidate_events": [event("finish", "completed")]}
 
 
 def install_provider(monkeypatch, answer=reply_for):
@@ -242,7 +242,7 @@ def test_a_nonblocking_search_that_runs_out_is_unresolved_not_a_refusal(observat
 
 def test_an_unfinished_draft_did_not_finish_and_keeps_its_stop_cause(observations, tmp_path, monkeypatch):
     install_provider(monkeypatch, lambda prompt, schema: GROUNDED if schema.get("name") ==
-                     "multi_turn_grounding_response" else {"thought": "Unreadable."})
+                     "multi_turn_grounding_response" else {"plan": "Unreadable."})
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path, single_pass_outline=True)
     asyncio.run(draft.generate())
     audit = outline_audit.audit_draft(draft.directory, observations, [], [])

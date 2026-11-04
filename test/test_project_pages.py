@@ -908,7 +908,7 @@ def test_output_lists_exact_proposals_before_responses_and_keeps_attempts(tmp_pa
     captures = []
     originals = {}
     for attempt, proposed in ((1, events), (2, list(reversed(events)))):
-        content = json.dumps({"thought": "Recorded proposal", "candidate_events": proposed}, separators=(",", ":"))
+        content = json.dumps({"plan": "Recorded proposal", "candidate_events": proposed}, separators=(",", ":"))
         record = {"kind": "provider_response", "tool_round": 0, "attempt": attempt,
                   "raw_response": {"choices": [{"message": {"content": content}}]}}
         path = _write(tmp_path, f"attempt{attempt}_response.json", record)
@@ -931,7 +931,7 @@ def test_output_lists_exact_proposals_before_responses_and_keeps_attempts(tmp_pa
     labels = [item for item in client.elements.values() if isinstance(item, ui.label)]
     response_title = next(item for item in labels if item.text == "LLM response")
     assert all(item.id < response_title.id for item in tables)
-    assert any('\n  "thought": "Recorded proposal"' in item.text for item in labels)
+    assert any('\n  "plan": "Recorded proposal"' in item.text for item in labels)
     assert not any("runtime_selected" in item.text for item in labels)
     details = [item for item in client.elements.values() if isinstance(item, ui.expansion)]
     assert [item.text for item in details] == ["Validation records", "Returned context"]
@@ -948,8 +948,8 @@ def test_output_lists_exact_proposals_before_responses_and_keeps_attempts(tmp_pa
 
 
 @pytest.mark.parametrize("response", [
-    {"thought": "Saved pose available", "decision": "grounded", "observe_requests": []},
-    {"thought": "Read recorded facts", "decision": "need_context", "context_requests": ["/parts"]},
+    {"plan": "Saved pose available", "decision": "grounded", "observe_requests": []},
+    {"plan": "Read recorded facts", "decision": "need_context", "context_requests": ["/parts"]},
 ])
 def test_output_grounding_and_retrieval_never_show_runtime_events(response):
     from cais_spade_llm.ui.components.recovery_turns import render_turn_content
@@ -1057,7 +1057,7 @@ def test_output_marks_the_chosen_candidate_with_its_resource_outcome_and_rationa
               {"event_name": "set_down_peg", "resource": "ur5e-3", "part_name": "KET4_Square_4mm",
                "expected_end_state": {"held_part": None, "part_location": "Buffer For Machined parts"},
                "params": {"pose": [0.1, 0.2, 1.0]}, "rationale": "Free the gripper."}]
-    content = json.dumps({"thought": "Choose one.", "candidate_events": events, "selected_candidate_index": 1})
+    content = json.dumps({"plan": "Choose one.", "candidate_events": events, "selected_candidate_index": 1})
     data = {"captures": [{"path": "response.json", "status": "captured", "record": {
         "kind": "provider_response", "raw_response": {"choices": [{"message": {"content": content}}]},
     }}], "results": [], "prompts": []}

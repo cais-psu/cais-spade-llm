@@ -4671,8 +4671,8 @@ async def _handle_outline_phase(
             error = "Candidate responses require decision=null and context_requests=[], or omitted fields; use need_context without candidate fields for retrieval"
         elif missing:
             error = "Missing required outline response fields: " + ", ".join(missing)
-        elif not isinstance(parsed_response.get("thought"), str):
-            error = "thought must be a string"
+        elif not isinstance(parsed_response.get("plan"), str):
+            error = "plan must be a string"
         if error:
             findings = [_shared._candidate_schema_finding(task={}, reason=error,
                                                           evidence={"required": schema["required"]})]

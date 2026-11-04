@@ -1496,7 +1496,7 @@ def _log_primitive_turn_summary(
 ) -> None:
     """Emit a single-line INFO summary of the LLM's turn decision."""
     decision = str(parsed_response.get("decision") or "").strip() or "<unset>"
-    thought = _truncate_for_log(parsed_response.get("thought"))
+    plan = _truncate_for_log(parsed_response.get("plan"))
     rationale = _truncate_for_log(parsed_response.get("rationale"))
     notes_raw = parsed_response.get("notes") or []
     notes = (
@@ -1523,13 +1523,13 @@ def _log_primitive_turn_summary(
         len(context_requests),
     )
     _logger.debug(
-        "[primitive-gen outline=%s resource=%s turn=%s] context_requests=%s thought=%r "
+        "[primitive-gen outline=%s resource=%s turn=%s] context_requests=%s plan=%r "
         "rationale=%r notes=%s",
         outline_id or "<none>",
         resource_jid or "<none>",
         turn_index,
         context_requests,
-        thought,
+        plan,
         rationale,
         notes,
     )

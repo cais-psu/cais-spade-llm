@@ -58,7 +58,7 @@ async def handle_validated_candidates(*, session: dict, prepared: dict, response
 
 
 async def check_outline(events: list[dict], session: dict, prepared: dict, planner: Any, *,
-                        thought: str = "") -> dict:
+                        plan: str = "") -> dict:
     """Apply a whole outline in order on a copy of the planning state, with the session's checks.
 
     Each event goes through the step the incremental path takes for one turn's chosen candidate, so the
@@ -71,7 +71,7 @@ async def check_outline(events: list[dict], session: dict, prepared: dict, plann
         session: Planning state the outline starts from.
         prepared: Recorded failure context.
         planner: Carries the checks' inputs on its product agent, as for one turn.
-        thought: The LLM's plan, passed on as each event's reply text.
+        plan: The LLM's plan, passed on as each event's reply text.
 
     Returns:
         ``decision`` and ``audit`` of the refusing step or of the declared completion,
@@ -81,14 +81,14 @@ async def check_outline(events: list[dict], session: dict, prepared: dict, plann
     work = deepcopy({key: value for key, value in session.items() if key != "turns"})
     checks = []
     for index, event in enumerate(events):
-        decision, audit = await _apply_candidates(work, prepared, {"thought": thought, "candidate_events": [event]},
+        decision, audit = await _apply_candidates(work, prepared, {"plan": plan, "candidate_events": [event]},
                                                   planner)
         checks.append({"event_index": index,
                        **{key: deepcopy(audit[key]) for key in ("ra_feasibility", "cca_safety") if key in audit}})
         if decision == "need_revision":
             return {"decision": decision, "audit": audit, "refused_event_index": index, "checks": checks,
                     "session": work}
-    decision, audit = _declare_complete(work, prepared, {"thought": thought, "decision": "recovery_complete"}, planner)
+    decision, audit = _declare_complete(work, prepared, {"plan": plan, "decision": "recovery_complete"}, planner)
     if work.get("check_nonblocking") is True:
         checks.append({"completion": deepcopy(work["cca_nonblocking_checks"][-1])})
     return {"decision": decision, "audit": audit, "refused_event_index": None, "checks": checks, "session": work}
@@ -114,7 +114,7 @@ async def _handle_single_pass_outline(*, session: dict, prepared: dict, response
     events = response.get("events")
     if response.get("decision") is not None or not isinstance(events, list) or not events:
         raise ValueError("A single-pass reply is a context request, or a nonempty events list without a decision")
-    result = await check_outline(events, session, prepared, planner, thought=response.get("thought", ""))
+    result = await check_outline(events, session, prepared, planner, plan=response.get("plan", ""))
     index = result["refused_event_index"]
     refused = result["decision"] == "need_revision"
     # Kept for review: what each check judged on every outline, accepted or refused.
@@ -203,7 +203,7 @@ async def _apply_candidates(session: dict, prepared: dict, response: dict, plann
                                      "validation_contract_version": 2, "outline_diagnostic_bypass": True}
         session["outline_validation_findings"] = []
     decision, audit = await handle_event(session=session, prepared=prepared,
-        response={"thought": response["thought"], "next_transition": deepcopy(events[choice])}, planner=planner)
+        response={"plan": response["plan"], "next_transition": deepcopy(events[choice])}, planner=planner)
     audit.update(candidate_events=deepcopy(events), selected_candidate_index=choice, llm_selected_candidate_index=llm_choice,
                  validation_contract_version=2, outline_diagnostic_bypass=True)
     if checks is not None:
