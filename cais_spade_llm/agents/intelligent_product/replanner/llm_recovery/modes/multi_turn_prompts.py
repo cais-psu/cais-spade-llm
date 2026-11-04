@@ -4660,9 +4660,13 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
 
     template = payload["outline_template"]
     accepted = list(session_state.get("accepted_outline_prefix") or [])
+    # The protocol itself (R_neural ∩ R_feasible): which candidate is applied, never what to propose.
+    checked = session_state.get("check_ra_feasibility") is True or session_state.get("check_cca_safety") is True
     selection = (
         "Plan how to get from the current state to the Recovery Goal. Propose 2–5 different ways to do the next step of that "
-        "plan, most preferred first."
+        "plan, most preferred first. "
+        + ("The first one in your order that passes every check becomes the next recovery event; the others are dropped."
+           if checked else "The first one becomes the next recovery event; the others are dropped.")
         if llm_selects_next_event(session_state) else
         "Plan how to get from the current state to the Recovery Goal. Propose 2–5 different ways to do the next step of that "
         "plan. Do not select or rank candidates; the enabled outline checks validate each one."

@@ -181,7 +181,13 @@ two passing outlines has a value written by code; both load for composition with
   runs (user go). The rerun from `a3f3418` (19:06–19:42, no provider refusals in 128 calls): Part slippage `draft_b84a29fb…`
   5 events, Conveyor `draft_01090eb6…` 7 events, ur5e-1 `draft_6415f806…` 12 events, all passed and in `outline_drafts`;
   Machining did not finish twice at the 40-turn budget (`draft_cf0e496b…` 34 events, `draft_3c71ddb2…` 26 events, every
-  declared completion BLOCKING). Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
+  declared completion BLOCKING). Reviews found every check verdict true and no scenario bias; the shuttles came from
+  hidden refusals of preferred candidates. Fixes 1–4 (user go) landed as `d65a3de`; Machining rerun from it passed first
+  try: `draft_44af8ec3…`, 18 events, 23 calls, 294,907 tokens (events 3–4 put KET4 on the M1 tray and pick it again).
+  The other three were rerun from `d65a3de` (user go), all passed first try: Part slippage `draft_ae747ab2…` 5 events,
+  Conveyor `draft_92540bfb…` 12 events (4–7 a loop: backward fallbacks applied after true refusals), ur5e-1 `draft_dda5d302…`
+  10 events. The four `d65a3de` outlines are the appendix candidates; the `a3f3418` copies of Part slippage, Conveyor and ur5e-1
+  stay in `outline_drafts` until the user decides. Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
   or also merging picks with places) is decided after that; compositions on a separate go. Open before composition: event
   lookups on one line, the two target contracts, the `detect_parts` publish key.
 - Earlier (November 2, 23:30): in `draft_compositions`, Part slippage `composition_ae42057d…` on `6cdab5fd`,

@@ -124,6 +124,8 @@ name the section or equation it implements. If it maps to none, ask the user fir
     return with it as feedback, and every refused completion stays in view (user, November 3, evening;
     before, facts returned only when every candidate failed, and only the latest refusal was shown). This
     needs a sentence in the paper.
+    The prompt states the rule itself: "The first one in your order that passes every check becomes the next
+    recovery event; the others are dropped." (user, November 3, night).
   - An unresolved search (NEEDS_CONTEXT) is a rejection, like INFEASIBLE: a finite search does not
     prove a pose reachable. A name the model does not declare is rejected, because Algorithm 1 has
     nothing to derive from it.

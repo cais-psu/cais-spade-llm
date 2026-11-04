@@ -639,7 +639,9 @@ def test_single_pass_prompt_differs_from_the_incremental_one_only_in_its_reply_f
         prompts.append(multi_turn._build_phase_prompt(draft.prepared, session)[1])
     incremental, single_pass = prompts
     for incremental_text, single_pass_text in (
-        ("Propose 2–5 different ways to do the next step of that plan, most preferred first.",
+        # Only the incremental reply has candidates, so only it says which one becomes the next event.
+        ("Propose 2–5 different ways to do the next step of that plan, most preferred first. The first one becomes the "
+         "next recovery event; the others are dropped.",
          "Give the whole plan in `events`: every recovery event, in the order they happen."),
         ("\nCandidate Rules\n", "\nEvent Rules\n"),
         ("- One event per candidate, by one resource: ", "- Each event, by one resource: "),

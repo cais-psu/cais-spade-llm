@@ -432,6 +432,19 @@ def test_safety_rules_reach_the_llm_only_as_the_setting_allows(shared_cell, tmp_
     assert draft.record["safety_rules_to_llm"] == setting and draft.record["safety_rules"][0]["id"] == "SAFE_cell_mutex"
 
 
+def test_the_prompt_states_which_candidate_becomes_the_next_event_as_the_setting_applies_it(shared_cell, tmp_path):
+    prepared, session = _draft(shared_cell, tmp_path)
+    session["current_phase"] = "outline"
+    session.update(check_ra_feasibility=True, check_cca_safety=True)
+    checked = multi_turn._build_phase_prompt(prepared, session)[1]
+    assert ("most preferred first. The first one in your order that passes every check becomes the next recovery event; "
+            "the others are dropped.") in checked
+    session.update(check_ra_feasibility=False, check_cca_safety=False)
+    unchecked = multi_turn._build_phase_prompt(prepared, session)[1]
+    assert "most preferred first. The first one becomes the next recovery event; the others are dropped." in unchecked
+    assert "passes every check" not in unchecked
+
+
 def test_the_prompt_asks_for_a_plan_and_dates_the_failure_facts_once_events_exist(shared_cell, tmp_path):
     prepared, session = _draft(shared_cell, tmp_path)
     session["current_phase"] = "outline"
@@ -450,6 +463,11 @@ def test_the_prompt_asks_for_a_plan_and_dates_the_failure_facts_once_events_exis
         assert ("Plan how to get from the current state to the Recovery Goal. Propose 2–5 different ways to do the next step "
                 "of that plan, most preferred first.") in prompt
         assert "Give your plan in `plan` (two short sentences)" in prompt
+        # The prompt states which candidate is applied, as the setting applies it.
+        assert ("most preferred first. The first one becomes the next recovery event; the others are dropped." in prompt
+                if not (session.get("check_ra_feasibility") or session.get("check_cca_safety")) else
+                "most preferred first. The first one in your order that passes every check becomes the next recovery event; "
+                "the others are dropped." in prompt)
     # Drafts offer neighbor_end_state right after the event's own end state.
     event_schema = multi_turn._get_response_schema("outline", session)["schema"]["$defs"]["outline_event"]
     names = list(event_schema["properties"])
