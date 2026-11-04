@@ -9,7 +9,7 @@ from pathlib import Path
 from nicegui import ui
 
 from cais_spade_llm.ui.evidence import BackgroundSection, read_json_cached
-from cais_spade_llm.ui.recovery_evidence import read_recovery_turn
+from cais_spade_llm.ui.recovery_evidence import read_recovery_turn, readable_prompt
 
 
 def _text(value) -> None:
@@ -54,7 +54,14 @@ def _messages(messages: list[dict], *, pretty_json: bool = False) -> None:
             if pretty_json and isinstance(content, str):
                 with suppress(json.JSONDecodeError):
                     content = json.loads(content)
-            _text(content)
+                _text(content)
+            else:
+                # The words the model received, with line breaks and indented facts; the exact payload stays one click away.
+                readable = readable_prompt(content)
+                _text(readable)
+                if readable != content:
+                    with ui.expansion("Raw content as sent").classes("w-full text-xs"):
+                        _text(content)
         if message.get("tool_calls"):
             ui.label("Tool requests").classes("font-semibold text-sm")
             _text(message["tool_calls"])

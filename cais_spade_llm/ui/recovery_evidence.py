@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,70 @@ STAGES = {
     "recovery_primitves": "primitive composition",
     "recovery_safety": "recovery safety",
 }
+
+
+CACHE_POINT = "──────── prompt cache point: the text above is reused from Claude's prompt cache ────────"
+_FACT_LINE = re.compile(r"^(?P<label>[^\s{\[][^{\[]*?): (?P<value>[{\[].*[}\]])$")
+
+
+def readable_prompt(content: Any) -> str:
+    """Return a prompt as a person reads it: its pieces joined, and its one-line JSON facts indented.
+
+    For display and export only; the model received the same words. A Claude prompt is sent as text pieces, and
+    a piece that ends a cached part carries ``cache_control``, shown here as one marker line. A line that is a JSON
+    object or array, alone or after a label such as ``/resources/ur5e-3/state_variables:``, is shown indented.
+
+    Args:
+        content: A message's content: a string, or a list of content pieces.
+
+    Returns:
+        The prompt text with real line breaks.
+    """
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        pieces = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                pieces.append(str(block.get("text", "")))
+                if block.get("cache_control"):
+                    pieces.append(f"\n{CACHE_POINT}\n")
+            else:
+                pieces.append(json.dumps(block, indent=2, ensure_ascii=False))
+        text = "".join(pieces)
+    else:
+        return json.dumps(content, indent=2, ensure_ascii=False)
+    return "\n".join(_indented_fact(line) for line in text.split("\n"))
+
+
+def _indented_fact(line: str) -> str:
+    stripped = line.strip()
+    if stripped[:1] in "{[" and stripped[-1:] in "}]":
+        try:
+            return _compact_json(json.loads(stripped))
+        except json.JSONDecodeError:
+            return line
+    match = _FACT_LINE.match(line)
+    if match is None:
+        return line
+    try:
+        value = json.loads(match["value"])
+    except json.JSONDecodeError:
+        return line
+    return f"{match['label']}:\n" + textwrap.indent(_compact_json(value), "  ")
+
+
+def _compact_json(value: Any, level: int = 0) -> str:
+    """Indent objects and long lists; keep anything that fits on one line on one line."""
+    flat = json.dumps(value, ensure_ascii=False)
+    if not isinstance(value, (dict, list)) or len(flat) + 2 * level <= 100:
+        return flat
+    inner = "  " * (level + 1)
+    if isinstance(value, dict):
+        rows = [f"{inner}{json.dumps(key, ensure_ascii=False)}: {_compact_json(item, level + 1)}" for key, item in value.items()]
+        return "{\n" + ",\n".join(rows) + "\n" + "  " * level + "}"
+    rows = [f"{inner}{_compact_json(item, level + 1)}" for item in value]
+    return "[\n" + ",\n".join(rows) + "\n" + "  " * level + "]"
 
 
 def _turn_header(path: Path) -> dict:

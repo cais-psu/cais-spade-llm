@@ -122,6 +122,29 @@ def _nominal_proof_ui_case(directory: Path) -> tuple[Path, dict, dict]:
     return path, summary, proof
 
 
+def test_a_cached_claude_prompt_reads_as_text_with_its_json_facts_indented():
+    from cais_spade_llm.ui.recovery_evidence import CACHE_POINT, readable_prompt
+
+    long_fact = {"source": "declaration", "value": {"domain": ["Buffer For Machined parts", "home", "Exit"],
+                                                    "description": "position (x, y, z), from the current_pose effect"}}
+    content = [{"type": "text", "text": "Task\nRetrieved context\n/resources/ur5e-3/state_variables: " + json.dumps(long_fact),
+                "cache_control": {"type": "ephemeral"}},
+               {"type": "text", "text": "\n\nResources\nM1 (resource)  idle; capabilities: trim (circle, square)"}]
+    text = readable_prompt(content)
+    lines = text.splitlines()
+    # The pieces are joined with real line breaks, and the cached part ends at one marker line.
+    assert lines[:3] == ["Task", "Retrieved context", "/resources/ur5e-3/state_variables:"]
+    assert text.index(CACHE_POINT) < text.index("\nResources\n")
+    # A long JSON fact is indented; a short list inside it stays on one line; other lines keep their words.
+    assert lines[3] == "  {" and '    "value": {' in lines
+    assert '      "domain": ["Buffer For Machined parts", "home", "Exit"],' in lines
+    assert "M1 (resource)  idle; capabilities: trim (circle, square)" in lines
+    # The words are the ones sent: the indented fact reads back as the same value.
+    fact = text.split("/resources/ur5e-3/state_variables:\n", 1)[1].split(CACHE_POINT, 1)[0]
+    assert json.loads(fact) == long_fact
+    assert readable_prompt("plain\ntext") == "plain\ntext"
+
+
 def test_nominal_proof_expanded_turn_loads_once_and_keeps_original_records(tmp_path, monkeypatch):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import recovery_artifacts
     from cais_spade_llm.ui import recovery_evidence
