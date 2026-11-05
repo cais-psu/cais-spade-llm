@@ -295,6 +295,65 @@ def test_the_kmr_path_is_resolved_as_its_planner_resolves_it_and_refused_only_wh
     # A waypoint no arm configuration reaches cannot be followed, though the end pose itself can be reached.
     refused = check({'target': [-4.13, 1.82, 1.155, 1., 0., 0., 0.], 'waypoints': [[-4.13, 3.5, 1.155, 1., 0., 0., 0.]]})
     assert refused['feasibility_status'] == 'INFEASIBLE' and 'cannot follow the Cartesian path' in refused['reason']
+def test_a_kmr_transfer_counts_only_where_its_own_path_reaches_it_in_the_orientation_it_takes():
+    from cais_spade_llm.recovery_framework.kmr_recovery import (
+        release_heights, tool_height, transfer_orientation, transfer_path_refusal,
+    )
+    from cais_spade_llm.recovery_framework.recovery_observations import read_observations
+
+    observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
+                                         'capture_b7dea70c1db74e1e9e98849380c09655/observations.json'))
+    scene = observations['inputs']['scene']
+    jid = observations['jids']['KMR']
+    config = observations['prepared_recovery_request']['recovery_resources'][jid]['resource_evidence'][
+        'continuous_motion_configuration']
+    target_z = tool_height(scene, 1.0)
+    approach_z = release_heights(scene, target_z)['approach']
+
+    def base(x, y, yaw):
+        return [x, y, 0., 0., 0., math.sin(yaw / 2), math.cos(yaw / 2)]
+
+    def refusal(at, tray):
+        held = transfer_orientation(scene, config, at, 'place', 'KET4_Square_4mm', None)
+        return transfer_path_refusal(scene, config, at, [*tray, approach_z, *held], [*tray, target_z, *held])
+
+    # Facing north at (-3.27, 1.35), M2's staging tray lies opposite the side the arm carries on, past its first
+    # joint's limit: the tray itself has a configuration, the way there from the transport pose does not.
+    assert 'cannot follow the Cartesian path' in refusal(base(-3.27, 1.35, 1.571), [-2.64, 1.10])
+    # With the tray on the side the arm carries on, the same place follows.
+    assert refusal(base(-2.10, 1.35, 1.571), [-2.60, 1.10]) is None
+    # A carried part keeps the transport pose's orientation, which turns with the base.
+    north = transfer_orientation(scene, config, base(-3.27, 1.35, 1.571), 'place', None, None)
+    east = transfer_orientation(scene, config, base(-3.27, 1.35, 0.), 'place', None, None)
+    assert abs(sum(a * b for a, b in zip(north, scene['KMR']['task_execution']['pick_orientation_xyzw']))) > .999
+    assert abs(sum(a * b for a, b in zip(north, east))) < .75
+
+
+def test_a_kmr_drive_counts_only_where_a_route_keeps_its_arm_clear_of_the_recorded_bodies():
+    from cais_spade_llm.recovery_framework.kmr_recovery import drive_route_refusal
+    from cais_spade_llm.recovery_framework.outline_draft import _navigation_floor
+    from cais_spade_llm.recovery_framework.ra_feasibility import recorded_cell
+    from cais_spade_llm.recovery_framework.recovery_observations import read_observations
+
+    observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
+                                         'capture_b7dea70c1db74e1e9e98849380c09655/observations.json'))
+    cell = recorded_cell(observations, _navigation_floor())
+    config = observations['prepared_recovery_request']['recovery_resources'][observations['jids']['KMR']][
+        'resource_evidence']['continuous_motion_configuration']
+    north = math.pi / 2
+
+    def refusal(start, target):
+        return drive_route_refusal(cell.scene, config, cell.floor, cell.bodies, start, target)
+
+    # Dock to dock, and from Storage to a dock: the base translates there with the arm clear.
+    assert refusal([-4.7, 2.2, north], [-2.7, 2.2, north]) is None
+    assert refusal([-5.54, 2.13, north], [-4.7, 2.2, north]) is None
+    # Beside M2's staging tray, facing north: every way in carries the arm, parked to the KMR's west, through a
+    # machine enclosure, as the live controller's sweep check found at (-3.275, 2.440) and (-3.242, 2.115).
+    refused = refusal([-2.7, 2.2, north], [-3.25, 1.45, north])
+    assert refused.startswith('no route at heading 1.571') and 'M1::enclosure' in refused
+
+
 def test_an_empty_belt_keeps_its_movement_and_each_resource_keeps_the_shared_events_it_takes_part_in(owner_context):
     def descriptor(rid):
         owner = owner_for(owner_context, rid)

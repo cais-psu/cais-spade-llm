@@ -160,6 +160,9 @@ class _Check:
             session_state=session, prepared_recovery_request=prepared)
         self.models = session.get("recovery_des_models") or {}
         self.failure_parts = session.get("base_symbolic_parts") or {}
+        # Mobile pick and place paths: the owner's refusal per base and approach, and the bases it refused.
+        self.path_checked: dict[tuple, str | None] = {}
+        self.path_refusals: list[tuple[list[float], str]] = []
         self.checks = session.get("ra_feasibility_checks") or []
         self.accepted = session.get("accepted_outline_prefix") or []
         self.part_names = set(self.parts) | set(session.get("symbolic_parts") or {})
@@ -522,10 +525,30 @@ class _Check:
 
     # Eq. 12's continuous constraint on a stated pose.
 
+    def drive_refusal(self, end: list[float]) -> str | None:
+        """Return why the acting mobile resource cannot drive to a base pose with its arm clear, or None.
+
+        The owner's own check (``kmr_recovery.drive_route_refusal``) on the recorded floor and bodies, from the base
+        pose the projected state records. A resource without that calculation, or without a recorded start, is not
+        judged here.
+        """
+        from cais_spade_llm.recovery_framework.kmr_recovery import drive_route_refusal
+
+        # Where the projected state leaves the base: the dock of the place it names, else its pose.
+        known, location = self.value(self.jid, "resource_location")
+        start = (self.dock_at(location) if known and isinstance(location, str) else None) or self.base_pose()
+        chain = self.chain()
+        if (not self.mobile() or "task_execution" not in self.cell.scene[self.rid] or start is None or chain is None
+                or not self.cell.floor or math.dist(start[:2], end[:2]) < 1e-6 and abs(start[2] - end[2]) < 1e-6):
+            return None
+        return drive_route_refusal(self.cell.scene, chain, self.cell.floor, self.cell.bodies,
+                                   [float(value) for value in start], [float(value) for value in end])
+
     def pose_constraint(self, name: str, after: Any) -> dict:
         if self.mobile():
             if self.base_fits(after):
-                return {"status": FEASIBLE}
+                refusal = self.drive_refusal([after["x"], after["y"], after.get("yaw", 0.0)])
+                return {"status": INFEASIBLE, "reason": refusal} if refusal else {"status": FEASIBLE}
             from cais_spade_llm.resources.kinematic_reach import BASE_PADDING_M, footprint_obstacles
 
             footprint = self.cell.scene[self.rid]["platform_overall_dimensions_m"]
@@ -799,14 +822,23 @@ class _Check:
                                 point[2])
 
     def reach_with_heights(self, chain: dict, point: list[float], orientation: list[float], bases: list[list[float]],
-                           heights: list[float], *, release: bool = False) -> dict | None:
+                           heights: list[float], *, release: bool = False, transfer: str | None = None,
+                           place: Any = None) -> dict | None:
         """Return the reach of a point from the first candidate base that also reaches what its owner needs above it.
 
         Each base is judged on all of them, so a base that only touches the spot does not end the search. A release
         needs the owner's target and its approach, which the owner moves toward the arm where straight above is out
-        of reach; anything else needs every height straight above the spot.
+        of reach; anything else needs every height straight above the spot. A base that reaches them is used only if
+        the owner's own path takes the arm there from its transport pose, in the gripper orientation the owner takes;
+        a base whose path fails is kept with the owner's reason in ``path_refusals``.
         """
-        from cais_spade_llm.recovery_framework.kmr_recovery import release_shift, tool_height
+        from cais_spade_llm.recovery_framework.kmr_recovery import (
+            release_heights,
+            release_shift,
+            tool_height,
+            transfer_orientation,
+            transfer_path_refusal,
+        )
         from cais_spade_llm.resources.kinematic_reach import reach_from_base
 
         def reached(position: list[float], candidates: list[list[float]]) -> dict:
@@ -825,12 +857,30 @@ class _Check:
                 return None
             base = found["base_pose"]
             at_point = found if release or not heights else reached(point, [base])
+            pose = [base[0], base[1], chain["root_xyz"][2], *Rotation.from_euler("z", base[2]).as_quat()]
             if release:
-                pose = [base[0], base[1], chain["root_xyz"][2], *Rotation.from_euler("z", base[2]).as_quat()]
-                fits = release_shift(self.cell.scene, pose, [*target, *orientation],
-                                     lambda tool: arrives(tool[:3], base)) is not None
+                shift = release_shift(self.cell.scene, pose, [*target, *orientation],
+                                      lambda tool: arrives(tool[:3], base))
+                fits = shift is not None
+                approach = ([target[0] + shift[0], target[1] + shift[1], release_heights(self.cell.scene, target[2])["approach"]]
+                            if fits else None)
             else:
                 fits = at_point["feasibility_status"] == FEASIBLE and all(arrives([*point[:2], z], base) for z in heights[1:])
+                approach = first
+            if fits and heights:
+                key = (tuple(base), tuple(round(value, 6) for value in approach))
+                if key not in self.path_checked:
+                    held = transfer_orientation(self.cell.scene, chain, pose, transfer or "place", self.part,
+                                                self.name_of(place) if isinstance(place, str) else None)
+                    target_point = [*point[:2], tool_height(self.cell.scene, point[2])]
+                    self.path_checked[key] = transfer_path_refusal(
+                        self.cell.scene, chain, pose, self.reference_pose(approach, held),
+                        self.reference_pose(target_point, held))
+                failure = self.path_checked[key]
+                if failure is not None:
+                    if all(row[0] != base for row in self.path_refusals):
+                        self.path_refusals.append((base, failure))
+                    fits = False
             if fits:
                 return at_point
             remaining.remove(base)
@@ -869,13 +919,15 @@ class _Check:
         from cais_spade_llm.recovery_framework.kmr_recovery import RELEASE_SHIFTS_M
 
         heights = self.transfer_heights(transfer, place, point)
+        self.path_refusals = []
         # A release at the dock's own fixture keeps its owner's straight approach.
         release = bool(transfer == "place" and heights and self.dock_at(place) not in bases)
         # A declared dock that reaches the area is the base used, before any closer grid pose.
         docks = [base for base in bases if base in self.docks()]
         for candidates in ([docks] if docks else []) + [bases]:
             for orientation in self.orientations():
-                checked = self.reach_with_heights(chain, point, orientation, candidates, heights, release=release)
+                checked = self.reach_with_heights(chain, point, orientation, candidates, heights, release=release,
+                                                  transfer=transfer, place=place)
                 if checked is not None:
                     return {"status": FEASIBLE, "witness": {"base_pose": checked["base_pose"],
                                                             "joint_positions": checked["joint_positions"]}}
@@ -884,8 +936,15 @@ class _Check:
             height += f" or up to {RELEASE_SHIFTS_M[-1]:.2f} m toward its arm"
         if len(bases) == 1:
             x, y, yaw = bases[0]
+            if self.path_refusals:
+                return {"status": NEEDS_CONTEXT, "reason": f"from its base ({x:.3f}, {y:.3f}, yaw {yaw:.3f}) {self.rid} "
+                                                           f"reaches {what}{height}, but not along its path from its "
+                                                           f"transport pose: {self.path_refusals[0][1]}"}
             return {"status": NEEDS_CONTEXT, "reason": f"{self.rid} has no configuration at {what}{height} from its "
                                                        f"base ({x:.3f}, {y:.3f}, yaw {yaw:.3f})"}
+        if self.path_refusals:
+            return {"status": NEEDS_CONTEXT, "reason": f"no candidate base pose gave {self.rid} a path from its transport "
+                                                       f"pose to {what}{height}: {self.path_refusals[0][1]}"}
         return {"status": NEEDS_CONTEXT, "reason": f"no candidate base pose gave {self.rid} a configuration at "
                                                    f"{what}{height}; reachability is unresolved"}
 
@@ -1138,8 +1197,10 @@ class _Check:
         if isinstance(location, str) and location != before and location not in self.named_poses():
             if self.mobile():
                 dock = self.dock_at(location)
-                rows.append({"check": "navigate", "place": location, "status": FEASIBLE if dock else NEEDS_CONTEXT,
-                             **({"witness": {"base_pose": dock}} if dock else
+                refusal = self.drive_refusal(dock) if dock else None
+                rows.append({"check": "navigate", "place": location,
+                             "status": INFEASIBLE if refusal else FEASIBLE if dock else NEEDS_CONTEXT,
+                             **({"reason": refusal} if refusal else {"witness": {"base_pose": dock}} if dock else
                                 {"reason": f"{self.rid} has no dock at {location}"})})
             # A stated place can be any JSON value, such as a dict, so the places are compared, not hashed.
             elif not picks_or_places or location not in [row.get("place") for row in rows]:
