@@ -768,6 +768,121 @@ def transfer_path_refusal(scene: dict, config: dict, base_pose: list, approach: 
     return failure
 
 
+# The radius of the iiwa's links about the line through their frames, as the arm sweep check reads the arm.
+ARM_SWEEP_RADIUS_M = 0.08
+
+
+def drive_route_refusal(scene: dict, config: dict, floor: dict, bodies: dict, start: list, target: list) -> str | None:
+    """Return why the KMR cannot drive from ``start`` to ``target`` with its arm clear, or None when it can.
+
+    The KMR drives with its arm in its declared transport pose (``parked_arm_configuration``), which turns with the
+    base. Its base controller can always translate at the target heading. This looks for such a route: grid poses
+    anchored at the start, each with the footprint and its margin on free floor (``footprint_obstacles``) and with
+    the arm, the line through its link frames widened by ``ARM_SWEEP_RADIUS_M``, clear of every recorded static body;
+    the start and the target keep the base checks of their own (a declared dock, a stated pose's fit) and need only
+    the arm clear. The base first turns in place at the start. It finds whether a route exists and writes none.
+
+    Args:
+        scene: The captured owner configuration.
+        config: The KMR's continuous-motion chain.
+        floor: The navigation floor map (``floor_extent_xy`` and ``floor_obstacles_xy``).
+        bodies: The recorded Gazebo models with their collision bounds.
+        start: The base pose ``[x, y, yaw]`` the drive starts from.
+        target: The base pose ``[x, y, yaw]`` it ends at.
+    """
+    import heapq
+
+    import numpy as np
+
+    from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms, representative_pose
+    from cais_spade_llm.resources.kinematic_reach import footprint_obstacles
+
+    names = scene['KMR']['arm_joint_names']
+    joints = [float(value) for value in scene['KMR']['parked_arm_configuration']]
+    footprint = scene['KMR']['platform_overall_dimensions_m']
+    boxes, labels = [], []
+    for model, body in bodies.items():
+        if not body.get('static') or model == 'ground_plane':
+            continue
+        for link in (body.get('links') or {}).values():
+            for collision in link.get('collisions', []):
+                if collision.get('bounds'):
+                    boxes.append(collision['bounds'])
+                    labels.append(collision.get('id', model))
+    boxes = np.array(boxes, dtype=float).reshape(-1, 3, 2)
+
+    def arm_points(yaw: float) -> np.ndarray:
+        at = with_root(config, pose_matrix([0., 0., 0., *quaternion([0., 0., yaw])]))
+        transforms = kinematic_transforms(at, {name: interval(value) for name, value in zip(names, joints, strict=True)})
+        frames = [np.array(representative_pose(pose)[:3], dtype=float) for pose in transforms.values()]
+        points = [frames[0]]
+        for before, after in zip(frames, frames[1:]):
+            steps = max(1, int(np.linalg.norm(after - before) / 0.02))
+            points += [before + (after - before) * index / steps for index in range(1, steps + 1)]
+        return np.array(points)
+
+    def arm_meets(x: float, y: float, local: np.ndarray) -> str | None:
+        if not len(boxes):
+            return None
+        points = local + np.array([x, y, 0.])
+        gap = np.maximum(np.maximum(boxes[None, :, :, 0] - points[:, None], 0.), points[:, None] - boxes[None, :, :, 1])
+        hits = np.argwhere(np.linalg.norm(gap, axis=2) < ARM_SWEEP_RADIUS_M)
+        return labels[hits[0][1]] if len(hits) else None
+
+    yaw = float(target[2])
+    turn = math.atan2(math.sin(yaw - start[2]), math.cos(yaw - start[2]))
+    for index in range(int(abs(turn) / math.radians(5)) + 1):
+        heading = start[2] + turn * index / max(1, int(abs(turn) / math.radians(5)))
+        meets = arm_meets(start[0], start[1], arm_points(heading))
+        if meets:
+            return (f"turning at ({start[0]:.3f}, {start[1]:.3f}) toward heading {yaw:.3f}, the KMR's arm, in its "
+                    f"transport pose, meets {meets}")
+    local, step = arm_points(yaw), 0.05
+    met: dict[str, int] = {}
+    known: dict[tuple[int, int], bool] = {}
+
+    def centre(cell: tuple[int, int]) -> tuple[float, float]:
+        return start[0] + cell[0] * step, start[1] + cell[1] * step
+
+    end = (round((target[0] - start[0]) / step), round((target[1] - start[1]) / step))
+
+    def free(cell: tuple[int, int]) -> bool:
+        if cell not in known:
+            x, y = centre(cell)
+            known[cell] = cell in ((0, 0), end) or not footprint_obstacles(floor, footprint, [x, y, yaw])
+            if known[cell]:
+                meets = arm_meets(x, y, local)
+                if meets:
+                    met[meets] = met.get(meets, 0) + 1
+                    known[cell] = False
+        return known[cell]
+
+    if not free(end):
+        return (f"at ({target[0]:.3f}, {target[1]:.3f}, yaw {yaw:.3f}) the KMR's arm, in its transport pose, meets "
+                f"{arm_meets(*centre(end), local)}")
+    bounds = (min(0, end[0]) - 30, max(0, end[0]) + 30, min(0, end[1]) - 30, max(0, end[1]) + 30)
+    queue, spent = [(0., (0, 0))], {(0, 0): 0.}
+    while queue:
+        _, cell = heapq.heappop(queue)
+        if cell == end:
+            return None
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                near = (cell[0] + dx, cell[1] + dy)
+                if (not (dx or dy) or not (bounds[0] <= near[0] <= bounds[1] and bounds[2] <= near[1] <= bounds[3])
+                        or not free(near) or (dx and dy and not (free((cell[0] + dx, cell[1]))
+                                                                 and free((cell[0], cell[1] + dy))))):
+                    continue
+                total = spent[cell] + math.hypot(dx, dy)
+                if total < spent.get(near, math.inf):
+                    spent[near] = total
+                    heapq.heappush(queue, (total + math.dist(near, end), near))
+    blocking = ', '.join(name for name, _ in sorted(met.items(), key=lambda item: -item[1])[:3]) or 'nothing recorded'
+    return (f"no route at heading {yaw:.3f} from ({start[0]:.3f}, {start[1]:.3f}) to ({target[0]:.3f}, {target[1]:.3f}) "
+            f"keeps the KMR's footprint on free floor and its arm, in its transport pose, clear; on the way the arm meets "
+            f"{blocking}")
+
+
 def route_between(scene: dict, part: str | None, source: str, target: str) -> list[list[float]]:
     """Return the exact declared KMR route without selecting a recovery event."""
     for row in scene['KMR']['predefined_route_waypoints']:

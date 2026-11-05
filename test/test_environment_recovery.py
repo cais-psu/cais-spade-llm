@@ -329,6 +329,31 @@ def test_a_kmr_transfer_counts_only_where_its_own_path_reaches_it_in_the_orienta
     assert abs(sum(a * b for a, b in zip(north, east))) < .75
 
 
+def test_a_kmr_drive_counts_only_where_a_route_keeps_its_arm_clear_of_the_recorded_bodies():
+    from cais_spade_llm.recovery_framework.kmr_recovery import drive_route_refusal
+    from cais_spade_llm.recovery_framework.outline_draft import _navigation_floor
+    from cais_spade_llm.recovery_framework.ra_feasibility import recorded_cell
+    from cais_spade_llm.recovery_framework.recovery_observations import read_observations
+
+    observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
+                                         'capture_b7dea70c1db74e1e9e98849380c09655/observations.json'))
+    cell = recorded_cell(observations, _navigation_floor())
+    config = observations['prepared_recovery_request']['recovery_resources'][observations['jids']['KMR']][
+        'resource_evidence']['continuous_motion_configuration']
+    north = math.pi / 2
+
+    def refusal(start, target):
+        return drive_route_refusal(cell.scene, config, cell.floor, cell.bodies, start, target)
+
+    # Dock to dock, and from Storage to a dock: the base translates there with the arm clear.
+    assert refusal([-4.7, 2.2, north], [-2.7, 2.2, north]) is None
+    assert refusal([-5.54, 2.13, north], [-4.7, 2.2, north]) is None
+    # Beside M2's staging tray, facing north: every way in carries the arm, parked to the KMR's west, through a
+    # machine enclosure, as the live controller's sweep check found at (-3.275, 2.440) and (-3.242, 2.115).
+    refused = refusal([-2.7, 2.2, north], [-3.25, 1.45, north])
+    assert refused.startswith('no route at heading 1.571') and 'M1::enclosure' in refused
+
+
 def test_an_empty_belt_keeps_its_movement_and_each_resource_keeps_the_shared_events_it_takes_part_in(owner_context):
     def descriptor(rid):
         owner = owner_for(owner_context, rid)

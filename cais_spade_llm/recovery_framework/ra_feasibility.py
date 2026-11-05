@@ -525,10 +525,30 @@ class _Check:
 
     # Eq. 12's continuous constraint on a stated pose.
 
+    def drive_refusal(self, end: list[float]) -> str | None:
+        """Return why the acting mobile resource cannot drive to a base pose with its arm clear, or None.
+
+        The owner's own check (``kmr_recovery.drive_route_refusal``) on the recorded floor and bodies, from the base
+        pose the projected state records. A resource without that calculation, or without a recorded start, is not
+        judged here.
+        """
+        from cais_spade_llm.recovery_framework.kmr_recovery import drive_route_refusal
+
+        # Where the projected state leaves the base: the dock of the place it names, else its pose.
+        known, location = self.value(self.jid, "resource_location")
+        start = (self.dock_at(location) if known and isinstance(location, str) else None) or self.base_pose()
+        chain = self.chain()
+        if (not self.mobile() or "task_execution" not in self.cell.scene[self.rid] or start is None or chain is None
+                or not self.cell.floor or math.dist(start[:2], end[:2]) < 1e-6 and abs(start[2] - end[2]) < 1e-6):
+            return None
+        return drive_route_refusal(self.cell.scene, chain, self.cell.floor, self.cell.bodies,
+                                   [float(value) for value in start], [float(value) for value in end])
+
     def pose_constraint(self, name: str, after: Any) -> dict:
         if self.mobile():
             if self.base_fits(after):
-                return {"status": FEASIBLE}
+                refusal = self.drive_refusal([after["x"], after["y"], after.get("yaw", 0.0)])
+                return {"status": INFEASIBLE, "reason": refusal} if refusal else {"status": FEASIBLE}
             from cais_spade_llm.resources.kinematic_reach import BASE_PADDING_M, footprint_obstacles
 
             footprint = self.cell.scene[self.rid]["platform_overall_dimensions_m"]
@@ -1177,8 +1197,10 @@ class _Check:
         if isinstance(location, str) and location != before and location not in self.named_poses():
             if self.mobile():
                 dock = self.dock_at(location)
-                rows.append({"check": "navigate", "place": location, "status": FEASIBLE if dock else NEEDS_CONTEXT,
-                             **({"witness": {"base_pose": dock}} if dock else
+                refusal = self.drive_refusal(dock) if dock else None
+                rows.append({"check": "navigate", "place": location,
+                             "status": INFEASIBLE if refusal else FEASIBLE if dock else NEEDS_CONTEXT,
+                             **({"reason": refusal} if refusal else {"witness": {"base_pose": dock}} if dock else
                                 {"reason": f"{self.rid} has no dock at {location}"})})
             # A stated place can be any JSON value, such as a dict, so the places are compared, not hashed.
             elif not picks_or_places or location not in [row.get("place") for row in rows]:
