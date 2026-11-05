@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import heapq
 import math
 import threading
 import time
@@ -164,6 +165,33 @@ def clamp_planar_velocity(
             float(minimum_in_place_angular_speed), bounded_angular
         )
     return bounded_x, bounded_y, bounded_angular
+
+
+def path_turn_speed_limit(
+    poses: tuple[tuple[float, float, float], ...],
+    max_linear_speed: float,
+    max_angular_speed: float,
+    window_m: float = 0.3,
+) -> float:
+    """Bound translation so the base turns as fast as the path does.
+
+    A lattice segment can change heading while it translates. The base turns at
+    most ``max_angular_speed``; translating faster leaves the measured heading
+    behind the checked path headings, and the footprint off the validated sweep.
+    Turning is measured over ``window_m`` of travel, or over a shorter segment.
+    """
+
+    worst = 0.0
+    for start in range(len(poses)):
+        travelled, end = 0.0, start
+        while end + 1 < len(poses) and travelled < window_m:
+            travelled += math.dist(poses[end][:2], poses[end + 1][:2])
+            end += 1
+        if travelled > 1e-6 and (travelled >= window_m or start == 0):
+            worst = max(worst, abs(normalize_angle(poses[end][2] - poses[start][2])) / travelled)
+    if worst <= 0.0:
+        return float(max_linear_speed)
+    return min(float(max_linear_speed), float(max_angular_speed) / worst)
 
 
 def slew_planar_velocity(
@@ -537,6 +565,98 @@ def stopping_reaction_time(
     return simulation_speed * (command_timeout + control_period) + observation_age_sim_sec
 
 
+class SweepIntersection(ValueError):
+    """The arm or carried payload meets geometry at a base pose of a planned sweep."""
+
+    def __init__(self, message: str, pose: tuple[float, float, float]) -> None:
+        super().__init__(message)
+        self.pose = pose
+
+
+def constant_heading_route(
+    occupancy_map: Any,
+    start: tuple[float, float, float],
+    target: tuple[float, float, float],
+    *,
+    margin_m: float = 1.5,
+    clearance_cells: int = 6,
+    avoid: tuple[tuple[float, float], ...] = (),
+    avoid_radius_m: float = 0.25,
+) -> tuple[tuple[tuple[float, float, float], ...], tuple[tuple[float, float, float], ...]] | None:
+    """Search the fixed map for a route the base follows at the target heading.
+
+    An omnidirectional base can translate without turning. Grid poses anchored at the start are each checked with
+    the full padded footprint check; the route prefers poses away from blocked ones, and its corners are joined by
+    the same checked sweep. Base poses in ``avoid``, where the arm or its payload met geometry, are kept
+    ``avoid_radius_m`` away from. Returns the poses from the start to the target and, for every grid pose along it in
+    order, its x, y and clearance: the distance in metres it can travel toward the nearest blocked pose, half a grid
+    step short of it. None when no route lies within ``margin_m`` of the start and target.
+    """
+
+    info = occupancy_map.info
+    step = float(info.resolution)
+    yaw = float(target[2])
+    low_x, high_x = min(start[0], target[0]) - margin_m, max(start[0], target[0]) + margin_m
+    low_y, high_y = min(start[1], target[1]) - margin_m, max(start[1], target[1]) + margin_m
+    columns = int(math.floor((low_x - start[0]) / step)), int(math.ceil((high_x - start[0]) / step))
+    rows = int(math.floor((low_y - start[1]) / step)), int(math.ceil((high_y - start[1]) / step))
+
+    def centre(cell: tuple[int, int]) -> tuple[float, float]:
+        return start[0] + cell[0] * step, start[1] + cell[1] * step
+
+    free = {(i, j) for i in range(columns[0], columns[1] + 1) for j in range(rows[0], rows[1] + 1)
+            if all(math.dist(centre((i, j)), point) > avoid_radius_m for point in avoid)
+            and base_path_is_clear(occupancy_map, ((*centre((i, j)), yaw),))}
+    end = (round((target[0] - start[0]) / step), round((target[1] - start[1]) / step))
+    if (0, 0) not in free or end not in free or not base_path_is_clear(
+            occupancy_map, ((*centre(end), yaw), tuple(target))):
+        return None
+    neighbours = [(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy]
+    # Cells from the nearest blocked one, up to clearance_cells.
+    clearance = {cell: 0 for cell in free if any((cell[0] + dx, cell[1] + dy) not in free for dx, dy in neighbours)}
+    frontier = list(clearance)
+    while frontier:
+        following = []
+        for cell in frontier:
+            for dx, dy in neighbours:
+                near = (cell[0] + dx, cell[1] + dy)
+                if near in free and near not in clearance and clearance[cell] + 1 < clearance_cells:
+                    clearance[near] = clearance[cell] + 1
+                    following.append(near)
+        frontier = following
+
+    def cost(cell: tuple[int, int]) -> float:
+        return 1.0 + 3.0 * (clearance_cells - clearance.get(cell, clearance_cells)) / clearance_cells
+
+    queue, came, spent = [(0.0, (0, 0))], {(0, 0): None}, {(0, 0): 0.0}
+    while queue:
+        _, cell = heapq.heappop(queue)
+        if cell == end:
+            break
+        for dx, dy in neighbours:
+            near = (cell[0] + dx, cell[1] + dy)
+            if near not in free or (dx and dy and ((cell[0] + dx, cell[1]) not in free
+                                                   or (cell[0], cell[1] + dy) not in free)):
+                continue
+            total = spent[cell] + math.hypot(dx, dy) * cost(near)
+            if total < spent.get(near, math.inf):
+                spent[near], came[near] = total, cell
+                heapq.heappush(queue, (total + math.dist(near, end), near))
+    if end not in came:
+        return None
+    cells = [end]
+    while came[cells[-1]] is not None:
+        cells.append(came[cells[-1]])
+    cells.reverse()
+    corners = [cells[0], *[here for before, here, after in zip(cells, cells[1:], cells[2:])
+                           if (here[0] - before[0], here[1] - before[1]) != (after[0] - here[0], after[1] - here[1])],
+               cells[-1]]
+    route = tuple([(start[0], start[1], yaw), *[(*centre(cell), yaw) for cell in corners[1:]], tuple(target)])
+    if not base_path_is_clear(occupancy_map, route):
+        return None
+    return route, tuple((*centre(cell), step * (clearance.get(cell, clearance_cells) + 0.5)) for cell in cells)
+
+
 def braking_speed_limit(distance: float, acceleration: float, reaction_time: float) -> float:
     """Bound speed so latency and braking fit inside the remaining clear distance."""
     if (not all(math.isfinite(v) for v in (distance, acceleration, reaction_time))
@@ -650,6 +770,8 @@ def main() -> None:
             self._nav_command_monotonic: float | None = None
             self._navigation_active = False
             self._follow_path_active = False
+            self._path_speed_limit: float | None = None
+            self._route_clearance: tuple[tuple[float, float, float], ...] | None = None
             self._last_output = (0.0, 0.0, 0.0)
             self._last_velocity_stamp: float | None = None
             self._last_hold_reason: str | None = None
@@ -956,9 +1078,18 @@ def main() -> None:
             )):
                 self._abort_base_motion("KMR velocity command is not finite")
                 return
+            linear_limit = self.max_linear_speed if self._path_speed_limit is None else self._path_speed_limit
+            route = getattr(self, '_route_clearance', None)
+            if route:
+                # On a constant-heading route, travel only as fast as the base stops within the clearance of the
+                # next 0.6 m of it, so that its stopping sweep stays clear where the route turns a corner.
+                nearest = min(range(len(route)), key=lambda index: math.dist(route[index][:2], pose[:2]))
+                ahead = min(row[2] for row in route[nearest:nearest + 12])
+                reaction = getattr(self, 'simulation_speed', 1.0) * (self.command_timeout + 2.0 * self.control_period)
+                linear_limit = min(linear_limit, braking_speed_limit(ahead, self.max_linear_acceleration, reaction))
             x, y, angular = clamp_planar_velocity(
                 command.linear.x, command.linear.y, command.angular.z,
-                self.max_linear_speed, self.max_angular_speed,
+                linear_limit, self.max_angular_speed,
                 self.minimum_in_place_angular_speed,
             )
             x, y, angular = slew_planar_velocity(
@@ -1484,6 +1615,7 @@ def main() -> None:
             return handle
 
         def _compute_base_path(self, target: tuple[float, float, float], goal_handle: Any) -> Any:
+            self._route_clearance = None
             start = self._check_motion(goal_handle)
             if abs(normalize_angle(target[2] - start[2])) <= 0.05:
                 direct = NavPath()
@@ -1521,9 +1653,52 @@ def main() -> None:
                 handle = self._send_motion_goal(self.compute_path_client, request, goal_handle)
                 result = self._wait_motion_future(handle.get_result_async(), goal_handle, 20.0)
                 self._nav_goal_handle = None
-                if result.status != GoalStatus.STATUS_SUCCEEDED:
-                    raise RuntimeError("No collision-free KMR base path was found")
-                path = result.result.path
+                prepared = None
+                if result.status == GoalStatus.STATUS_SUCCEEDED:
+                    try:
+                        prepared = prepare_base_path(result.result.path, self._check_motion(goal_handle), target,
+                                                     self._occupancy_map)
+                    except ValueError as exc:
+                        refusal: Exception = exc
+                else:
+                    refusal = RuntimeError("No collision-free KMR base path was found")
+                if prepared is not None:
+                    try:
+                        self._validate_transport_sweeps(
+                            (tuple(planar_pose(point.pose) for point in prepared.poses),), goal_handle=goal_handle)
+                    except SweepIntersection as exc:
+                        refusal = exc
+                    else:
+                        return prepared
+                # The lattice checks its own footprint, which can pass a pose this controller's padded sweep refuses,
+                # and neither sees the arm. An omnidirectional base can still translate at the target heading: such a
+                # route is searched, and searched again away from each base pose where the arm or payload meets geometry.
+                avoid: list[tuple[float, float]] = []
+                for _ in range(25):
+                    if isinstance(refusal, SweepIntersection):
+                        avoid.append(tuple(refusal.pose[:2]))
+                        self.get_logger().info(f"KMR route search avoids arm contact {len(avoid)}: {refusal}")
+                    found = constant_heading_route(self._occupancy_map, self._check_motion(goal_handle), target,
+                                                   avoid=tuple(avoid))
+                    if found is None:
+                        raise refusal
+                    route, clearance = found
+                    path = NavPath()
+                    path.header.frame_id = "world"
+                    path.poses = [self._pose_stamped(pose) for pose in route]
+                    prepared = prepare_base_path(path, self._check_motion(goal_handle), target, self._occupancy_map)
+                    try:
+                        self._validate_transport_sweeps(
+                            (tuple(planar_pose(point.pose) for point in prepared.poses),), goal_handle=goal_handle)
+                    except SweepIntersection as exc:
+                        refusal = exc
+                        continue
+                    self._route_clearance = clearance
+                    self.get_logger().info(
+                        f"Lattice path refused ({refusal}); using a constant-heading KMR route of {len(route)} poses, "
+                        f"{min(row[2] for row in clearance):.3f} m least clearance, {len(avoid)} arm contacts avoided")
+                    return prepared
+                raise refusal
             return prepare_base_path(path, self._check_motion(goal_handle), target, self._occupancy_map)
 
         def _publish_base_feedback(self, goal_handle: Any, target: tuple[float, float, float]) -> None:
@@ -1613,8 +1788,8 @@ def main() -> None:
                         if response is None or not response.valid:
                             contacts = [(contact.contact_body_1, contact.contact_body_2)
                                         for contact in response.contacts] if response is not None else []
-                            raise ValueError(
-                                f"KMR arm or payload sweep intersects geometry at {pose}: {contacts}"
+                            raise SweepIntersection(
+                                f"KMR arm or payload sweep intersects geometry at {pose}: {contacts}", pose,
                             )
                         checked_states += 1
                     pending = remaining
@@ -1681,6 +1856,10 @@ def main() -> None:
                     self._validate_transport_sweeps(
                         (tuple(planar_pose(point.pose) for point in segment.poses),), goal_handle=goal_handle,
                     )
+                    self._path_speed_limit = path_turn_speed_limit(
+                        tuple(planar_pose(point.pose) for point in segment.poses),
+                        self.max_linear_speed, self.max_angular_speed,
+                    )
                     request = FollowPath.Goal()
                     request.path = segment
                     request.controller_id = "FollowPath"
@@ -1734,6 +1913,7 @@ def main() -> None:
                             named=isinstance(goal_handle.request, DockKMR.Goal),
                             position_tolerance=0.06, yaw_tolerance=0.05,
                         )
+                self._path_speed_limit = None
                 self._stop()
                 with self._lock:
                     self._nav_command = None
@@ -1765,6 +1945,8 @@ def main() -> None:
                 time.sleep(self.control_period)
 
         def _finish_base_action(self) -> None:
+            self._path_speed_limit = None
+            self._route_clearance = None
             self._navigation_active = False
             self._nav_goal_handle = None
             self._release_base_action()

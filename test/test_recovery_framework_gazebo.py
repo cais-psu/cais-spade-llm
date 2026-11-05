@@ -2023,6 +2023,8 @@ def test_fixed_kmr_map_and_nav2_parameters_match_the_accepted_cell() -> None:
     assert planner['rotation_penalty'] == 5.0
     assert planner['allow_reverse_expansion'] is True
     assert planner['reverse_penalty'] == 1.0
+    # prepare_base_path connects a lattice end at most 0.10 m from the target.
+    assert planner['tolerance'] == 0.10
     launch_source = LAUNCH_PATH.read_text()
     assert 'sample_primitives/5cm_resolution/0.5m_turning_radius/omni/output.json' in launch_source
     assert "'lattice_filepath': str(lattice_filepath)" in launch_source
@@ -2068,7 +2070,8 @@ def test_fixed_kmr_map_and_nav2_parameters_match_the_accepted_cell() -> None:
         assert parameters['footprint'] == (
             '[[0.595, 0.36], [0.595, -0.36], [-0.595, -0.36], [-0.595, 0.36]]'
         )
-        assert parameters['footprint_padding'] == 0.03
+        # The planner's costmap plans a little inside the controller's padded footprint check.
+        assert parameters['footprint_padding'] == (0.05 if name == 'global_costmap' else 0.03)
         assert 'obstacle_layer' not in parameters['plugins']
 
 
@@ -2284,6 +2287,25 @@ def test_kmr_short_validated_m1_segment_replaces_nav2_detour() -> None:
     assert max(pose[1] for pose in poses) <= target[1] + 1e-9
     assert kmr_base.base_path_is_clear(occupancy_map, poses)
     assert any('validated straight KMR segment' in message for message in messages)
+
+
+def test_kmr_finds_a_constant_heading_route_where_a_lattice_path_fails_its_sweep() -> None:
+    occupancy_map = _kmr_test_map()
+    # The M1 dock to the M2 dock: the straight line is blocked, and the lattice's own footprint check can pass poses
+    # the padded sweep refuses; an omnidirectional base translates there at the target heading.
+    start, target = (-4.7048, 2.1997, 1.5655), (-2.7, 2.2, math.pi / 2)
+    assert not kmr_base.base_path_is_clear(occupancy_map, (start, (start[0], start[1], target[2]), target))
+    route, clearance = kmr_base.constant_heading_route(occupancy_map, start, target)
+    assert route[0][:2] == pytest.approx(start[:2]) and route[-1] == pytest.approx(target)
+    assert all(pose[2] == pytest.approx(target[2]) for pose in route)
+    assert kmr_base.base_path_is_clear(occupancy_map, route)
+    assert all(row[2] > 0 for row in clearance) and math.dist(clearance[-1][:2], target[:2]) < 0.05
+    # Where the arm or payload met geometry, the next route keeps away from that base pose.
+    contact = clearance[len(clearance) // 2][:2]
+    _, around = kmr_base.constant_heading_route(occupancy_map, start, target, avoid=(contact,))
+    assert all(math.dist(row[:2], contact) > 0.25 for row in around)
+    # A target inside an obstacle has no route.
+    assert kmr_base.constant_heading_route(occupancy_map, start, (-2.13, 1.82, math.pi / 2)) is None
 
 
 def test_kmr_sweep_rejects_corner_crossing_with_clear_endpoints() -> None:
@@ -3419,6 +3441,16 @@ def test_base_route_replans_and_brakes_at_each_waypoint():
     assert node._navigation_active is True
 
 
+def test_kmr_turning_lattice_segment_is_followed_only_as_fast_as_the_base_turns() -> None:
+    straight = tuple((0.1 * index, 0.0, 1.571) for index in range(11))
+    assert kmr_base.path_turn_speed_limit(straight, 1.5, 0.5) == 1.5
+    # 0.6 rad over each 0.3 m of travel: the base keeps the path heading up to 0.25 m/s.
+    turning = tuple((0.05 * index, 0.0, 0.1 * index) for index in range(11))
+    assert kmr_base.path_turn_speed_limit(turning, 1.5, 0.5) == pytest.approx(0.25)
+    # A rotation in place has no translation to bound.
+    assert kmr_base.path_turn_speed_limit(((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)), 1.5, 0.5) == 1.5
+
+
 def test_kmr_nav2_handoff_finishes_each_path_segment_before_the_next() -> None:
     """Reserve the docking handoff for the final waypoint and check each stop."""
     import ast
@@ -3456,6 +3488,7 @@ def test_kmr_nav2_handoff_finishes_each_path_segment_before_the_next() -> None:
         'planar_pose': lambda pose: pose,
         'prepare_base_path': lambda route, *_args: route,
         'split_base_path': lambda _route: segments,
+        'path_turn_speed_limit': kmr_base.path_turn_speed_limit,
     }
     exec(compile(ast.Module(body=[method], type_ignores=[]),
                  str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
@@ -3474,7 +3507,7 @@ def test_kmr_nav2_handoff_finishes_each_path_segment_before_the_next() -> None:
                                  result=lambda: SimpleNamespace(status=4, result=None))
         node = SimpleNamespace(
             _occupancy_map=object(), path_pub=Mock(), _navigation_active=False,
-            docking_slow_distance=.20,
+            docking_slow_distance=.20, max_linear_speed=1.5, max_angular_speed=.5,
             _validate_transport_sweeps=Mock(),
             get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=0)),
             _check_motion=lambda _goal: next(observations),
@@ -3598,6 +3631,7 @@ def test_actual_base_sweep_checks_measured_arm_and_planning_scene_payload(failur
         "GetStateValidity": SimpleNamespace(Request=SimpleNamespace),
         "BASE_STATE_JOINTS": kmr_base.BASE_STATE_JOINTS,
         "interpolate_base_poses": kmr_base.interpolate_base_poses,
+        "SweepIntersection": kmr_base.SweepIntersection,
         "time": SimpleNamespace(monotonic=lambda: next(clock) if clock else 0., sleep=lambda _: None),
     }
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), "exec"), namespace)
@@ -3784,6 +3818,7 @@ def test_kmr_intermediate_stall_stops_nav2_before_checked_connection(failure):
     handle = SimpleNamespace(get_result_async=lambda: future, cancel_goal_async=request_cancel)
     node = SimpleNamespace(
         _occupancy_map=object(), path_pub=Mock(), _navigation_active=False,
+        max_linear_speed=1.5, max_angular_speed=.5,
         _validate_transport_sweeps=Mock(), _check_motion=check,
         get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=int(clock[0]*1e9))),
         _send_motion_goal=lambda *_args: handle, _wait_motion_future=wait,
@@ -3802,6 +3837,7 @@ def test_kmr_intermediate_stall_stops_nav2_before_checked_connection(failure):
                  'planar_pose': lambda value: value,
                  'prepare_base_path': lambda path, *_args: path,
                  'split_base_path': lambda path: (path,),
+                 'path_turn_speed_limit': kmr_base.path_turn_speed_limit,
                  'simulation_elapsed': kmr_base.simulation_elapsed,
                  'time': SimpleNamespace(sleep=lambda duration: clock.__setitem__(0, clock[0]+duration))}
     exec(compile(ast.Module(body=[method], type_ignores=[]),
