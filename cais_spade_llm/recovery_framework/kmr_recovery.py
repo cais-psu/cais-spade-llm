@@ -701,6 +701,73 @@ def _cartesian_path(scene: dict, config: dict, names: list, limits: dict, state:
             'final_joint_positions': [round(value, 4) for value in rows[-1]['positions']]}, None
 
 
+def _transport_tool_pose(scene: dict, config: dict, base_pose: list) -> list[float]:
+    """Return the tool pose of the KMR's declared transport pose (``parked_arm_configuration``) at a base."""
+    from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms, representative_pose
+
+    names = scene['KMR']['arm_joint_names']
+    joints = [float(value) for value in scene['KMR']['parked_arm_configuration']]
+    config = with_root(config, pose_matrix(base_pose))
+    return [float(value) for value in representative_pose(kinematic_transforms(
+        config, {name: interval(value) for name, value in zip(names, joints, strict=True)})[config['reference_link']])]
+
+
+def transfer_orientation(scene: dict, config: dict, base_pose: list, transfer: str, part: str | None,
+                         location: str | None) -> list[float]:
+    """Return the gripper orientation the KMR's own pick or place takes from a base.
+
+    The KMR carries in its transport pose, which turns with its base, and releases a part as it carries it. A pick
+    takes the owner's pick orientation nearest to that pose, from the same choices ``pick_targets`` uses.
+    """
+    from cais_spade_llm.recovery_framework.kmr_gazebo import _nearest_pick_orientation
+
+    carried = _transport_tool_pose(scene, config, [float(value) for value in base_pose])[3:]
+    if transfer != 'pick':
+        return carried
+    settings = scene['KMR']['task_execution']
+    try:
+        source = {} if location is None else recorded_location(scene, location)[0]
+    except KeyError:
+        # A spot that is no recorded location, such as a staging tray, has no calibration: ``pick_targets`` is given
+        # no location there.
+        source = {}
+    choices = (source['KMR_pick_orientations_xyzw'][part] if 'KMR_pick_orientations_xyzw' in source
+               else [settings['pick_orientation_xyzw']])
+    return _nearest_pick_orientation(carried, choices, settings['orientation_tolerance_rad'])
+
+
+def transfer_path_refusal(scene: dict, config: dict, base_pose: list, approach: list, target: list) -> str | None:
+    """Return why the KMR cannot bring its tool from its transport pose to a pick or place, or None when it can.
+
+    The KMR drives with its arm in its declared transport pose (``parked_arm_configuration``). At a base, a pick or
+    place moves from there along the owner's transfer waypoints to its approach and then to its target, as composition
+    binds them and the worker plans them (``_cartesian_path``). The poses are the reference link's, in the orientation
+    the owner takes (``transfer_orientation``); nothing here is written into an event.
+
+    Args:
+        scene: The captured owner configuration.
+        config: The KMR's continuous-motion chain.
+        base_pose: The base pose as position and quaternion.
+        approach: The pick's or place's approach pose.
+        target: Its target pose.
+    """
+    base_pose, approach, target = ([float(value) for value in pose] for pose in (base_pose, approach, target))
+    names = scene['KMR']['arm_joint_names']
+    joints = [float(value) for value in scene['KMR']['parked_arm_configuration']]
+    limits = {row['name']: dict(zip(('lower', 'upper'), row['position_bounds'], strict=True))
+              for row in config.get('joints', []) if 'position_bounds' in row}
+    start = _transport_tool_pose(scene, config, base_pose)
+    config = with_root(config, pose_matrix(base_pose))
+    state = {'joint_positions': joints, 'base_pose': base_pose}
+    path, failure = _cartesian_path(scene, config, names, limits, state, approach,
+                                    transfer_waypoints(scene, base_pose, start, approach))
+    if failure is not None or path is None:
+        return failure
+    _, failure = _cartesian_path(scene, config, names, limits,
+                                 {**state, 'joint_positions': path['final_joint_positions']}, target, None)
+    return failure
+
+
 def route_between(scene: dict, part: str | None, source: str, target: str) -> list[list[float]]:
     """Return the exact declared KMR route without selecting a recovery event."""
     for row in scene['KMR']['predefined_route_waypoints']:

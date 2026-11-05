@@ -1136,12 +1136,21 @@ def test_a_mobile_arm_needs_the_heights_its_own_calculation_comes_in_and_leaves_
     from cais_spade_llm.recovery_framework.ra_feasibility import _Check
 
     kmr_cell = _mobile_kmr(cell, session)
-    base = {"x": -3.275, "y": 1.4, "yaw": 1.571}
+    base = {"x": -3.275, "y": 1.45, "yaw": 1.571}
     tray = {"frame": "world", "bounds": [[-2.62, -2.58], [1.08, 1.12], [1.0, 1.04]], "capacity": 1}
     check = _Check(_event(KMR, {"held_part": None, "pose": base}, part="P1"), session, {}, kmr_cell)
     # The base reaches the spot but not the carrying height straight over it, so the KMR's own place comes in closer.
     assert check.reach_area(tray, "the tray")["status"] == "FEASIBLE"
     assert check.reach_area(tray, "the tray", transfer="place")["status"] == "FEASIBLE"
+    # 5 cm south the tray lies past the first joint's limit from the transport pose: the spot and the heights above it
+    # have configurations, the arm's own path there does not.
+    behind = {**base, "y": 1.4}
+    refused = _Check(_event(KMR, {"held_part": None, "pose": behind}, part="P1"), session, {}, kmr_cell).reach_area(
+        tray, "the tray", transfer="place")
+    assert refused["status"] == "NEEDS_CONTEXT"
+    assert refused["reason"].startswith("from its base (-3.275, 1.400, yaw 1.571) KMR reaches the tray and z 1.160 above "
+                                        "it or up to 0.10 m toward its arm, but not along its path from its transport "
+                                        "pose: The KMR cannot follow the Cartesian path to ")
     # A base too far for the spot has no approach to move.
     far = {**base, "y": 1.8}
     placed = _Check(_event(KMR, {"held_part": None, "pose": far}, part="P1"), session, {}, kmr_cell).reach_area(
@@ -1176,6 +1185,10 @@ def test_a_base_search_judges_each_base_on_the_spot_and_every_height(cell, sessi
         return {"feasibility_status": "NEEDS_CONTEXT"}
 
     monkeypatch.setattr(kinematic_reach, "reach_from_base", fake)
+    # These bases are judged on reach alone; the arm's own path has its own test above.
+    from cais_spade_llm.recovery_framework import kmr_recovery
+    monkeypatch.setattr(kmr_recovery, "transfer_path_refusal", lambda *_args: None)
+    monkeypatch.setattr(kmr_recovery, "transfer_orientation", lambda *_args: [1.0, 0.0, 0.0, 0.0])
     check = _Check(_event(KMR, {"held_part": None}, part="P1"), session, {}, kmr_cell)
     found = check.reach_with_heights({"root_xyz": [0, 0, 0]}, [0.0, 0.0, 1.0], [0, 0, 0, 1], [touches, tall, right], [1.16, 1.1])
     assert found["base_pose"] == right and found["joint_positions"] == [1.0]
@@ -1202,6 +1215,10 @@ def test_a_release_takes_the_first_base_that_reaches_its_target_and_an_approach_
         return {"feasibility_status": "NEEDS_CONTEXT"}
 
     monkeypatch.setattr(kinematic_reach, "reach_from_base", fake)
+    # These bases are judged on reach alone; the arm's own path has its own test above.
+    from cais_spade_llm.recovery_framework import kmr_recovery
+    monkeypatch.setattr(kmr_recovery, "transfer_path_refusal", lambda *_args: None)
+    monkeypatch.setattr(kmr_recovery, "transfer_orientation", lambda *_args: [1.0, 0.0, 0.0, 0.0])
     check = _Check(_event(KMR, {"held_part": None}, part="P1"), session, {}, kmr_cell)
 
     def released(bases):
