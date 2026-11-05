@@ -31,6 +31,7 @@ from cais_spade_llm.recovery_framework.outline_experiments import (  # noqa: E40
     EXPERIMENTS,
     read_batch,
 )
+from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +43,21 @@ MODELS = [
     {"id": "opus", "model": "claude-opus-4-7", "name": "Claude Opus 4.7 medium", "role": "main model",
      "vendor": "Claude", "color": "var(--s3)", "planned": 20},
     {"id": "gpt54", "model": "gpt-5.4", "name": "gpt-5.4 medium", "role": "second model",
-     "vendor": "OpenAI", "color": "var(--s1)", "planned": 10},
+     "vendor": "OpenAI", "color": "var(--s1)", "planned": 20},
 ]
 EFFORT = "medium"
 MAX_TURNS = 40
 SETTING_NOTES = ["one answer", "one answer", "one event per turn", "one event per turn", "whole-outline rewrites",
                  "one-event revisions"]
+# The paper's setting names (user decision, 2026-11-03); the Experiments tab and batch records keep their labels.
+PAPER_NAMES = {
+    "LLM, single-pass": "Baseline, outline-level",
+    "LLM + rules, single-pass": "Informed baseline, outline-level",
+    "LLM, incremental": "Baseline, event-level",
+    "LLM + rules, incremental": "Informed baseline, event-level",
+    "Framework, single-pass": "Neuro-symbolic framework, outline-level",
+    "Framework, incremental": "Neuro-symbolic framework, event-level",
+}
 SCENARIOS = ["Conveyor breakdown", "ur5e-1 breakdown", "Machining breakdown during part processing", "Part slippage"]
 SCENARIO_SHORT = ["Conveyor", "ur5e-1", "Machining", "Part slippage"]
 FW_SINGLE, FW_INCREMENTAL = 4, 5
@@ -62,6 +72,10 @@ REFERENCES = [
     "/geometry/<key>", "/regions", "/regions/<name>", "/safety_rules",
 ]
 STARTED = {"finished", "failed", "interrupted"}
+# The OutlineDraft check flags, in the order Table 5 shows them.
+CHECK_FLAGS = ("check_ra_feasibility", "check_cca_safety", "check_nonblocking")
+# OutlineDraft hides the safety rules when a setting leaves safety_rules_to_llm out.
+RULES_DEFAULT = "hidden"
 
 
 def reference_path(reference: str) -> str:
@@ -194,13 +208,13 @@ def cells_from_attempts(attempts: list[dict]) -> dict:
 
 def attempt_lines(attempts: list[dict]) -> list[dict]:
     """Return one line per attempt for the page's attempt table."""
-    names = list(CONFIGURATIONS)
+    names = [PAPER_NAMES.get(name, name) for name in CONFIGURATIONS]
     lines = []
     for attempt in attempts:
         row = attempt["row"]
         tokens, seconds = _number(row.get("tokens")), row.get("elapsed_seconds")
         lines.append({
-            "model": attempt["model"], "setting": f"{attempt['setting'] + 1} · {names[attempt['setting']]}",
+            "model": attempt["model"], "setting": names[attempt["setting"]],
             "scenario": attempt["scenario"], "outcome": row.get("outcome"),
             "stage": row.get("failing_stage") or "", "stop": row.get("stop_cause"),
             "events": row.get("outline_length"), "lookups": row.get("lookups"),
@@ -210,7 +224,8 @@ def attempt_lines(attempts: list[dict]) -> list[dict]:
         })
     order = {scenario: index for index, scenario in enumerate(SCENARIOS)}
     model_order = {model["id"]: index for index, model in enumerate(MODELS)}
-    return sorted(lines, key=lambda line: (model_order[line["model"]], line["setting"], order.get(line["scenario"], 9)))
+    return sorted(lines, key=lambda line: (model_order[line["model"]], names.index(line["setting"]),
+                                           order.get(line["scenario"], 9)))
 
 
 # ---------------------------------------------------------------- placeholder numbers (layout only)
@@ -313,6 +328,26 @@ def reference_rows(cells: dict) -> list[str]:
     return [path for path in REFERENCES if path in used] + sorted(used - set(REFERENCES))
 
 
+# ---------------------------------------------------------------- experimental conditions
+def setting_rows() -> list[dict]:
+    """Return one row per setting, read from the exact OutlineDraft flags it runs with."""
+    return [{"name": PAPER_NAMES.get(name, name), "single_pass": bool(flags.get("single_pass_outline")),
+             "rules_in_prompt": flags.get("safety_rules_to_llm", RULES_DEFAULT) == "prompt",
+             "checks": {flag: bool(flags.get(flag)) for flag in CHECK_FLAGS}}
+            for name, flags in CONFIGURATIONS.items()]
+
+
+def scenario_rows() -> list[dict]:
+    """Return each scenario's safety specification count."""
+    return [{"scenario": scenario, "safety_specifications": len(default_safety_files(scenario))}
+            for scenario in SCENARIOS]
+
+
+def conditions() -> dict:
+    """Return the experimental conditions: the settings, the failure scenarios and what every attempt shares."""
+    return {"settings": setting_rows(), "scenarios": scenario_rows(), "effort": EFFORT}
+
+
 def page_data(placeholder: bool, batch_ids: list[str] | None) -> dict:
     """Return the data block the page template renders."""
     if placeholder:
@@ -324,11 +359,11 @@ def page_data(placeholder: bool, batch_ids: list[str] | None) -> dict:
     return {
         "mode": "placeholder" if placeholder else "records",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        "settings": [{"n": name, "d": note} for name, note in zip(CONFIGURATIONS, SETTING_NOTES)],
+        "settings": [{"n": PAPER_NAMES.get(name, name), "d": note} for name, note in zip(CONFIGURATIONS, SETTING_NOTES)],
         "scenarios": SCENARIOS, "scenario_short": SCENARIO_SHORT, "models": MODELS, "classes": CLASSES,
         "references": reference_rows(cells),
         "cells": cells, "composition": composition, "sources": sources, "attempts": attempt_lines(attempts),
-        "max_turns": MAX_TURNS,
+        "max_turns": MAX_TURNS, "conditions": conditions(),
     }
 
 

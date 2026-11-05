@@ -48,6 +48,11 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   Later that night the user had every outline run from `a3f3418` and `d65a3de`
   removed before rerunning on `fa88600`; they are archived in
   `/home/jongh/recovery_archives/20261103_outlines_before_protocol_rule/`.
+  On 2026-11-05 the user had both staging trays moved 0.30 m north and every
+  result made on the cell before deleted outright, not archived: all
+  Experiments batches, outlines, compositions, the old captures and the
+  diagnostic runs and videos. Nominal runs were kept. The list is in
+  `cais_spade_llm/monitor/environment_runs/recapture_v2_20261015/old_cell_before_tray_move_20261105_deletion_list.json`.
 - Protect active work and the current partial attempt still needed for debugging,
   including work owned by another chat or process. Remove abandoned attempts once
   their useful findings are recorded and their required dependencies are retained.

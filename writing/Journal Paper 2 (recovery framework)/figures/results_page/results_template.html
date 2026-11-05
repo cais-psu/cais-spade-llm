@@ -212,6 +212,25 @@ table.results tr.total td { font-weight: 600; }
   .guide-table td:first-child { white-space: normal; width: 42%; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+/* Table 4 in journal form: caption above, horizontal rules only (top, header, bottom), serif text. */
+.paper-table { font-family: "Times New Roman", "Nimbus Roman", "Liberation Serif", Georgia, serif; color: var(--ink); display: grid; gap: 8px; }
+.paper-cap { margin: 0; font-size: 14.5px; line-height: 1.45; max-width: 92ch; }
+.paper-panel { margin: 6px 0 -2px; font-size: 14px; font-style: italic; }
+table.paper { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.4; }
+table.paper th, table.paper td { padding: 4px 10px; text-align: left; vertical-align: top; }
+table.paper thead tr:first-child th { border-top: 1.5px solid var(--ink); padding-top: 6px; }
+table.paper thead tr:last-child th { border-bottom: 0.75px solid var(--ink); }
+table.paper thead th { font-weight: 600; vertical-align: bottom; }
+table.paper thead th.span { text-align: center; border-bottom: 0.75px solid var(--ink); }
+table.paper tbody tr:first-child td { padding-top: 6px; }
+table.paper tbody tr:last-child td { border-bottom: 1.5px solid var(--ink); padding-bottom: 6px; }
+table.paper .c { text-align: center; }
+table.paper td:first-child { white-space: nowrap; }
+.paper-table sup, .paper-table sub { line-height: 0; font-size: 0.72em; }
+table.paper small { display: block; font-size: 12.5px; font-weight: 400; color: var(--ink-2); }
+table.paper.kv td:first-child { width: 24%; white-space: normal; }
+.paper-notes { font-size: 12.5px; line-height: 1.45; display: grid; gap: 2px; }
+.paper-notes p { margin: 0; }
 details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margin-bottom: 10px; }
 </style>
 </head>
@@ -223,6 +242,24 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     <p class="lede" id="lede"></p>
     <div class="prov" id="prov"></div>
   </header>
+
+  <h2 class="group">6.3 · Experimental setup</h2>
+
+  <figure class="plate" id="tab4">
+    <div class="plate-head">
+      <h3>Table 4 · Experimental setup</h3>
+      <div class="tags"><span class="tag real">from code and records</span><span class="tag">protocol</span></div>
+    </div>
+    <div class="paper-table">
+      <p class="paper-cap" id="tab5-caption"></p>
+      <p class="paper-panel">(a) Compared methods</p>
+      <div class="table-wrap"><table class="paper" id="tab5a"></table></div>
+      <p class="paper-panel">(b) Setup</p>
+      <div class="table-wrap"><table class="paper kv" id="tab5b"></table></div>
+      <div class="paper-notes" id="tab5-notes"></div>
+    </div>
+    <p class="aside-line" id="tab5-source" style="margin:0"></p>
+  </figure>
 
   <section class="guide" aria-labelledby="data-h">
     <h2 id="data-h">Data</h2>
@@ -264,7 +301,7 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
 
   <figure class="plate" id="tab7">
     <div class="plate-head">
-      <h3>Table 7 · Framework, incremental, through primitive composition</h3>
+      <h3 id="tab7-title">Table 7 · Framework, event-level, through primitive composition</h3>
       <div class="tags" data-tags="RC1 + RC2"></div>
     </div>
     <div class="table-wrap"><table class="results wide" id="tab7-table"></table></div>
@@ -315,11 +352,11 @@ const SHORT = DATA.scenario_short;
 const MODELS = DATA.models;
 const MAIN = MODELS[0];
 const FW_SINGLE = 4, FW_INCREMENTAL = 5;
-// Display order: what the LLM gets, then single-pass above incremental in each group.
+// Display order: what the LLM gets, then outline-level above event-level in each group.
 const SETTING_GROUPS = [
-  { label: "NO RULES, NO CHECKS", rows: [0, 2] },
-  { label: "RULES IN PROMPT, NO CHECKS", rows: [1, 3] },
-  { label: "FRAMEWORK: RA + CCA, RULES HIDDEN", rows: [4, 5] },
+  { label: "BASELINE: NO RULES, NO CHECKS", rows: [0, 2] },
+  { label: "INFORMED BASELINE: RULES IN PROMPT, NO CHECKS", rows: [1, 3] },
+  { label: "NEURO-SYMBOLIC FRAMEWORK: RULES HIDDEN, RA + CCA CHECKS", rows: [4, 5] },
 ];
 // One color per audit outcome, in the audit's order, then "not audited".
 const CLASS_COLORS = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)", "var(--s5)", "var(--muted)", "var(--dnf)", "var(--band)"];
@@ -328,7 +365,7 @@ const NOT_AUDITED = CLASSES.length - 1;
 // Sequential blue ramp in tenths; cell text turns white from 70% up.
 const PASS_RAMP = ["#eef4fc", "#dbe8fb", "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#3987e5", "#2a78d6", "#256abf", "#1c5cab"];
 const cell = (m, s, scn) => DATA.cells[m.id][s][scn];
-const settingLabel = (s) => `${s + 1} · ${SETTINGS[s].n}`;
+const settingLabel = (s) => SETTINGS[s].n;
 function pooled(m, s) {
   return ORDER.reduce((t, scn) => ({ k: t.k + cell(m, s, scn).classes[0], n: t.n + cell(m, s, scn).n }), { k: 0, n: 0 });
 }
@@ -359,6 +396,41 @@ function renderHeader() {
   document.querySelectorAll("[data-tags]").forEach((el) => {
     el.innerHTML = `<span class="tag${PLACEHOLDER ? "" : " real"}">${PLACEHOLDER ? "placeholder numbers" : "real results"}</span><span class="tag">${esc(el.getAttribute("data-tags"))}</span>`;
   });
+}
+
+/* ---------- Table 4: experimental setup, in journal form ---------- */
+function renderConditions() {
+  const C = DATA.conditions;
+  // Each setting name is "<method>, <generation level>".
+  const split = (name) => { const k = name.lastIndexOf(", "); return [name.slice(0, k), name.slice(k + 2)]; };
+  const methods = [...new Set(C.settings.map((s) => split(s.name)[0]))];
+  const levels = [...new Set(C.settings.map((s) => split(s.name)[1]))];
+
+  const methodRows = methods.map((m) => {
+    const s = C.settings.find((x) => split(x.name)[0] === m);
+    const validated = Object.values(s.checks).some(Boolean);
+    return `<tr><td>${esc(m)}${validated ? " (proposed)" : ""}</td><td>${s.rules_in_prompt ? "In the prompt" : "Not given"}</td><td>${validated ? "RA and CCA" : "None"}</td></tr>`;
+  }).join("");
+  document.getElementById("tab5a").innerHTML = `<thead><tr><th>Method</th><th>Safety rules</th><th>Validation</th></tr></thead><tbody>${methodRows}</tbody>`;
+
+  const specs = [...new Set(C.scenarios.map((r) => r.safety_specifications))];
+  // Product names as their makers write them.
+  const modelName = (m) => esc(m.name.replace(/ medium$/, "").replace(/^gpt-/, "GPT-"));
+  const planned = [...new Set(MODELS.map((m) => m.planned))];
+  const setup = [
+    ["Generation", esc(levels.map((l, i) => (i === 0 ? l.charAt(0).toUpperCase() + l.slice(1) : l)).join(" and "))],
+    ["Failure scenarios", C.scenarios.map((r) => esc(r.scenario)).join(", ")],
+    ["Safety specifications", specs.length === 1 ? `φ<sub>1</sub>–φ<sub>${specs[0]}</sub> (Table 3)` : `Per scenario: ${specs.join(", ")}`],
+    ["LLMs", `${MODELS.map(modelName).join(", ")} (${esc(C.effort)} effort)`],
+    ["Attempts", planned.length === 1 ? `${planned[0]} per method, level and scenario, for each LLM`
+      : `${MODELS.map((m) => m.planned).join(" and ")} per method, level and scenario, respectively`],
+    ["Maximum turns", `${DATA.max_turns} per attempt`],
+  ];
+  document.getElementById("tab5b").innerHTML = `<thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>${setup.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</tbody>`;
+
+  document.getElementById("tab5-caption").innerHTML = `<b>Table 4.</b> Experimental setup: (a) compared methods; (b) setup.`;
+  document.getElementById("tab5-notes").innerHTML = "";
+  document.getElementById("tab5-source").innerHTML = `Read from <code>outline_experiments.CONFIGURATIONS</code> and <code>recovery_case_safety</code>.`;
 }
 
 function renderSources() {
@@ -392,7 +464,7 @@ function renderOutcome() {
   const anyNotAudited = SETTINGS.some((_, s) => sumOver(MAIN, s, (c) => c.classes[NOT_AUDITED]) > 0);
   document.getElementById("fig11-legend").innerHTML = CLASSES.filter((_, i) => i < NOT_AUDITED || anyNotAudited)
     .map((c) => `<span><i class="sw" style="background:${c.c};outline:1px solid var(--hair)"></i>${c.label}</span>`).join("");
-  const W = 500, X0 = 196, BW = 200, RH = 34, GH = 18, TOP = 16, EX = X0 + BW + 10;
+  const W = 550, X0 = 246, BW = 200, RH = 34, GH = 18, TOP = 16, EX = X0 + BW + 10;
   const H = TOP + SETTING_GROUPS.length * GH + SETTINGS.length * RH + 20;
   let clipId = 0;
   document.getElementById("fig11-panels").innerHTML = ORDER.map((scn) => {
@@ -443,7 +515,7 @@ function renderOutcome() {
 /* ---------- Table 6: what validation rejected, framework settings, main model ---------- */
 function renderTable6() {
   const head = `<thead>
-    <tr class="grp"><th></th><th colspan="5" class="sep">5 · ${esc(SETTINGS[FW_SINGLE].n)}</th><th colspan="5" class="sep">6 · ${esc(SETTINGS[FW_INCREMENTAL].n)}</th></tr>
+    <tr class="grp"><th></th><th colspan="5" class="sep">${esc(SETTINGS[FW_SINGLE].n)}</th><th colspan="5" class="sep">${esc(SETTINGS[FW_INCREMENTAL].n)}</th></tr>
     <tr><th>Failure scenario</th>
       <th class="sep">Completed<small>within ${DATA.max_turns} turns</small></th><th>Rewrites<small>whole outline, median</small></th><th>Rejected by RA<small>outlines</small></th><th>Rejected by CCA safety<small>after passing RA</small></th><th>Refused by CCA completion<small>Eq. 6</small></th>
       <th class="sep">Completed<small>within ${DATA.max_turns} turns</small></th><th>Revisions<small>one event, median</small></th><th>Rejected by RA<small>events</small></th><th>Rejected by CCA safety<small>after passing RA</small></th><th>Refused by CCA completion<small>Eq. 6</small></th></tr></thead>`;
@@ -461,7 +533,7 @@ function renderTable6() {
       ra: add((c) => c.rejections.ra), physical: add((c) => c.rejections.physical), cca: add((c) => c.rejections.cca), eq6: add((c) => c.rejections.eq6) } }, false);
   };
   document.getElementById("tab6-table").innerHTML = head + `<tbody>${rows}<tr class="total"><td>All four scenarios</td>${total(FW_SINGLE)}${total(FW_INCREMENTAL)}</tr></tbody>`;
-  document.getElementById("tab6-caption").innerHTML = `<b>Table 6.</b> Rejections in the two framework settings for the main model (${esc(MAIN.name)}), summed over the started attempts per scenario. In ${esc(SETTINGS[FW_SINGLE].n)} (setting 5) a rejection stops a whole outline at its first failing event, and the LLM rewrites the outline; in ${esc(SETTINGS[FW_INCREMENTAL].n)} (setting 6) a rejection applies to one proposed event, which the LLM revises. RA (symbolic and physical evidence) runs before CCA safety in both, so every CCA safety rejection is a proposal that passed RA: a feasible but unsafe event (H2). The last column of each group counts CCA completion refusals (Eq. 6). Completed counts the attempts that finished an outline within ${DATA.max_turns} turns. The second model's rejections are in Fig. 13.`;
+  document.getElementById("tab6-caption").innerHTML = `<b>Table 6.</b> Rejections in the two framework settings for the main model (${esc(MAIN.name)}), summed over the started attempts per scenario. In ${esc(SETTINGS[FW_SINGLE].n)} a rejection stops a whole outline at its first failing event, and the LLM rewrites the outline; in ${esc(SETTINGS[FW_INCREMENTAL].n)} a rejection applies to one proposed event, which the LLM revises. RA (symbolic and physical evidence) runs before CCA safety in both, so every CCA safety rejection is a proposal that passed RA: a feasible but unsafe event (H2). The last column of each group counts CCA completion refusals (Eq. 6). Completed counts the attempts that finished an outline within ${DATA.max_turns} turns. The second model's rejections are in Fig. 13.`;
 }
 
 /* ---------- Fig. 12: outline lookups by reference, main model, setting 6 ---------- */
@@ -497,11 +569,12 @@ function renderRetrieval() {
   p.push(`<text x="0" y="${y + RH / 2 + 5}" class="lbl">total</text>`);
   values.forEach((row, j) => p.push(`<text x="${X0 + j * CW + CW / 2}" y="${y + RH / 2 + 5}" class="val" text-anchor="middle">${row ? Math.round(row.reduce((a, c) => a + c, 0) * 10) / 10 : dash}</text>`));
   document.getElementById("fig12-svg").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Outline lookups per attempt by reference and failure scenario, main model">${p.join("")}</svg>`;
-  document.getElementById("fig12-caption").innerHTML = `<b>Fig. 12.</b> Context retrieved while building the recovery outline, by failure scenario: mean lookups per attempt of each reference in the knowledge base 𝒦, for the main model in ${esc(SETTINGS[FW_INCREMENTAL].n)} (setting 6). Each row is a reference as the outline prompt lists it, with the resource, part, region or key left out. Shading is scaled to the largest mean; a dot means no lookups and a dash means no attempts. The composition-stage rows follow once composition runs.`;
+  document.getElementById("fig12-caption").innerHTML = `<b>Fig. 12.</b> Context retrieved while building the recovery outline, by failure scenario: mean lookups per attempt of each reference in the knowledge base 𝒦, for the main model in ${esc(SETTINGS[FW_INCREMENTAL].n)}. Each row is a reference as the outline prompt lists it, with the resource, part, region or key left out. Shading is scaled to the largest mean; a dot means no lookups and a dash means no attempts. The composition-stage rows follow once composition runs.`;
 }
 
 /* ---------- Table 7: setting 6 through primitive composition, main model ---------- */
 function renderTable7() {
+  document.getElementById("tab7-title").textContent = `Table 7 · ${SETTINGS[FW_INCREMENTAL].n}, through primitive composition`;
   const head = `<thead><tr>
     <th>Failure scenario</th><th>Outline<small>passed / started</small></th><th>Composition<small>given an accepted outline</small></th>
     <th>Overall<small>n/N [95% CI]</small></th><th>Events<small>new / nominal</small></th><th>Primitives<small>median per outline</small></th>
@@ -513,7 +586,7 @@ function renderTable7() {
   };
   let body;
   if (!DATA.composition) {
-    body = `<tr><td colspan="10" class="todo">Composition has not been collected yet. The outline column will come from setting 6 of Fig. 11.</td></tr>`;
+    body = `<tr><td colspan="10" class="todo">Composition has not been collected yet. The outline column will come from ${esc(SETTINGS[FW_INCREMENTAL].n)} in Fig. 11.</td></tr>`;
   } else {
     let outlines = 0, composed = 0, started = 0;
     body = ORDER.map((scn) => {
@@ -524,7 +597,7 @@ function renderTable7() {
     }).join("") + `<tr class="total"><td>All four scenarios</td><td>${outlines}/${started}</td><td>${composed}/${outlines}</td><td>${composed}/${started} ${ci(composed, started)}</td><td colspan="6"></td></tr>`;
   }
   document.getElementById("tab7-table").innerHTML = head + `<tbody>${body}</tbody>`;
-  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> ${esc(SETTINGS[FW_INCREMENTAL].n)} (setting 6) carried through primitive composition, for the main model (${esc(MAIN.name)}, one capture per scenario, offline planning). Composition completion is conditional on an accepted outline. Overall completion counts both stages in the same attempt over all started attempts, with a 95% Wilson interval. New events are recovery events absent from the nominal models; nominal events are the connection to the remaining plan. Targeted is the share of the outline's resource and part lookups that were about a resource or part in the accepted outline.`;
+  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> ${esc(SETTINGS[FW_INCREMENTAL].n)} carried through primitive composition, for the main model (${esc(MAIN.name)}, one capture per scenario, offline planning). Composition completion is conditional on an accepted outline. Overall completion counts both stages in the same attempt over all started attempts, with a 95% Wilson interval. New events are recovery events absent from the nominal models; nominal events are the connection to the remaining plan. Targeted is the share of the outline's resource and part lookups that were about a resource or part in the accepted outline.`;
 }
 
 /* ---------- Fig. 13: main and second model ---------- */
@@ -535,7 +608,7 @@ const CHECKS = [
 ];
 function renderComparison() {
   document.getElementById("fig13-legend").innerHTML = MODELS.map((m) => `<span><svg width="14" height="14">${modelMark(m, 7, 7, 5)}</svg>${esc(m.name)} (${esc(m.role)})</span>`).join("");
-  const W = 560, X0 = 240, X1 = 450, cols = MODELS.map((_, i) => 466 + i * 48);
+  const W = 600, X0 = 280, X1 = 490, cols = MODELS.map((_, i) => 506 + i * 48);
   const xs = (q) => X0 + q * (X1 - X0);
   const TOP = 22, GH = 22, RH = 26, RR = 24;
   const bottom = TOP + SETTING_GROUPS.length * GH + SETTINGS.length * RH;
@@ -581,7 +654,7 @@ function renderComparison() {
     });
   });
 
-  p.push(`<text x="0" y="${rTop - 12}" class="hdr">CHECKED EVENTS REJECTED · ${esc(SETTINGS[FW_INCREMENTAL].n.toUpperCase())} (SETTING 6)</text>`);
+  p.push(`<text x="0" y="${rTop - 12}" class="hdr">CHECKED EVENTS REJECTED · ${esc(SETTINGS[FW_INCREMENTAL].n.toUpperCase())}</text>`);
   columnMarks(rTop - 16);
   [0, MAX / 2, MAX].forEach((v, k) => {
     p.push(`<line x1="${xr(v)}" y1="${rTop}" x2="${xr(v)}" y2="${rBottom}" class="${k === 0 ? "base-line" : "grid-line"}"/>`);
@@ -609,8 +682,8 @@ function renderComparison() {
     const vs = shares[i].values;
     p.push(`<text x="${cols[i]}" y="${rBottom + 30}" class="val" style="font-weight:600">${vs.some((v) => v === null) ? dash : pct(vs.reduce((a, c) => a + c, 0))}</text>`);
   });
-  document.getElementById("fig13-chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Share of attempts passed per setting and setting 6 rejections by check, main and second model">${p.join("")}</svg>`;
-  document.getElementById("fig13-caption").innerHTML = `<b>Fig. 13.</b> The main model, ${esc(MAIN.name)} (squares), and a second model, ${esc(MODELS[1].name)} (circles). The figure shows whether the framework's effect holds for a second model, not which model is better: the models are not matched in vendor, release date or effort setting, and the prompt was developed on gpt-5.4 (frozen on 21 Oct 2026). Top: share of started attempts passed in each setting, pooled over the four scenarios, with 95% Wilson intervals; the main model's marks pool the bars of Fig. 11. Bottom: share of each model's checked candidate events that each check rejected in ${esc(SETTINGS[FW_INCREMENTAL].n)} (setting 6). A refusal counts as a failed attempt; no automatic fallback to another model is used.`;
+  document.getElementById("fig13-chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Share of attempts passed per setting and ${esc(SETTINGS[FW_INCREMENTAL].n)} rejections by check, main and second model">${p.join("")}</svg>`;
+  document.getElementById("fig13-caption").innerHTML = `<b>Fig. 13.</b> The main model, ${esc(MAIN.name)} (squares), and a second model, ${esc(MODELS[1].name)} (circles). The figure shows whether the framework's effect holds for a second model, not which model is better: the models are not matched in vendor, release date or effort setting, and the prompt was developed on gpt-5.4 (frozen on 21 Oct 2026). Top: share of started attempts passed in each setting, pooled over the four scenarios, with 95% Wilson intervals; the main model's marks pool the bars of Fig. 11. Bottom: share of each model's checked candidate events that each check rejected in ${esc(SETTINGS[FW_INCREMENTAL].n)}. A refusal counts as a failed attempt; no automatic fallback to another model is used.`;
 }
 
 /* ---------- Every attempt ---------- */
@@ -652,6 +725,7 @@ document.addEventListener("pointerdown", (e) => {
 window.addEventListener("scroll", () => { tipEl.hidden = true; }, { passive: true });
 
 renderHeader();
+renderConditions();
 renderSources();
 renderCoverage();
 renderOutcome();

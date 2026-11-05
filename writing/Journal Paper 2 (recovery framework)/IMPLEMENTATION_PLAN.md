@@ -208,9 +208,38 @@ two passing outlines has a value written by code; both load for composition with
   (14 calls, 186,026 tokens), Conveyor `composition_8c37b920…` 7/7 (17, 120,958), ur5e-1 `composition_81863263…` 9/9
   (23, 201,299), Machining `composition_80d8e685…` 15/15 (38, 488,835); the model bound the declared arm routes itself.
   Not executed in Gazebo; KMR drive paths still checked only at the end pose and floor connectivity.
-  Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
-  or also merging picks with places) is decided after that; compositions on a separate go. Open before composition: event
-  lookups on one line, the two target contracts, the `detect_parts` publish key.
+- Gazebo diagnostic runs (November 4–5, runner `/home/jongh/recovery_review_1030/gazebo_diag/diag_run.py`, CCA bypassed,
+  outside the repository; queue items 76–101 in `recapture_v2_20261015/GAZEBO_QUEUE.md`):
+  - Part slippage `composition_801c676f…` 5/5 (`runs/ps_02`). Conveyor `composition_fd05e8fb…` (recomposed on `1805c1b`) 7/7
+    (`runs/conv_12`). Machining `composition_80d8e685…` 15/15 (`runs/mach_11`). Each has `recovery.mp4` and `recovery-20x.mp4`.
+  - ur5e-1: the old outlines park the KMR where M2's staging tray lies past the arm's first-joint limit from its transport
+    pose. RA path check (user go "ok lets do that"): for a mobile arm's pick or place the RA runs the owner's transfer path
+    from the declared transport pose in the owner's gripper orientation (`kmr_recovery.transfer_path_refusal`,
+    `transfer_orientation`); commit `9776fd8` on branch `ra-kmr-path-check` (worktree `recovery_review_1030/wt_ra_path`), not
+    merged; the four main outlines re-check as before, both old ur5e-1 outlines are refused at the tray place. New Opus 5.5
+    outline `draft_22f613a3…` (try 2, 18 turns, 270,512 tokens; try 1 ran out of turns), hand-trimmed `draft_43ca7dc5…`
+    (KMR moves 5 and 6 joined), `composition_18de32e5…` 9/9 (25 calls, 218,314 tokens; user "do the composition"). In
+    Gazebo events 1–4 run; event 5 (M2 dock → (-3.25, 1.45, 90°)) has no route: facing north the arm, parked 0.5 m to the
+    KMR's west, enters M1's enclosure on every way in. Next step needs the user: a route that changes heading, or an
+    arm-sweep check of the parking pose and route before composition.
+  - Live-execution gaps, worked around in the runner only: (1) KMR scene check after a Conveyor fault; (2) recovery KMR
+    reads carry no part; (3) the KMR worker's `compute_place_targets` knows machine docks or a `part_pose`, not a stated
+    Buffer zone; (4) the failure stop exits every machine worker and marks a healthy machine's running job interrupted;
+    (5) the machine completion reads `process` from its task, not from the job it watched. Runner bindings also pass a
+    transport's stated arrivals (`next_locations`) and write per-part fields into the stated resource's state.
+  - Controller and Nav2 fixes (uncommitted, bootstrapped, `test_recovery_framework_gazebo.py` 281 passed): planner goal
+    tolerance 0.10 (the omni lattice's 0.15 m steps), planner footprint padding 0.05; linear speed capped on turning
+    lattice segments (`path_turn_speed_limit`); a constant-heading fallback route when Nav2's path fails the controller's
+    sweep or Nav2 finds none (`constant_heading_route`, speed held by the clearance ahead), re-searched away from MoveIt
+    arm contacts (`SweepIntersection`).
+  - 20x failure videos (user request), `diag_run.py --failure-only`, the production of each current capture up to 10 s
+    after the failure, all four recorded November 5 with the live parts matching the capture:
+    `runs/fail_part_slippage` (assembly camera, 19 s at 20x), `runs/fail_conveyor` (46 s), `runs/fail_ur5e1` (1.9 min),
+    `runs/fail_machining` (1.9 min), each `failure-20x.mp4` and `failure.mp4`. The old `videos-20x` set (October 2–6) stays.
+  - Kept from the November 4 entry:
+    Next, on the user's go only: the four outlines, which the user verifies; the outline edit rule (repeats and unused events only,
+    or also merging picks with places) is decided after that; compositions on a separate go. Open before composition: event
+    lookups on one line, the two target contracts, the `detect_parts` publish key.
 - Earlier (November 2, 23:30): in `draft_compositions`, Part slippage `composition_ae42057d…` on `6cdab5fd`,
   Conveyor `composition_dac0ed72…` on `fd45dc72`, ur5e-1 `composition_bc65b869…` on `95f9d084`. Machining has no
   composition: its attempt stopped and was removed, see "Fresh compositions" below. Since the November 3 fixes, Part
