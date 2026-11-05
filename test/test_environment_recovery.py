@@ -834,7 +834,7 @@ def test_projected_kmr_identity_uses_recorded_resource_core(owner_context):
 
 @pytest.mark.parametrize("pose,receiver", [
     ([-4.13, 1.82, 1.06], ("M1", "M1")),
-    ([-4.6, 1.1, 1.0], ("M1", "M1 staging tray")),
+    ([-4.6, 1.4, 1.0], ("M1", "M1 staging tray")),
     ([-6.25, 1.88, 0.645], ("Storage", "Storage")),
     ([-6.25, 1.98, 0.645], None),
     ([-0.56, 0.5, 1.017], ("Buffer For Machined parts", "zone_2_part")),

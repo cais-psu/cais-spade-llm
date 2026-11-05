@@ -791,7 +791,7 @@ def test_KMR_release_into_a_buffer_zone_and_onto_an_undeclared_surface():
     ([-4.13, 1.82, 1.06, 0.0, 0.0, 0.0, 1.0], "M1",
      lambda context, part: context.resources["M1"].valuation["part_name"] == part
      and context.resources["M1"].valuation["resource_state"] == "loaded"),
-    ([-4.6, 1.1, 1.0, 0.0, 0.0, 0.0, 1.0], "M1",
+    ([-4.6, 1.4, 1.0, 0.0, 0.0, 0.0, 1.0], "M1",
      lambda context, part: context.resources["M1"].valuation["staging_part"] == part
      and context.part_tracker[part]["location"] == "M1 staging tray"),
     ([-6.25, 1.88, 0.645, 0.0, 0.0, 0.0, 1.0], "Storage",
