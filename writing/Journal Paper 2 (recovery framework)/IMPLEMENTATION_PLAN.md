@@ -168,6 +168,21 @@ two passing outlines has a value written by code; both load for composition with
   17-event outlines: "KMR cannot carry on normal production from where it is". The model added the KMR's return as event 1,
   where CCA safety refuses it, because M2's job could then finish on its own before KET4; it never tried the return last,
   which is what `5836a16f` does (event 16). The refusals are true; this is a run outcome, not a code fault.
+- Retained now (updated November 5, afternoon): the four captures of the cell with both staging trays moved 0.30 m north
+  (user decision; from the docks the old trays were 0.86 m from the KMR's arm mount, past its 0.82 m reach, so a KMR place
+  on a tray was impossible and the ur5e-1 outline stalled twice at the 15-turn stall rule). Trays at (-4.6, 1.4) and
+  (-2.6, 1.4), commit `651e1b2`; controller and Nav2 fixes `9c191e7`; RA KMR path and drive checks merged `04d538c`. A
+  free search with the RA's checks found the band y 1.35–1.40; a hand-built Gazebo test (`gazebo_diag/runs/tray_02`) placed
+  a part on M2's tray from the dock with the KMR and picked it with ur5e-2. Captures (queue item 102, same checkpoints and
+  grounding as before; only run ids differ): Part slippage `capture_78c59ad8…`, Machining `capture_d9d855ca…`, Conveyor
+  `capture_30f0007b…`, ur5e-1 `capture_7e941832…`; the UI defaults and the capture tests use them. At the user's request
+  every result of the old cell was deleted outright, not archived: outlines, compositions, all Experiments batches, the
+  old captures, `recapture_v3`–`v5`, the October 10–16 diagnostics, the Gazebo diagnostic runs and the old videos; nominal
+  runs kept (receipt `recapture_v2_20261015/old_cell_before_tray_move_20261105_deletion_list.json`, 16.6 GB). Next (user
+  go for all four): Opus 5.5 medium outlines, Framework incremental, 40 turns, one retry, stall stop after 15 turns with no
+  accepted event, from one frozen commit; then compositions; then Gazebo runs with 20x videos and new 20x failure videos.
+  `test_offline_recovery.py::test_detection_retains_only_matching_recorded_part_observations[None]` also fails on
+  `1805c1b`; not from these changes.
 - Retained now (updated November 3, evening): nothing. The user decided that Opus 5.5 medium gives the paper's reference
   answers (Appendix A outlines, Appendix B compositions) and that the experiments run on lower models. Before a final Opus 5.5
   rerun from one commit, every outline, composition and Experiments batch was archived to

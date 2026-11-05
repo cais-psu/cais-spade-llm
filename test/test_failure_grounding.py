@@ -345,11 +345,11 @@ def test_rules_never_see_recorded_labels_or_the_scenario_name():
 
 OFFICIAL = {
     # Restored ur5e-3 route and URs without collision checks (2026-10-24).
-    "capture_ad64bf1628564c3fa7f928b7bdebd5d9": (["A1", "B2", "C1"], ["ur5e-4"], "environment_8", "place_approach"),
+    "capture_78c59ad8cc344546b967740e53c3f6f8": (["A1", "B2", "C1"], ["ur5e-4"], "environment_8", "place_approach"),
     # The stop cancelled the KMR's trip environment_22 (A3); M1 stays the only faulted resource.
-    "capture_37e090a54d0242f4948ae80c95d3cd76": (["A2", "B2", "A3"], ["M1"], "environment_25", "complete_job"),
-    "capture_3ad495d2bd7845269fa70f1a09963bc9": (["B2"], ["Conveyor"], "cf4b66ddc51348a2987d5207878e5eea_pending_0", "place_approach"),
-    "capture_b7dea70c1db74e1e9e98849380c09655": (["B2"], ["ur5e-1"], "67689d8a6f1a4b9c87a47a16f000e313_pending_1", "pick_grasp"),
+    "capture_d9d855caa6094626bbfb23d7ae13321e": (["A2", "B2", "A3"], ["M1"], "environment_25", "complete_job"),
+    "capture_30f0007b4642429294fc62186d91a335": (["B2"], ["Conveyor"], "a7b36e5dedcd42ef894abd2047ba5bc7_pending_0", "place_approach"),
+    "capture_7e94183278f64268ae8bb07274c912ce": (["B2"], ["ur5e-1"], "abb7cdc762e64ef89df096b34626a5a0_pending_1", "pick_grasp"),
 }
 
 
@@ -461,7 +461,7 @@ def test_scenario_name_is_not_forwarded_to_the_prompt():
 def test_plant_model_accepts_only_declared_fault_states():
     from cais_spade_llm.resources import environment_models
 
-    path = RECORDS / "capture_ad64bf1628564c3fa7f928b7bdebd5d9" / "observations.json"
+    path = RECORDS / "capture_78c59ad8cc344546b967740e53c3f6f8" / "observations.json"
     if not path.is_file():
         pytest.skip("retained capture is not present")
     physical = read_observations(path)["physical_evidence"]
@@ -479,7 +479,7 @@ def test_the_first_turn_is_the_outline_prompt_with_the_grounded_fault(tmp_path, 
     from cais_spade_llm.recovery_framework import outline_draft
     from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
 
-    path = RECORDS / "capture_ad64bf1628564c3fa7f928b7bdebd5d9" / "observations.json"
+    path = RECORDS / "capture_78c59ad8cc344546b967740e53c3f6f8" / "observations.json"
     if not path.is_file():
         pytest.skip("retained capture is not present")
     observations = read_observations(path)

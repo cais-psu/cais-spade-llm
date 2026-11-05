@@ -29,13 +29,12 @@ from cais_spade_llm.ui.recovery_setup import (
 
 logger = logging.getLogger(__name__)
 
-# Schema-2 captures of the corrected resource models (2026-10-22/23); the schema-1 originals stay
-# selectable as regression fixtures.
+# Captures of the cell with both staging trays 0.30 m north of their first spot (2026-11-05).
 _DEFAULT_OBSERVATIONS = {
-    "Part slippage": "capture_ad64bf1628564c3fa7f928b7bdebd5d9",
-    "Machining breakdown during part processing": "capture_37e090a54d0242f4948ae80c95d3cd76",
-    "Conveyor breakdown": "capture_3ad495d2bd7845269fa70f1a09963bc9",
-    "ur5e-1 breakdown": "capture_b7dea70c1db74e1e9e98849380c09655",
+    "Part slippage": "capture_78c59ad8cc344546b967740e53c3f6f8",
+    "Machining breakdown during part processing": "capture_d9d855caa6094626bbfb23d7ae13321e",
+    "Conveyor breakdown": "capture_30f0007b4642429294fc62186d91a335",
+    "ur5e-1 breakdown": "capture_7e94183278f64268ae8bb07274c912ce",
 }
 
 
