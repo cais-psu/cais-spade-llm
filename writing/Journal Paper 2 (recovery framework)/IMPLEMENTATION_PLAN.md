@@ -93,8 +93,15 @@ paid rerun. Steps 1-5 are done offline:
   (the printer's last output leaves it idle), and the served received facts use the same slot test on outcome-level
   events; the KMR's `move_home` start ends its approach; the served values rule names every way a check finds a value;
   regression tests for each, plus RA tests on the real machine models and a live KMR commit of a stated `placed`.
-Remaining: commit, re-capture all four, failure videos, paid reruns, Gazebo runs. The `08c3df4` results were deleted on
-November 5 night (`recapture_v2_20261015/results_before_uniform_model_20261105_deletion_list.json`).
+- Committed `4935688`. Re-captured all four from it (`recapture_v7_20261105`, queue item 106), each first try, each
+  grounding to the same rules, faulted resource and function as v6 (task numbers moved by one where the KMR's new
+  `move_home` runs before the failure): Part slippage `capture_be3e6112cf09475fa6a2d0fb5073af3a` (A1 B2 C1, ur5e-4,
+  `environment_9`), Machining `capture_6cd8cd6940fa4691b67fa68a0099ed34` (A2 B2 A3, M1, `environment_26`), Conveyor
+  `capture_460d78e95f8e48bdaa3517076ebc51ee` (B2), ur5e-1 `capture_4f9097aa46bf450ca0717840262806a4` (B2). The KMR's
+  `place_release` (with its park) and `move_home` ran in every nominal delivery. Recovery defaults and capture tests use
+  them (160 capture tests pass); the v6 captures and their run folder were deleted.
+Remaining: failure videos, paid reruns (outlines, then compositions), Gazebo runs with video. The `08c3df4` results were
+deleted on November 5 night (`recapture_v2_20261015/results_before_uniform_model_20261105_deletion_list.json`).
 
 ## No hidden rules in recovery events — October 31, 2026 — standing rule
 

@@ -55,7 +55,8 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   `cais_spade_llm/monitor/environment_runs/recapture_v2_20261015/old_cell_before_tray_move_20261105_deletion_list.json`.
   That night the user had every result made from `08c3df4` deleted outright
   before the uniform resource model rerun: four Experiments batches, the
-  trimmed Machining outline and four compositions. The list is in
+  trimmed Machining outline and four compositions; once the v7 captures
+  loaded, the four v6 captures and their run folder followed. The list is in
   `cais_spade_llm/monitor/environment_runs/recapture_v2_20261015/results_before_uniform_model_20261105_deletion_list.json`.
 - Protect active work and the current partial attempt still needed for debugging,
   including work owned by another chat or process. Remove abandoned attempts once

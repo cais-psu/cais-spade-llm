@@ -227,10 +227,10 @@ def test_the_cca_safety_check_needs_the_ra_check(monkeypatch):
 
 
 @pytest.mark.parametrize("capture, assumptions, moved", [
-    ("capture_7e94183278f64268ae8bb07274c912ce", None, {
+    ("capture_4f9097aa46bf450ca0717840262806a4", None, {
         "SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing", "SAFE_gear_small_before_KET4_Square_4mm",
         "SAFE_trim_before_assembly_board-v1_entry"}),
-    ("capture_78c59ad8cc344546b967740e53c3f6f8", [{"resource": "ur5e-3", "clear_of": ["assembly_board-v1"],
+    ("capture_be3e6112cf09475fa6a2d0fb5073af3a", [{"resource": "ur5e-3", "clear_of": ["assembly_board-v1"],
                                                    "reason": "it would have waited clear with the CCA on"}],
      {"SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing", "SAFE_trim_before_assembly_board-v1_entry"}),
 ])
@@ -246,7 +246,7 @@ def test_monitors_start_where_the_recorded_history_leaves_them(capture, assumpti
 
 
 def test_a_failure_state_that_already_breaks_a_rule_stops_the_check():
-    path = RECORDS / "capture_78c59ad8cc344546b967740e53c3f6f8/observations.json"
+    path = RECORDS / "capture_be3e6112cf09475fa6a2d0fb5073af3a/observations.json"
     if not path.exists():
         pytest.skip("the recorded capture is not on this machine")
     with pytest.raises(ValueError, match="ur5e-3 in assembly_board-v1; ur5e-4 in assembly_board-v1"):

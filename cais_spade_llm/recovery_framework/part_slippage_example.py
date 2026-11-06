@@ -31,10 +31,10 @@ logger = logging.getLogger(__name__)
 
 # Captures of the cell with both staging trays 0.30 m north of their first spot (2026-11-05).
 _DEFAULT_OBSERVATIONS = {
-    "Part slippage": "capture_78c59ad8cc344546b967740e53c3f6f8",
-    "Machining breakdown during part processing": "capture_d9d855caa6094626bbfb23d7ae13321e",
-    "Conveyor breakdown": "capture_30f0007b4642429294fc62186d91a335",
-    "ur5e-1 breakdown": "capture_7e94183278f64268ae8bb07274c912ce",
+    "Part slippage": "capture_be3e6112cf09475fa6a2d0fb5073af3a",
+    "Machining breakdown during part processing": "capture_6cd8cd6940fa4691b67fa68a0099ed34",
+    "Conveyor breakdown": "capture_460d78e95f8e48bdaa3517076ebc51ee",
+    "ur5e-1 breakdown": "capture_4f9097aa46bf450ca0717840262806a4",
 }
 
 

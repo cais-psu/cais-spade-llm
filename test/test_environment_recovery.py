@@ -255,7 +255,7 @@ def test_the_kmr_arm_reaches_from_where_the_base_now_stands():
     from cais_spade_llm.recovery_framework.recovery_observations import read_observations
 
     observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
-                                         'capture_7e94183278f64268ae8bb07274c912ce/observations.json'))
+                                         'capture_4f9097aa46bf450ca0717840262806a4/observations.json'))
     jid = observations['jids']['KMR']
     evidence = deepcopy(observations['prepared_recovery_request']['recovery_resources'][jid]['resource_evidence'])
     target = [-4.13, 1.82, 1.155, 1., 0., 0., 0.]
@@ -279,7 +279,7 @@ def test_the_kmr_path_is_resolved_as_its_planner_resolves_it_and_refused_only_wh
     from cais_spade_llm.recovery_framework.recovery_observations import read_observations
 
     observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
-                                         'capture_7e94183278f64268ae8bb07274c912ce/observations.json'))
+                                         'capture_4f9097aa46bf450ca0717840262806a4/observations.json'))
     jid = observations['jids']['KMR']
     evidence = deepcopy(observations['prepared_recovery_request']['recovery_resources'][jid]['resource_evidence'])
     dock = [-4.7, 2.2, 0., 0., 0., .7071068, .7071068]
@@ -302,7 +302,7 @@ def test_a_kmr_transfer_counts_only_where_its_own_path_reaches_it_in_the_orienta
     from cais_spade_llm.recovery_framework.recovery_observations import read_observations
 
     observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
-                                         'capture_7e94183278f64268ae8bb07274c912ce/observations.json'))
+                                         'capture_4f9097aa46bf450ca0717840262806a4/observations.json'))
     scene = observations['inputs']['scene']
     jid = observations['jids']['KMR']
     config = observations['prepared_recovery_request']['recovery_resources'][jid]['resource_evidence'][
@@ -336,7 +336,7 @@ def test_a_kmr_drive_counts_only_where_a_route_keeps_its_arm_clear_of_the_record
     from cais_spade_llm.recovery_framework.recovery_observations import read_observations
 
     observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
-                                         'capture_7e94183278f64268ae8bb07274c912ce/observations.json'))
+                                         'capture_4f9097aa46bf450ca0717840262806a4/observations.json'))
     cell = recorded_cell(observations, _navigation_floor())
     config = observations['prepared_recovery_request']['recovery_resources'][observations['jids']['KMR']][
         'resource_evidence']['continuous_motion_configuration']
