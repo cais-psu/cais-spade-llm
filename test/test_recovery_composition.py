@@ -2238,48 +2238,37 @@ def _approach_step(prepared, function_name):
     return next(step for step in decomposition["recovery_visible_steps"] if step["primitive"] == "move_cartesian")
 
 
-@pytest.mark.parametrize("robot, function_name, route", [
-    ("ur5e-1", "place_approach", "transit_waypoints/0"), ("ur5e-3", "pick_approach", "pick_transit_waypoints")])
-def test_a_nominal_approach_names_the_route_its_robot_declares(robot, function_name, route):
+@pytest.mark.parametrize("robot, route", [("ur5e-1", "transit_waypoints/0"), ("ur5e-3", "pick_transit_waypoints"),
+                                          ("ur5e-4", "rotation_waypoint")])
+def test_a_nominal_approach_carries_no_route_note_and_the_route_stays_a_fact(robot, route):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
         _capability_decomposition_for_resource,
     )
-
-    evidence = {"controller_config": {"cartesian_motion": _DECLARED_MOTION[robot]}}
-    prepared = {"composition_validation_version": 1,
-                "recovery_resources": {"arm": {"resource_type": "robot", "resource_evidence": evidence}}}
-    ref = f"/resources/arm/resource_evidence/controller_config/cartesian_motion/{route}"
-    note = _approach_step(prepared, function_name)["note"]
-    assert ref in note
-    # It says what the nominal function does; the program is the model's to write.
-    assert "move_cartesian" not in note and "add" not in note.split()
-    # The other approach has no route of its own, so it says nothing.
-    other = "pick_approach" if function_name == "place_approach" else "place_approach"
-    assert "note" not in _approach_step(prepared, other)
-    # What the note says to bind, the owner check resolves to a declared point.
-    context = {"resources": {"arm": {"resource_evidence": evidence}}}
-    point = resolve_composition_value({"context_ref": ref}, context)[1]
-    bound = {axis: {"context_ref": f"{ref}/1/{index}"} for index, axis in enumerate("xyz")}
-    assert resolve_composition_value(bound, context) == dict(zip("xyz", point))
-    # Asked for every function at once, it reads the same.
-    every = _capability_decomposition_for_resource(prepared_recovery_request=prepared, resource_jid="arm")
-    assert any(step.get("note") == note for step in every[function_name]["recovery_visible_steps"])
-
-
-def test_a_robot_with_no_route_and_the_task_definitions_stay_as_they_are():
     from cais_spade_llm.resources.robot.robot_task_registry import robot_task_capability_decompositions
 
-    evidence = {"controller_config": {"cartesian_motion": _DECLARED_MOTION["ur5e-4"]}}
+    evidence = {"controller_config": {"cartesian_motion": _DECLARED_MOTION[robot]}}
     entry = {"resource_type": "robot", "resource_evidence": evidence}
-    composition = {"composition_validation_version": 1, "recovery_resources": {"arm": entry}}
-    for function_name in ("pick_approach", "place_approach"):
-        assert "note" not in _approach_step(composition, function_name)
-    # Only composition reads the note. The task definitions are every robot's, so they never carry one robot's route.
-    evidence["controller_config"]["cartesian_motion"] = _DECLARED_MOTION["ur5e-1"]
-    assert "note" not in _approach_step({"recovery_resources": {"arm": entry}}, "place_approach")
-    assert "note" in _approach_step(composition, "place_approach")
-    steps = robot_task_capability_decompositions(function_name="place_approach")["recovery_visible_steps"]
-    assert not any("note" in step for step in steps)
+    # The note read as how to fly the move, so composition serves the step templates as the task definitions have them
+    # (user decision, 2026-11-06); a straight move the arm cannot fly is the base-axis check's refusal.
+    for prepared in ({"composition_validation_version": 1, "recovery_resources": {"arm": entry}},
+                     {"recovery_resources": {"arm": entry}}):
+        for function_name in ("pick_approach", "place_approach"):
+            assert "note" not in _approach_step(prepared, function_name)
+        every = _capability_decomposition_for_resource(prepared_recovery_request=prepared, resource_jid="arm")
+        for function in ("pick_approach", "place_approach"):
+            steps = every[function]["recovery_visible_steps"]
+            assert not any("note" in step for step in steps if step["primitive"] == "move_cartesian")
+            assert not any("cartesian_motion" in step.get("note", "") for step in steps)
+    for function in ("pick_approach", "place_approach"):
+        steps = robot_task_capability_decompositions(function_name=function)["recovery_visible_steps"]
+        assert not any("note" in step for step in steps if step["primitive"] == "move_cartesian")
+    # The declared points stay a fact the program can bind under the arm's cartesian_motion lookup.
+    ref = f"/resources/arm/resource_evidence/controller_config/cartesian_motion/{route}"
+    context = {"resources": {"arm": {"resource_evidence": evidence}}}
+    declared = _DECLARED_MOTION[robot]
+    for key in route.split("/"):
+        declared = declared[int(key)] if key.isdigit() else declared[key]
+    assert resolve_composition_value({"context_ref": ref}, context) == declared
 
 
 def test_a_straight_move_finds_where_it_passes_nearest_an_arms_base_axis():

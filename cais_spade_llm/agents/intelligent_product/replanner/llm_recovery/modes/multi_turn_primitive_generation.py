@@ -567,28 +567,6 @@ def _record_composition_findings(session_state: dict[str, Any], findings: list[d
         history.append(deepcopy(row))
 
 
-def _note_declared_route(
-    payload: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-    resource_jid: str,
-) -> None:
-    """Note on a nominal approach the route the robot declares for it; a function with none stays as it is.
-
-    The controller adds these points inside the approach step (``_move_xy_direct``), so no step template shows them.
-    """
-    evidence = _resource_recovery_entry(prepared_recovery_request, resource_jid).get("resource_evidence") or {}
-    motion = (evidence.get("controller_config") or {}).get("cartesian_motion") or {}
-    root = f"/resources/{resource_jid}/resource_evidence/controller_config/cartesian_motion"
-    routes = {"pick_approach": (f"{root}/pick_transit_waypoints", motion.get("pick_transit_waypoints")),
-              "place_approach": (f"{root}/transit_waypoints/0", (motion.get("transit_waypoints") or [None])[0])}
-    for function_name, (route, points) in routes.items():
-        decomposition = payload if payload.get("function_name") == function_name else payload.get(function_name)
-        if points and decomposition:
-            approach = next(step for step in decomposition["recovery_visible_steps"]
-                            if step["primitive"] == "move_cartesian")
-            approach["note"] = f"Nominally the controller flies this move through the declared route {route} = {points}."
-
-
 def _capability_decomposition_for_resource(
     *,
     prepared_recovery_request: dict[str, Any],
@@ -597,7 +575,10 @@ def _capability_decomposition_for_resource(
 ) -> Any:
     resource_type = _resource_type_for_resource(prepared_recovery_request, resource_jid)
     profile = get_resource_profile(resource_type or "resource")
-    payload = resource_capability_decompositions(
+    # The arm's declared route is served only as the fact under its cartesian_motion lookup, never as a note on a
+    # nominal step: the note read as how to fly the move (user decision, 2026-11-06). A straight move the arm cannot
+    # fly is refused by the owner's base-axis check, with that fact.
+    return resource_capability_decompositions(
         profile,
         function_name=function_name,
         primitive_catalog=_primitive_catalog_for_resource(
@@ -606,9 +587,6 @@ def _capability_decomposition_for_resource(
         ),
         resource_jid=resource_jid,
     )
-    if prepared_recovery_request.get("composition_validation_version") == 1:
-        _note_declared_route(payload, prepared_recovery_request, resource_jid)
-    return payload
 
 
 def _resource_recovery_entry(
