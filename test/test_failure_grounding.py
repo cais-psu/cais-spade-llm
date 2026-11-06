@@ -491,6 +491,10 @@ def test_the_first_turn_is_the_outline_prompt_with_the_grounded_fault(tmp_path, 
     assert "\nFailure\n" in prompt and provider.await_count == 1
     assert "- ur5e-4 did not complete place_approach of gear_small (" in prompt and "task environment_9" in prompt
     assert "Part slippage" not in prompt and "during_place_lowering" not in prompt
+    # What a part put into or taken from a place leaves its resource, as that resource's model declares it.
+    assert ("a part taken out of 3D Printing Station: from completed with another output left it ends completed; "
+            "from completed with no other output left it ends idle") in prompt
+    assert "a part put into M1: from idle it ends loaded" in prompt
     assert draft.record["fault_grounding"]["failed_task_id"] == "environment_9"
     session = draft.prepared["multi_turn_session_state"]
     assert (session["turn_index"], session["current_phase"], session["turns"]) == (1, "outline", [])

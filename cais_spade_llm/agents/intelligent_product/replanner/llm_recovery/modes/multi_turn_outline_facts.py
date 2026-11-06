@@ -630,9 +630,14 @@ def declared_received_states(jid: str, prepared: dict) -> list[str]:
     entry = prepared.get("recovery_resources", {}).get(jid, {})
     evidence = entry.get("resource_evidence") or {}
     models = evidence.get("environment_models") or {}
-    # Outcome-level events, an activity's start guards with its finish's updates, as received_values reads them.
-    events = (outcome_models(models).get(evidence.get("resource_id"), {}).get("events", [])
-              if models and "environment_model_events" not in entry else _environment_model_events(entry))
+    # Outcome-level events, an activity's start guards with its finish's updates, as received_values reads them:
+    # the draft's copy, else from the owner evidence.
+    if "environment_outcome_events" in entry:
+        events = entry["environment_outcome_events"]
+    elif models:
+        events = outcome_models(models).get(evidence.get("resource_id"), {}).get("events", [])
+    else:
+        events = _environment_model_events(entry)
     changes: dict[tuple[str, str], dict[str, str | None]] = {}
     for event in events:
         bindings, updates = event.get("parameter_bindings", {}), event.get("updates") or {}

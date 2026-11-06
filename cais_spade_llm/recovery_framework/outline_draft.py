@@ -25,6 +25,7 @@ from cais_spade_llm.recovery_framework.offline_recovery import SavedRecoveryProd
 from cais_spade_llm.recovery_framework.part_slippage_recovery import _prompt_safety_rules
 from cais_spade_llm.recovery_framework.recovery_observations import RECORDS
 from cais_spade_llm.resources.environment_recovery import environment_recovery_descriptor
+from cais_spade_llm.resources.nominal_des import outcome_models
 from cais_spade_llm.resources.machine.machine_jobs import machine_public_state, public_processing_observations
 from cais_spade_llm.resources.resource_primitives import filter_recovery_primitive_catalog
 
@@ -145,6 +146,9 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
         if owner_model.get("events"):
             # The owner's declared events state, for example, where another resource's placement puts a part.
             row["environment_model_events"] = deepcopy(owner_model["events"])
+            # Each activity as one event, its start's guards with its finish's updates, as the checks read it.
+            row["environment_outcome_events"] = deepcopy(
+                outcome_models(evidence["environment_models"]).get(evidence.get("resource_id"), {}).get("events", []))
         prepared["recovery_resources"][jid] = row
     # These are recorded failure-time owner fields, not projected successor facts.
     for rid, record in observations.get("processing_observations", {}).items():

@@ -162,7 +162,7 @@ def test_draft_states_the_position_a_place_declares_for_a_resource_placing_there
     prepared["recovery_resources"]["owner"]["static_capabilities"]["reachability"] = ["M2", "Belt"]
     belt = deepcopy(prepared["recovery_resources"]["owner"])
     belt.update(resource_jid="belt", static_capabilities={}, resource_evidence={"resource_id": "Belt",
-        "environment_models": {"Belt": {"events": [{"event_name": "place_release",
+        "environment_models": {"Belt": {"events": [{"event_id": 1, "event_name": "place_release",
             "updates": {"part_location.{part_name}": {"set": "loading_position_1"}},
             "parameter_bindings": {"resource_id": {"equals": "M2"}, "destination_location": {"equals": "Belt"}}}]}}})
     belt["recovery_snapshot"]["resource_jid"] = "belt"

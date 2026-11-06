@@ -1273,15 +1273,15 @@ def _with_buffer_place(cell):
     record, specs = _with_pick_events(_resume_only_cell(cell))
     zones = {name: {"scope": "resource", "type": ["string", "null"], "domain": [None, "peg", "gear"]}
              for name in ("zone_1_part", "zone_2_part")}
-    advance = {"event_name": "advance_part", "controllable": True,
+    advance = {"event_id": 1, "event_name": "advance_part", "controllable": True,
                "parameter_bindings": {"resource_id": {"equals": "buffer"}},
                "guards": {"zone_1_part": {"equals_from_param": "part_name"}, "zone_2_part": {"equals": None}},
                "updates": {"zone_1_part": {"set": None}, "zone_2_part": {"set_from_param": "part_name"}}}
-    picks = [{"event_name": name, "guards": {"zone_2_part": {"equals_from_param": "part_name"}},
+    picks = [{"event_id": index, "event_name": name, "guards": {"zone_2_part": {"equals_from_param": "part_name"}},
               "updates": {"zone_2_part": {"set": None}} if name == "pick_grasp" else {},
               "parameter_bindings": {"resource_id": {"equals": "arm_a"}, "origin_resource_location": {"equals": "buffer"},
                                      "part_name": {"required": True}}}
-             for name in ("pick_approach", "pick_grasp")]
+             for index, name in enumerate(("pick_approach", "pick_grasp"), start=2)]
     snapshot = {"resource_jid": "buffer", "zone_1_part": None, "zone_2_part": None}
     request = record["prepared_recovery_request"]
     request["recovery_resources"]["buffer"] = {
@@ -1946,7 +1946,7 @@ def test_a_place_inside_a_resource_changes_only_the_owner_record_its_events_decl
     buffer["recovery_snapshot"]["staging_part"] = None
     # The buffer's own declared events record a part another resource places on its tray.
     buffer["resource_evidence"] = {"resource_id": "buffer", "environment_models": {"buffer": {"events": [
-        {"event_name": "place_release", "updates": {"staging_part": {"set_from_param": "part_name"}},
+        {"event_id": 1, "event_name": "place_release", "updates": {"staging_part": {"set_from_param": "part_name"}},
          "parameter_bindings": {"resource_id": {"equals": "arm_a"}, "destination_location": {"equals": "buffer tray"}}}]}}}
     prepared = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts").prepared
     names = facts.resource_names(prepared)
@@ -2002,8 +2002,9 @@ def test_a_resumed_entry_needs_what_its_place_declares_for_it(tmp_path):
     buffer["recovery_des_model"]["state_variables"]["zone_2_part"] = {"scope": "resource", "type": ["string", "null"]}
     buffer["recovery_snapshot"]["zone_2_part"] = None
     buffer["resource_evidence"] = {"resource_id": "buffer", "environment_models": {"buffer": {"events": [
-        {"event_name": "pick_approach", "guards": {"zone_1_part": {"equals_from_param": "part_name"}}, "updates": {},
-         "parameter_bindings": {"resource_id": {"equals": "arm_b"}, "origin_resource_location": {"equals": "buffer"}}}]}}}
+        {"event_id": 1, "event_name": "pick_approach", "guards": {"zone_1_part": {"equals_from_param": "part_name"}},
+         "updates": {}, "parameter_bindings": {"resource_id": {"equals": "arm_b"},
+                                               "origin_resource_location": {"equals": "buffer"}}}]}}}
     prepared = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts").prepared
     set_down = event("peg_to_buffer", "arm_a", "peg", resource_state="placed", held_part=None, part_state="ready",
                      part_location="buffer")
