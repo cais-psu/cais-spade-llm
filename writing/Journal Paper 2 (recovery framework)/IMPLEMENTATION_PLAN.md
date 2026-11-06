@@ -125,6 +125,12 @@ paid rerun. Steps 1-5 are done offline:
   else on the next nearest around the target that passes the same padded checks; routes the old rule found are unchanged
   (independent review `wf_9ef77418-ec8`). A hand-built Gazebo test drove Storage -> M2 dock in one `move_base` on such a
   route (queue item 110). The RA's own search is unchanged (it exempts its start and end cells; options A/D not chosen).
+- Retained for the Recovery UI and the appendix (November 6): the four reference outlines were copied from their
+  Experiments attempts into `outline_drafts` (the Experiments records stay as they are), so the Recovery UI lists them and
+  loads their saved compositions: Part slippage `draft_f286f2cc…` + `composition_1c097f87…`, Conveyor `draft_520ea8f3…` +
+  `composition_659e0cb4…`, ur5e-1 `draft_d3a60303…` + `composition_26c14804…`, Machining `draft_b351abd8…` +
+  `composition_3a25bdf4…`. `appendix/appendix_set.json` names them (commit `29e13d2`, no hand-edited reference, worked
+  example Conveyor turns 11-13); the export builds.
 - Part slippage failure video re-recorded cleanly (queue item 111). A labelled HAND-TRIMMED Machining DEMO, not the
   reference result: events 12-17 removed, every kept value and program the model's (`handkit/trim_v7_machining.py`, draft
   `draft_demo_trimmed_97e34ee9f3ae`, composition `gazebo_diag/machining_trimmed_demo`, validated offline with no LLM call),
