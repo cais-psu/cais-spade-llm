@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from cais_spade_llm.recovery_framework import ROOT
 from cais_spade_llm.recovery_framework.failure_checkpoints import CHECKPOINTS
+from cais_spade_llm.recovery_framework.fault_visual import SIGN_WORLD_YAW
 from cais_spade_llm.recovery_framework.gazebo_recording import (
     RecordingAttempt,
     X11Capture,
@@ -910,16 +911,16 @@ def _failure_camera_profile(number: int, scene: dict) -> dict:
         loading = machine["conveyor_loading_pose"]
         target = [(loading[0] + belt["world_pose"][0]) / 2,
                   (loading[1] + work[1]) / 2, belt["surface_height"] + .25]
-        sign_yaw, distance = belt["world_pose"][5], 3.7
+        distance = 3.7
         subjects = ["Conveyor", "ur5e-1", "M1", "conveyor_loading_pose"]
     elif number == 2:
         target = [work[0] - .25, (work[1] + robot["base_xyz"][1]) / 2, work[2] + .20]
-        sign_yaw, distance = robot["base_rpy"][2], 3.0
+        distance = 3.0
         subjects = ["ur5e-1", "M1", "conveyor_loading_pose"]
     else:
         storage = scene["Storage"]["world_pose"]
         target = [.55 * work[0] + .45 * storage[0], work[1], work[2] + .20]
-        sign_yaw, distance = machine["world_pose"][5], 4.3
+        distance = 4.3
         subjects = ["M1", "ur5e-1", "KMR", "Storage", "KMR_docking_pose"]
     pitch = math.atan2(1.65, math.hypot(1.4, 2.8))
     yaw = math.atan2(2.8, 1.4)
@@ -931,7 +932,7 @@ def _failure_camera_profile(number: int, scene: dict) -> dict:
                    math.sin(pitch / 2) * math.cos(half_yaw),
                    math.cos(pitch / 2) * math.sin(half_yaw),
                    math.cos(pitch / 2) * math.cos(half_yaw)]
-    normal = [-math.sin(sign_yaw), math.cos(sign_yaw), 0.]
+    normal = [-math.sin(SIGN_WORLD_YAW), math.cos(SIGN_WORLD_YAW), 0.]
     if normal[0] * math.cos(yaw) + normal[1] * math.sin(yaw) > 0:
         normal = [-value for value in normal]
     return {"scenario": number, "position": position, "look_at": target,

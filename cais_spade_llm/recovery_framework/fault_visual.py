@@ -9,6 +9,9 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 MODEL_NAME = "cais_Conveyor_breakdown"
+# World heading of every sign, the Conveyor's: its face looks south, where the recording cameras stand, whichever
+# way the failed resource is turned (M1 and ur5e-1 are turned 90 degrees and showed the cameras only the sign's edge).
+SIGN_WORLD_YAW = 0.0
 
 
 def marker_geometry(scene: dict) -> dict:
@@ -44,10 +47,11 @@ def marker_geometry(scene: dict) -> dict:
 
 
 def marker_sdf(scene: dict) -> str:
-    """Build an outline and two-sided sign without collision geometry."""
+    """Build an outline that follows the resource and a two-sided sign at SIGN_WORLD_YAW, without collision geometry."""
     geometry = marker_geometry(scene)
     x, y, z, roll, pitch, yaw = geometry["pose"]
     length, width, height = geometry["length"], geometry["width"], geometry["height"]
+    sign_yaw = SIGN_WORLD_YAW - yaw
     rails = []
     for name, px, py, sx, sy in (
         ("left", 0, -width / 2 - 0.035, length, 0.04),
@@ -63,7 +67,7 @@ def marker_sdf(scene: dict) -> str:
         )
     sign = (
         '<visual name="failure_label">'
-        f"<pose>0 0 {height + geometry.get('label_height', 0.55)} 0 0 0</pose>"
+        f"<pose>0 0 {height + geometry.get('label_height', 0.55)} 0 0 {sign_yaw}</pose>"
         "<geometry><box><size>1.4 .025 .28</size></box></geometry>"
         "<material><script><uri>model://conveyor_fault_marker/materials/scripts</uri>"
         "<uri>model://conveyor_fault_marker/materials/textures</uri>"

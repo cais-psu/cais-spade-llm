@@ -62,7 +62,7 @@ def test_close_failure_camera_faces_the_existing_sign_and_preserves_setup(number
     import math
     from copy import deepcopy
 
-    from cais_spade_llm.recovery_framework.fault_visual import marker_geometry
+    from cais_spade_llm.recovery_framework.fault_visual import SIGN_WORLD_YAW, marker_geometry
 
     scene = json.loads((failure_videos.ROOT / "cais_spade_llm/initialization/recovery_framework_gazebo.json").read_text())
     original = deepcopy(scene)
@@ -73,7 +73,7 @@ def test_close_failure_camera_faces_the_existing_sign_and_preserves_setup(number
     pose = marker["pose"]
     label = [pose[0], pose[1], pose[2] + marker["height"] + marker.get("label_height", .55)]
     ray = [profile["position"][axis] - label[axis] for axis in range(3)]
-    face_normal = [-math.sin(pose[5]), math.cos(pose[5]), 0.]
+    face_normal = [-math.sin(SIGN_WORLD_YAW), math.cos(SIGN_WORLD_YAW), 0.]
     cosine = abs(sum(ray[axis] * face_normal[axis] for axis in range(3))) / math.sqrt(sum(v * v for v in ray))
     assert cosine >= math.cos(math.radians(65))
     assert {"M1", "ur5e-1"} <= set(profile["subjects"])

@@ -12,7 +12,7 @@ import pytest
 
 from cais_spade_llm.product.environment import EnvironmentProductContext
 from cais_spade_llm.recovery_framework.conveyor_fault import CHECKPOINT, ConveyorFault
-from cais_spade_llm.recovery_framework.fault_visual import marker_sdf
+from cais_spade_llm.recovery_framework.fault_visual import SIGN_WORLD_YAW, marker_sdf
 from cais_spade_llm.ui import recovery_setup as settings
 
 
@@ -281,7 +281,9 @@ def test_ur5e_1_sign_is_raised_without_changing_the_outline_or_collision_geometr
     label = model.find("./link/visual[@name='failure_label']")
     assert geometry["label"] == "ur5e-1 breakdown"
     assert geometry["label_height"] == 1.15
-    assert label.findtext("pose") == "0 0 1.2 0 0 0"
+    label_pose = [float(value) for value in label.findtext("pose").split()]
+    assert label_pose[:5] == [0, 0, 1.2, 0, 0]
+    assert geometry["pose"][5] + label_pose[5] == pytest.approx(SIGN_WORLD_YAW)
     assert label.findtext("geometry/box/size") == "1.4 .025 .28"
     assert model.findtext("pose") == " ".join(str(v) for v in geometry["pose"])
     assert not model.findall(".//collision")
@@ -648,6 +650,9 @@ def test_new_marker_uses_resource_or_observation_and_has_no_collision(scenario):
     assert not xml.findall(".//collision")
     assert geometry["label"].startswith(scenario)
     assert geometry["model_name"] == xml.find("model").attrib["name"]
+    # Every sign faces the recording cameras like the Conveyor's, whichever way its resource is turned.
+    label_yaw = float(xml.find("model/link/visual[@name='failure_label']").findtext("pose").split()[5])
+    assert geometry["pose"][5] + label_yaw == pytest.approx(SIGN_WORLD_YAW)
     if scenario == "Part slippage":
         assert geometry["pose"][:3] == [0.12, -0.23, 1.035]
 
