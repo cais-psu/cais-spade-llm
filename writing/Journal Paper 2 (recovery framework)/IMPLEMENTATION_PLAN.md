@@ -118,11 +118,17 @@ paid rerun. Steps 1-5 are done offline:
   24/24 with video (KMR start 0.026 m off; queue item 109). All four v7 recovery runs completed in Gazebo with
   `recovery.mp4` + `recovery-20x.mp4` (`gazebo_diag/runs/v7_<scenario>`), and the failure videos are in
   `gazebo_diag/runs/fail_v7_<scenario>` (Machining's on the capture's seed).
-- Open for the user (read-only investigation `wf_0a3e32ad-905`): from Storage the RA accepts the drive to the M2 dock that
-  the live controller refuses (twice now: item 103 `tray_01` and this run). The controller's constant-heading fallback anchors
-  its grid at the start and its rounded end cell lands 11 mm east of the M2 dock, which allows 10 mm; the RA's own search
-  exempts its start and end cells and does not sweep the end-cell-to-dock step. Options: fix the controller's end cell (B),
-  make the RA run the controller's own route procedure (A), both (D), or record it as a known limit (C).
+- From Storage the RA accepted the drive to the M2 dock that the live controller refused (twice: item 103 `tray_01` and
+  the first v7 Machining run): the controller's constant-heading fallback anchors its grid at the start, and its rounded
+  end cell landed 11 mm east of the M2 dock, which allows 10 mm (investigation `wf_0a3e32ad-905`). User decision
+  (November 6): option B, fix the controller. Committed `9ceb2b7`: the route ends on the nearest grid pose when it serves,
+  else on the next nearest around the target that passes the same padded checks; routes the old rule found are unchanged
+  (independent review `wf_9ef77418-ec8`). A hand-built Gazebo test drove Storage -> M2 dock in one `move_base` on such a
+  route (queue item 110). The RA's own search is unchanged (it exempts its start and end cells; options A/D not chosen).
+- Part slippage failure video re-recorded cleanly (queue item 111). A labelled HAND-TRIMMED Machining DEMO, not the
+  reference result: events 12-17 removed, every kept value and program the model's (`handkit/trim_v7_machining.py`, draft
+  `draft_demo_trimmed_97e34ee9f3ae`, composition `gazebo_diag/machining_trimmed_demo`, validated offline with no LLM call),
+  completed 18/18 in Gazebo with video (`gazebo_diag/runs/v7_machining_trimmed_demo`, queue item 112).
 
 ## No hidden rules in recovery events — October 31, 2026 — standing rule
 
