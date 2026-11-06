@@ -44,7 +44,10 @@ def marker(scene: dict, action: str) -> dict:
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                # fault_visual bounds each of its Gazebo calls itself (8 s for the service, 30 s for the reply,
+                # up to three calls); this outer bound only stops a process that hangs past all of them. At 30 s it
+                # cut a slow but working show short and the v7 Conveyor failure video lost its sign.
+                timeout=120,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"status": "failed", "error": str(exc)}
