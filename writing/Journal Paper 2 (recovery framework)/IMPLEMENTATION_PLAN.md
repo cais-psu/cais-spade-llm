@@ -100,8 +100,29 @@ paid rerun. Steps 1-5 are done offline:
   `capture_460d78e95f8e48bdaa3517076ebc51ee` (B2), ur5e-1 `capture_4f9097aa46bf450ca0717840262806a4` (B2). The KMR's
   `place_release` (with its park) and `move_home` ran in every nominal delivery. Recovery defaults and capture tests use
   them (160 capture tests pass); the v6 captures and their run folder were deleted.
-Remaining: failure videos, paid reruns (outlines, then compositions), Gazebo runs with video. The `08c3df4` results were
-deleted on November 5 night (`recapture_v2_20261015/results_before_uniform_model_20261105_deletion_list.json`).
+- `29e13d2` (the draft keeps outcome-level model events, so the printer's two pickups are served apart) froze the paid runs
+  (worktree `recovery_review_1030/wt_v7_29e13d2`). Opus 5.5 medium, Framework incremental, 40 turns: all four outlines
+  passed on their first try (Part slippage 5 events / 10 turns / 68k tokens, Conveyor 7 / 16 / 214k, ur5e-1 8 / 16 / 190k,
+  Machining 24 / 30 / 330k). Unedited compositions accepted every event: Part slippage `composition_1c097f87…` 5/5,
+  Conveyor `composition_659e0cb4…` 7/7, ur5e-1 `composition_26c14804…` 8/8, Machining `composition_3a25bdf4…` 24/24
+  (about 1.39M composition tokens). The Machining outline takes the finished KET4 out of M2 and puts it back three times
+  (events 12-18): each time its preferred candidate, the Conveyor place, left out `part_order`, was refused with that fact,
+  and its fallback (back into M2) was applied; the refusal was served each next turn.
+- Gazebo (queue items 107-109): failure videos of all four (`gazebo_diag/runs/fail_v7_<scenario>`); recovery runs with
+  video: Conveyor 7/7, ur5e-1 8/8, Part slippage 5/5 completed, each starting from its capture's state (KMR base 0.0 m off).
+  The first Machining run stopped at event 19 of 24 (18 completed), but it had not reproduced the capture: the runner drew a
+  new failure seed, M1 broke later, and the KMR's trip had already reached Storage, so event 19 drove Storage -> M2 dock
+  instead of the composed drive from (-3.121, 3.054), on which the RA and the live controller agree offline. Runner-only
+  fixes (the capture's own failure seed; a stop when a mobile base stands off its captured pose, with a stated tolerance;
+  the composed start's process for a `complete_job` whose job the worker's record lacks yet). The seeded rerun COMPLETED
+  24/24 with video (KMR start 0.026 m off; queue item 109). All four v7 recovery runs completed in Gazebo with
+  `recovery.mp4` + `recovery-20x.mp4` (`gazebo_diag/runs/v7_<scenario>`), and the failure videos are in
+  `gazebo_diag/runs/fail_v7_<scenario>` (Machining's on the capture's seed).
+- Open for the user (read-only investigation `wf_0a3e32ad-905`): from Storage the RA accepts the drive to the M2 dock that
+  the live controller refuses (twice now: item 103 `tray_01` and this run). The controller's constant-heading fallback anchors
+  its grid at the start and its rounded end cell lands 11 mm east of the M2 dock, which allows 10 mm; the RA's own search
+  exempts its start and end cells and does not sweep the end-cell-to-dock step. Options: fix the controller's end cell (B),
+  make the RA run the controller's own route procedure (A), both (D), or record it as a known limit (C).
 
 ## No hidden rules in recovery events — October 31, 2026 — standing rule
 
