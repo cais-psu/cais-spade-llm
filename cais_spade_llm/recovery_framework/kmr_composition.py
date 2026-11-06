@@ -191,9 +191,11 @@ def project_kmr_completion(*, task: dict, trace: list, recovery_snapshot: dict, 
         if part_name != task.get("part_name"):
             return fail("Custody transfer identifies a different part", "INFEASIBLE")
         if transfer["primitive"] == "grasp_part":
+            # The place the part leaves, whose owner's model declares what taking it leaves there, as for a robot.
+            origin = part_context.get("part_location", part_context.get("location"))
             part.update(part_location=jid, part_holder_resource_jid=jid)
             for owner, field, empty in _source_records(part_name, jid, grounding_context, physical_evidence,
-                                                       task.get("neighbor_end_state") or {}):
+                                                       task.get("neighbor_end_state") or {}, origin=origin):
                 projected_resources.setdefault(owner, {})[field] = empty
             continue
         destination = stated.get("part_location")

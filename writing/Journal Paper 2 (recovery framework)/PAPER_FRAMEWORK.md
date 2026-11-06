@@ -96,7 +96,13 @@ name the section or equation it implements. If it maps to none, ask the user fir
     $\forall c\,\exists\rho\in P_c\,\exists\theta_\rho\in\Theta_{i,\rho}: C_\rho(v_i,v'_i,\theta_\rho)=1$:
     one feasible producer per condition, with no order between them and no chaining through a failed
     precondition (the RA is a verifier, not a planner).
-  - A task-level state label that no primitive produces (`resource_state`) is not derived.
+  - `resource_state` is a condition like any other (user, November 5): a stated label holds only when it
+    already holds, a declared effect of the acting resource's primitives makes it (`grasp_part` leaves
+    `picked` on a robot and `carrying` on the KMR, `release_part` `placed`, `move_to_named_pose` `idle`, or
+    `carrying` for a KMR holding a part), or the event's pick or place leaves it as the receiving
+    resource's model declares (a machine `loaded` when a part is put into it and `idle` when it is taken
+    out, Exit `occupied`). Every resource's tasks are declared programs of its own primitives, served with
+    the steps the saved Gazebo programs run.
   - Location, slot and custody have no producing effect (primitives are not symbolically connectable).
     They are decided by the acting resource's capability: a known place, kinematic reach over its own
     chain, and navigation for a mobile base.

@@ -194,18 +194,6 @@ def _on_declared_fields(declaration: dict, value: Any) -> Any:
     return value
 
 
-def _declares(catalog: list, field: str, value: Any) -> bool:
-    """Return whether a primitive of the resource declares an effect that may set ``field``, or its alias, to value."""
-    names = (field, *contracts._RESOURCE_NAMES.get(field, ()))
-    for row in catalog:
-        for name in names:
-            effect = (row.get("effects") or {}).get(name) if isinstance(row, dict) else None
-            if isinstance(effect, dict) and (("set" in effect and contracts._equal(effect["set"], value)) or (
-                    value is not None and bool(set(effect) & {"set_from_param", "set_from_param_any_of"}))):
-                return True
-    return False
-
-
 def _contract_refusal(name: str, contract: dict, state: dict, params: dict, declarations: dict) -> tuple[str, str] | None:
     """Return why one declared contract of a primitive does not apply at a step, or None when it applies."""
     for parameter, schema in (contract.get("parameters") or {}).items():
@@ -335,7 +323,9 @@ def validate_recovery_primitive_composition(
     context = deepcopy(grounding_context)
     context["event_facts"] = {}
     facts: set[tuple] = set()
+    started = deepcopy(state)
     written: set[str] = set()
+    unknown: set[str] = set()
     for index, step in enumerate(primitive_steps):
         if (not isinstance(step, dict) or set(step) - {"primitive", "params"}
                 or not isinstance(step.get("primitive"), str) or not isinstance(step.get("params"), dict)):
@@ -452,6 +442,8 @@ def validate_recovery_primitive_composition(
         if error:
             return finish("NEEDS_CONTEXT", error, index=index)
         written.update(contracts._field(key, declarations)[1] for key in effects)
+        unknown.update(contracts._field(key, declarations)[1] for key, effect in effects.items()
+                       if effect == {"set_unknown": True})
         for field, effect in effects.items():
             if isinstance(effect, dict) and set(effect) & {"pose_absolute_from_params", "pose_relative_from_params"}:
                 scope, key = contracts._field(field, declarations)
@@ -484,33 +476,31 @@ def validate_recovery_primitive_composition(
             return finish("NEEDS_CONTEXT", f"Postcondition {field!r} is not declared")
         stated = _on_declared_fields(declaration, expected)
         value = _declared_value(field, declaration, resource, part)
-        if field == "resource_state" and field not in written and not contracts._equal(value, stated) and not _declares(
-                primitive_catalog, field, stated):
-            # As Algorithm 1 has it, a state that no primitive of the resource declares is named by the event
-            # itself, unless a step's declared effect set another; a state one of them declares comes only from
-            # that primitive.
-            named = {"resource": {field: deepcopy(stated)}, "part": {}, "unknown": {"resource": [], "part": []}}
-            resource, _ = contracts._runtime_views(named, resource, part)
-            result["projected_snapshot"] = deepcopy(resource)
-            value = stated
         if value is contracts._MISSING:
             return finish("NEEDS_CONTEXT", f"The composition has no supported effect for {field!r}")
         if not _same_value(value, stated):
             result["derived_end_state"][field] = deepcopy(value)
             return finish("INFEASIBLE", f"Postcondition {field!r}: achieved {value!r}, required {stated!r}")
         result["derived_end_state"][field] = deepcopy(expected)
+    # As the RA's left_by: a value the program's declared effects change and the event leaves out would leave the
+    # outline's projection, which the next event starts from, at a value the program no longer leaves.
+    for key in sorted(written - unknown - set(goal)):
+        declaration = declarations.get(key)
+        if (not isinstance(declaration, dict) or declaration.get("private") is True or "effect" in declaration
+                or key.startswith(("task_ctx.", "_"))):
+            continue
+        scope = declaration.get("scope", "resource")
+        before, after = started[scope].get(key, contracts._MISSING), state[scope].get(key, contracts._MISSING)
+        if after is not contracts._MISSING and (before is contracts._MISSING or not contracts._equal(before, after)):
+            shown = "no recorded value" if before is contracts._MISSING else repr(before)
+            return finish("INFEASIBLE", f"The program changes {key} from {shown} to {after!r}, "
+                                        "and the event does not state it")
     # The event's stated values for other resources must be what the program leaves them, as for its own.
     for jid, values in (task.get("neighbor_end_state") or {}).items():
         neighbor = grounding_context.get("resources", {}).get(jid) or {}
         current = {**neighbor, **(result.get("projected_resources", {}).get(jid) or {})}
         for field, stated in (values or {}).items():
             achieved = contracts._get(current, field)
-            if field == "resource_state" and not contracts._equal(achieved, stated) and not _declares(
-                    neighbor.get("execution_primitive_catalog") or [], field, stated):
-                # As for the acting resource, and as the RA has it for every resource: a state none of the
-                # neighbour's own primitives declares is named by the event, and later events start from it.
-                result.setdefault("projected_resources", {}).setdefault(jid, {})[field] = deepcopy(stated)
-                continue
             if achieved is contracts._MISSING:
                 return finish("NEEDS_CONTEXT", f"The composition has no value for {jid}'s {field}")
             if not contracts._equal(achieved, stated):

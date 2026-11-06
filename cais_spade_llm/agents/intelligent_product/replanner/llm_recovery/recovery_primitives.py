@@ -587,6 +587,19 @@ def validate_and_project_steps_with_trace(
                     "event_facts": deepcopy(event_facts),
                 }
 
+        primitive_meta, domain_miss = _alternative_for_snapshot(primitive_meta, projected, resolved_params)
+        if domain_miss:
+            validation_error = f"{domain_miss} at step {step_index} ({primitive})"
+            step_result["validation_error"] = validation_error
+            step_results.append(step_result)
+            return {
+                "valid": False,
+                "projected_snapshot": projected,
+                "validation_error": validation_error,
+                "normalized_steps": deepcopy(normalized_steps),
+                "step_results": step_results,
+                "event_facts": deepcopy(event_facts),
+            }
         preconditions = dict(primitive_meta.get("preconditions") or {})
         for field, condition in preconditions.items():
             actual = resource_snapshot_field_value(projected, str(field))
@@ -662,6 +675,39 @@ def validate_and_project_steps_with_trace(
         "step_results": step_results,
         "event_facts": deepcopy(event_facts),
     }
+
+
+def _alternative_for_snapshot(primitive_meta: dict, snapshot: dict, params: dict) -> tuple[dict, str | None]:
+    """Return the primitive's contract for the projected state and the step's parameters.
+
+    An alternative adds its own preconditions, effects and parameter values to the primitive's shared ones.
+    The first alternative whose preconditions hold and whose declared values take the step's parameters is the
+    contract. Where the preconditions of one hold but its declared values do not take a parameter, that fact is
+    returned; where none holds, the first alternative is, and the caller reports its failed precondition.
+    """
+    alternatives = primitive_meta.get("alternatives") or []
+    if not alternatives:
+        return primitive_meta, None
+    shared_pre = dict(primitive_meta.get("preconditions") or {})
+    shared_effects = dict(primitive_meta.get("effects") or {})
+    contracts = [{**primitive_meta, "preconditions": {**shared_pre, **(row.get("preconditions") or {})},
+                  "effects": {**shared_effects, **(row.get("effects") or {})},
+                  "alternative_parameters": dict(row.get("parameters") or {})} for row in alternatives]
+    holding = [contract for contract in contracts
+               if not any(_precondition_failed_message(str(field), dict(condition or {}),
+                                                       resource_snapshot_field_value(snapshot, str(field)))
+                          for field, condition in contract["preconditions"].items())]
+    misses = []
+    for contract in holding:
+        missed = [f"{name} only in {rule['domain']}, not {params.get(name)!r}"
+                  for name, rule in contract["alternative_parameters"].items()
+                  if "domain" in rule and params.get(name) not in rule["domain"]]
+        if not missed:
+            return contract, None
+        misses.extend(missed)
+    if holding:
+        return holding[0], "in the projected state it takes " + "; ".join(misses)
+    return contracts[0], None
 
 
 def validate_and_project_steps(

@@ -90,9 +90,10 @@ def test_only_a_robot_acting_for_a_part_or_away_from_rest_keeps_its_way_home(cel
     plant = EnvironmentPlant(context.calculation_snapshot(), OnlineSafetyMonitor({}, []), cell.jids,
                              {part: context.requirements[part][-1]})
     rows = plant._part_templates(part, Budget())
-    # move_home_done is part of move_home: it must not make every robot look busy with the part.
+    # move_home_done is part of move_home: it must not make every robot look busy with the part. The KMR releases
+    # parts and parks its arm after a release in its own move_home, so its way home stays with its releases.
     homing = {row["task"]["resource_id"] for row in rows if row["task"]["event_name"].startswith("move_home")}
-    assert invalid == [] and homing == {"ur5e-1", "ur5e-3"}
+    assert invalid == [] and homing == {"ur5e-1", "ur5e-3", "KMR"}
 
 
 def test_a_robot_left_idle_away_from_home_keeps_its_way_home(cell):

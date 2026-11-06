@@ -616,6 +616,51 @@ def declared_record_places(jid: str, prepared: dict) -> dict[str, str]:
     return places
 
 
+def declared_received_states(jid: str, prepared: dict) -> list[str]:
+    """Return, per place, the resource_state a part put there or taken from there leaves the resource in.
+
+    A resource's model declares these on other resources' events at its places, as it declares where it records
+    the part (``declared_record_places``): a machine a part is put into ends loaded, one a part is taken from
+    ends idle, and one in its fault state keeps it. The facts are the model's, from the state each starts in.
+    """
+    from cais_spade_llm.resources.environment_models import received_slots
+    from cais_spade_llm.resources.nominal_des import outcome_models
+
+    own = resource_names(prepared).get(jid, jid)
+    entry = prepared.get("recovery_resources", {}).get(jid, {})
+    evidence = entry.get("resource_evidence") or {}
+    models = evidence.get("environment_models") or {}
+    # Outcome-level events, an activity's start guards with its finish's updates, as received_values reads them.
+    events = (outcome_models(models).get(evidence.get("resource_id"), {}).get("events", [])
+              if models and "environment_model_events" not in entry else _environment_model_events(entry))
+    changes: dict[tuple[str, str], dict[str, str | None]] = {}
+    for event in events:
+        bindings, updates = event.get("parameter_bindings", {}), event.get("updates") or {}
+        guard = ((event.get("guards") or {}).get("resource_state") or {}).get("equals")
+        if (bindings.get("resource_id") or {}).get("equals") == own or not isinstance(guard, str):
+            continue
+        # A pickup whose outcome depends on the other outputs still there says so, as its collection guard declares.
+        for rule in (event.get("collection_guards") or {}).values():
+            if rule == {"any_other_equals": True}:
+                guard += " with another output left"
+            elif rule == {"all_other_equals": False}:
+                guard += " with no other output left"
+        for key, way, taken in (("destination_location", "put into", False),
+                                ("origin_resource_location", "taken out of", True)):
+            place = (bindings.get(key) or {}).get("equals")
+            if isinstance(place, str) and received_slots(event, taken=taken):
+                changes.setdefault((place, way), {})[guard] = (updates.get("resource_state") or {}).get("set")
+    lines = []
+    for (place, way), states in changes.items():
+        ends = {}
+        for before, after in states.items():
+            ends.setdefault(after, []).append(before)
+        lines.append(f"a part {way} {place}: " + "; ".join(
+            f"from {' or '.join(befores)} it keeps its state" if after is None else f"from {' or '.join(befores)} it ends {after}"
+            for after, befores in ends.items()))
+    return lines
+
+
 def _advance_order(model: dict, resource: str) -> list[str]:
     """Return the positions a resource's own declared events advance parts through, in order.
 
@@ -837,6 +882,7 @@ def _resource_row(jid: str, prepared: dict, session: dict, names: dict[str, str]
                if job.get("processing_fraction") is not None else "") for job in jobs))
     if capabilities := _capabilities(jid, prepared, session):
         items.append(capabilities)
+    items.extend(declared_received_states(jid, prepared))
     unstated = "resource_state" in session.get("diagnostic_unknown_owner_fields", {}).get(jid, [])
     # A resource whose model declares no resource_state has no state word; its variables are its condition.
     status = [row.get("resource_state") or row.get("current_state") or ("state not stated" if unstated else "state not recorded")

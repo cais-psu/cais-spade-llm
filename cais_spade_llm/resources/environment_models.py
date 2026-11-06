@@ -21,7 +21,7 @@ from itertools import combinations_with_replacement
 from typing import Any
 
 from cais_spade_llm.recovery_framework import SCENE_PATH
-from cais_spade_llm.recovery_framework.kmr_tasks import KMR_TASKS
+from cais_spade_llm.recovery_framework.kmr_tasks import KMR_MOVE_VARIANTS, KMR_TASKS
 from cais_spade_llm.resources import nominal_des as tasks
 from cais_spade_llm.resources.function_contracts import validate_function_contracts
 from cais_spade_llm.resources.gazebo_programs import resource_program_revision
@@ -86,6 +86,98 @@ def place_completion(model: dict, destination: Any, target: str | None) -> list[
             return [{name: target if value == {"set_from_param": "target"} else value
                      for name, value in entry.items()} for entry in added]
     return []
+
+
+def received_slots(event: dict, *, taken: bool) -> set[str]:
+    """Return the owner's variables an event at one of its places puts a part into, or takes it out of.
+
+    A part put there is written from the event's part_name. A part taken leaves the slot that held it null,
+    or a per-part flag that recorded it, such as a printer output or a storage entry, false, as the event's
+    guard and update declare.
+    """
+    guards, updates = event.get("guards") or {}, event.get("updates") or {}
+    if not taken:
+        return {field for field, rule in updates.items() if rule == {"set_from_param": "part_name"}}
+    return {field for field, rule in guards.items()
+            if (rule == {"equals_from_param": "part_name"} and updates.get(field) == {"set": None})
+            or (field.endswith(".{part_name}") and rule == {"equals": True} and updates.get(field) == {"set": False})}
+
+
+def received_values(models: dict, owner: str, place: Any, slot: str | None, part: str, values: dict, *,
+                    taken: bool) -> tuple[dict, list[dict]]:
+    """Return what a resource's model declares a part put at, or taken from, one of its places leaves it.
+
+    A resource's model carries other resources' events at its places: a part released into a machine leaves the
+    machine loaded, and a part taken out of it leaves it idle. The consequence belongs to the resource that
+    receives or gives up the part, so whichever resource places or takes it, the declared values are the same
+    (the event's actor is not matched). The resource's own guards on that event, and its declared collection
+    guards over its other outputs, must hold on ``values``. A guard or update on a part variable concerns where
+    the part is, which the place or pick check decides, so only the resource's own variables count. Code writes
+    none of these values: a check finds them, and the event states them or is refused.
+
+    Args:
+        models: Every resource's runtime model, per resource id.
+        owner: The resource whose place receives or gives up the part.
+        place: The place, as the events bind it (``destination_location`` or ``origin_resource_location``).
+        slot: The owner's variable that receives the part, or holds it before it is taken. Only the events
+            for that slot count, so a slot the model declares nothing for leaves nothing to find. None takes
+            the first declared event at the place whose guards hold, for a commit that observed no slot, such
+            as a storage flag the part clears.
+        part: The part.
+        values: The owner's values before the part is put there or taken.
+        taken: True for a part taken from the place, False for one put there.
+
+    Returns:
+        The owner's declared values after the event, and the guards that do not hold, one list per declared
+        event at that place; both empty where the owner's model declares nothing for that place.
+    """
+    if not (models.get(owner) or {}).get("events"):
+        return {}, []
+    declared = models[owner].get("state_variables") or {}
+    part_fields = {field for field, declaration in declared.items() if declaration.get("scope") == "part"}
+    binding = "origin_resource_location" if taken else "destination_location"
+    params = {"part_name": part}
+    refused: list[dict] = []
+    for event in tasks.outcome_models(models).get(owner, {}).get("events") or []:
+        bindings = event.get("parameter_bindings") or {}
+        updates, guards = event.get("updates") or {}, event.get("guards") or {}
+        if ((bindings.get(binding) or {}).get("equals") != place or not updates
+                or (bindings.get("resource_id") or {}).get("equals") == owner):
+            continue
+        slots = {_bound(field, params) for field in received_slots(event, taken=taken)}
+        if slot is not None and slot not in slots:
+            continue
+        failed = []
+        for field, guard in (event.get("collection_guards") or {}).items():
+            # The printer's pickup outcomes differ by what else its bed still holds, as the nominal model reads it.
+            family = field.removesuffix("{part_name}")
+            others = {name: value for name, value in values.items()
+                      if name.startswith(family) and name != _bound(field, params)}
+            (operator, expected), = guard.items()
+            matches = [type(value) is type(expected) and value == expected for value in others.values()]
+            if not (any(matches) if operator == "any_other_equals" else all(matches)):
+                failed.append({"field": f"other {family.rstrip('.')} values", "operator": operator,
+                               "expected": deepcopy(expected), "actual": deepcopy(others)})
+        for field, guard in guards.items():
+            if field in part_fields:
+                continue
+            (operator, expected), = guard.items()
+            if operator.endswith("_from_param"):
+                if expected != "part_name":
+                    continue
+                expected = part
+            actual = values.get(_bound(field, params))
+            equal = type(actual) is type(expected) and actual == expected
+            if (operator.startswith("not_equals") and equal) or (operator.startswith("equals") and not equal):
+                failed.append({"field": _bound(field, params), "operator": operator.removesuffix("_from_param"),
+                               "expected": deepcopy(expected), "actual": deepcopy(actual)})
+        if failed:
+            refused.append({"event_name": event["event_name"], "failed": failed})
+            continue
+        return ({_bound(field, params): deepcopy(rule["set"]) if "set" in rule else part
+                 for field, rule in updates.items()
+                 if field not in part_fields and (set(rule) == {"set"} or rule == {"set_from_param": "part_name"})}, [])
+    return {}, refused
 
 
 def build_environment_models(
@@ -251,13 +343,14 @@ def _declare_machine_jobs(models: dict, scene: dict) -> None:
         tasks._variable(model, "selected_program", list(machine["program_options"]), selected)
         # An interrupted job is observed, never commanded: it is the machine's fault state.
         model["fault_states"] = ["interrupted"]
-        # A part whose job paused or stopped may be unloaded like a completed one; it keeps its job state.
+        # A part whose job paused or stopped may be unloaded like a completed one; it keeps its job state. So may a
+        # loaded part not yet machined. A part taken out of a machine in its fault state leaves the fault there.
         access_events = [event['event_id'] for event in model['events']
             if event['event_name'] in {'pick_approach', 'pick_grasp', 'pick_part'}
             and event['guards'].get('resource_state') == {'equals': 'completed'}
             and 'start_event_id' not in event]
         for identifier in access_events:
-            for state in ('paused', 'stopped'):
+            for state in ('paused', 'stopped', 'loaded', 'interrupted'):
                 event_id = max(event['event_id'] for peer in models.values() for event in peer['events']) + 1
                 copies = set(_copy_activity(models, identifier, event_id).values())
                 for owner, peer in models.items():
@@ -266,6 +359,8 @@ def _declare_machine_jobs(models: dict, scene: dict) -> None:
                             continue
                         if owner == rid and 'resource_state' in event['guards']:
                             event['guards']['resource_state'] = {'equals': state}
+                        if owner == rid and state in model['fault_states']:
+                            event['updates'].pop('resource_state', None)
                         source = event['capability_transition']['source']
                         if f"{rid}.resource_state" in source:
                             source[f"{rid}.resource_state"] = state
@@ -599,18 +694,20 @@ def _parameterized_event(
     function_name = "place_insert" if actor != "KMR" and name == "place_release" else name
     program_key = function_name if function_name in registry and actor != "KMR" else name
     saved = scene.get("resource_programs", {}).get("resources", {}).get(actor, {}).get("functions", {}).get(program_key)
+    variant = event.get("program_variant", "")
     if saved is not None:
         event["program_key"] = program_key
         event["function_name"] = saved["function_name"]
-        event["program"] = deepcopy(saved["program"])
+        # A start that runs a saved variant, such as the KMR's empty drive, serves that variant's steps.
+        event["program"] = deepcopy(saved["variants"][variant] if variant else saved["program"])
         event["program_status"] = saved["status"]
         if saved.get("variants"):
             event["program_variants"] = deepcopy(saved["variants"])
     elif actor == "KMR" and name in KMR_TASKS:
         event["function_name"] = name
-        event["program"] = json.loads(json.dumps(asdict(KMR_TASKS[name].program)))
+        event["program"] = json.loads(json.dumps(asdict((KMR_MOVE_VARIANTS[variant] if variant else KMR_TASKS[name]).program)))
         event["program_status"] = "implemented"
-    elif function_name in registry:
+    elif actor != "KMR" and function_name in registry:
         event["function_name"] = function_name
         event["program"] = json.loads(json.dumps(asdict(registry[function_name].program)))
         event["program_status"] = "implemented"

@@ -135,6 +135,8 @@ def completed_machine_part(models, state, machine, part):
         handoff_acknowledged=True,
         robot_clear=True,
     )
+    # place_release leaves the KMR placed with its arm withdrawn; it parks before it drives back.
+    state = event(models, state, "KMR", "move_home")
     state = move_mobile(models, state, machine, "Storage")
     return event(
         models,
@@ -304,6 +306,14 @@ def test_kmr_pick_approach_binds_the_part_for_pick_part(models):
     assert state["KMR"]["held_part"] == SQUARE
     assert state["Storage"][f"inventory.{SQUARE}"] is False
     assert state["Storage"][f"inventory.{CIRCULAR}"] is True
+
+
+def test_kmr_move_home_after_an_approach_ends_it(models):
+    state = initial_nominal_valuation(models)
+    state = event(models, state, "KMR", "pick_approach", part_name=SQUARE, origin_resource_location="Storage")
+    assert (state["KMR"]["resource_state"], state["KMR"]["approached_part"]) == ("at_pick", SQUARE)
+    state = event(models, state, "KMR", "move_home")
+    assert (state["KMR"]["resource_state"], state["KMR"]["approached_part"]) == ("idle", None)
 
 
 def test_machine_assignment_and_mobile_routes_are_guarded(models):
@@ -2453,6 +2463,46 @@ def test_resource_catalog_renders_steps_and_current_generated_program(scene):
     client.delete()
 
 
+def test_a_part_put_into_or_taken_from_a_place_leaves_what_the_receiving_model_declares(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models, received_values
+
+    models = build_environment_models(scene)
+    part = "RGOCG4-50_Round_4mm"
+
+    def received(owner, place, slot, values, *, taken=False):
+        return received_values(models, owner, place, slot, part, values, taken=taken)
+
+    # Whichever resource puts the part into M1's workholding, M1's model leaves it loaded.
+    assert received("M1", "M1", "part_name", {"resource_state": "idle", "part_name": None}) == (
+        {"resource_state": "loaded", "part_name": part}, [])
+    # Taken out, a machined or a loaded part leaves M1 idle; out of M1's fault state, the fault stays.
+    for state in ("completed", "loaded"):
+        assert received("M1", "M1", "part_name", {"resource_state": state, "part_name": part}, taken=True) == (
+            {"resource_state": "idle", "part_name": None}, [])
+    assert received("M1", "M1", "part_name", {"resource_state": "interrupted", "part_name": part}, taken=True) == (
+        {"part_name": None}, [])
+    # A guard of M1's own that does not hold is returned, so the check refuses with it.
+    assert received("M1", "M1", "part_name", {"resource_state": "running", "part_name": None}) == ({}, [
+        {"event_name": "place_release",
+         "failed": [{"field": "resource_state", "operator": "equals", "expected": "idle", "actual": "running"}]}])
+    # The staging tray's slot receives the part and leaves M1's state alone; a slot nothing declares, nothing.
+    assert received("M1", "M1 staging tray", "staging_part", {"resource_state": "idle", "staging_part": None}) == (
+        {"staging_part": part}, [])
+    assert received("M1", "M1", "staging_part", {"resource_state": "idle", "staging_part": None}) == ({}, [])
+    # Exit's guard on where the part is belongs to the place check; Exit's own state becomes occupied.
+    assert received("Exit", "Exit", "part_name", {"resource_state": "empty", "part_name": None}) == (
+        {"resource_state": "occupied", "part_name": part}, [])
+    # The printer's last output taken leaves it idle; with another output still on its bed it stays completed.
+    printer = "3D Printing Station"
+    outputs = {"output.gear_small": False, "output.gear_medium": False, "output.gear_large": True}
+    assert received_values(models, printer, printer, "output.gear_large", "gear_large",
+                           {"resource_state": "completed", **outputs}, taken=True) == (
+        {"output.gear_large": False, "resource_state": "idle"}, [])
+    assert received_values(models, printer, printer, "output.gear_large", "gear_large",
+                           {"resource_state": "completed", **outputs, "output.gear_medium": True}, taken=True) == (
+        {"output.gear_large": False, "resource_state": "completed"}, [])
+
+
 def test_one_resource_diagram_hides_identities_and_preserves_guarded_events(scene):
     from cais_spade_llm.resources.environment_models import build_environment_models
 
@@ -2465,10 +2515,12 @@ def test_one_resource_diagram_hides_identities_and_preserves_guarded_events(scen
         assert not any(name in diagram["mermaid"] for name in identities)
         assert "staging_part" not in diagram["mermaid"]
         represented = {event_id for edge in diagram["edges"] for event_id in edge["event_ids"]}
+        # A machine's fault state is observed, not in its nominal domain, so an unload from it has no node.
         assert represented == {
             event["event_id"] for event in model["events"]
-            if event["updates"] or event.get("collection_effects")
-            or event["parameter_bindings"]["resource_id"] == {"equals": resource_id}
+            if (event["updates"] or event.get("collection_effects")
+                or event["parameter_bindings"]["resource_id"] == {"equals": resource_id})
+            and event["guards"].get("resource_state", {}).get("equals") not in model.get("fault_states", ())
         }, resource_id
         assert "[guarded]" not in diagram["mermaid"]
         lines = diagram["mermaid"].splitlines()

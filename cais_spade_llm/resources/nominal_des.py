@@ -36,15 +36,15 @@ _ROBOT_RUNNING_STATES = {
     "place_insert": "releasing", "place_release": "releasing", "move_home": "moving_home",
 }
 _KMR_RUNNING_STATES = {
-    "pick_approach": "approaching", "pick_part": "grasping", "move_to_resource": "travelling",
-    "place_approach": "positioning", "place_release": "releasing",
+    "pick_approach": "approaching_pick", "pick_part": "grasping", "move_to_resource": "travelling",
+    "place_approach": "approaching_place", "place_release": "releasing", "move_home": "moving_home",
 }
 # Every running state, between an activity's start and its finish; the belt and buffer move.
 RUNNING_STATES = frozenset({*_ROBOT_RUNNING_STATES.values(), *_KMR_RUNNING_STATES.values(), "moving"})
 # The states in which a resource holds its part, and those in which it holds none. A KMR travelling with
 # or without a part is in neither, so its held_part alone decides.
-HOLDING_STATES = frozenset({"picked", "approaching_place", "positioned", "releasing", "carrying", "positioning"})
-FREE_STATES = frozenset({"idle", "approaching_pick", "at_pick", "grasping", "placed", "moving_home", "approaching"})
+HOLDING_STATES = frozenset({"picked", "approaching_place", "positioned", "releasing", "carrying"})
+FREE_STATES = frozenset({"idle", "approaching_pick", "at_pick", "grasping", "placed", "moving_home"})
 # A KMR has approached a part from its approach finish until its pick finish.
 APPROACH_STATES = frozenset({"at_pick", "grasping"})
 
@@ -134,6 +134,7 @@ def _activity(
     notes: str = "",
     start_updates: dict | None = None,
     finish_guards: dict | None = None,
+    program_variant: str = "",
 ) -> None:
     """Declare an activity as its commanded start and its observed finish.
 
@@ -155,6 +156,7 @@ def _activity(
         notes: Text kept on both events.
         start_updates: Other participants' values the start sets, such as a loading reservation.
         finish_guards: Extra finish guards that tell apart variants of one activity.
+        program_variant: The saved program variant the start runs, when the function has variants.
     """
     intent = {field: rule for field, rule in updates.get(actor, {}).items()
               if field.startswith("task_ctx.") and rule != {"set": None}}
@@ -181,6 +183,8 @@ def _activity(
         for event in model["events"]:
             if event["event_id"] == start_id:
                 event["finish_event_id"] = finish_id
+                if program_variant:
+                    event["program_variant"] = program_variant
             elif event["event_id"] == finish_id:
                 event["start_event_id"] = start_id
 
@@ -381,7 +385,7 @@ def _declare_states(models: dict, scene: dict) -> None:
         dict.fromkeys(rid for route in scene["KMR"]["predefined_routes"] for rid in route)
     )
     _variable(kmr, "resource_state",
-              ["idle", "at_pick", "carrying", "positioned", *_KMR_RUNNING_STATES.values()], "idle")
+              ["idle", "at_pick", "carrying", "positioned", "placed", *_KMR_RUNNING_STATES.values()], "idle")
     _variable(kmr, "held_part", [None, *pegs], None)
     _variable(kmr, "approached_part", [None, *pegs], None)
     _variable(kmr, "resource_location", [None, *route_resources], "Storage")
@@ -464,12 +468,21 @@ def _declare_states(models: dict, scene: dict) -> None:
     exit_model["marked_state_conditions"] = [_equals(resource_state="occupied", part_name=product)]
 
 
+def _kmr_task_states(name: str, variant: str = "") -> tuple[str, str]:
+    """Return a KMR task's entry and success states from the program the KMR runs."""
+    from cais_spade_llm.recovery_framework.kmr_tasks import KMR_MOVE_VARIANTS, KMR_TASKS
+
+    program = (KMR_MOVE_VARIANTS[variant] if variant else KMR_TASKS[name]).program
+    return program.entry_state, program.success_state
+
+
 def _machine_and_mobile_events(models: dict, scene: dict) -> None:
     for source, target in scene["KMR"]["predefined_routes"]:
         for start, end in ((source, target), (target, source)):
-            # Travel keeps what the KMR holds: a loaded KMR arrives carrying, an empty one idle. Its
-            # held part tells the two observed arrivals apart.
-            for state, held in (("carrying", {"not_equals": None}), ("idle", {"equals": None})):
+            # Travel keeps what the KMR holds: the loaded program runs while it carries a part, the empty
+            # variant while it holds none. Its held part tells the two observed arrivals apart.
+            for variant, held in (("", {"not_equals": None}), ("empty", {"equals": None})):
+                before, after = _kmr_task_states("move_to_resource", variant)
                 _activity(
                     models,
                     "move_to_resource",
@@ -482,12 +495,14 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
                         "arrival_acknowledged": True,
                         "arm_parked": True,
                     },
-                    {"KMR": _equals(resource_location=start, resource_state=state)},
-                    {"KMR": _sets(resource_location=end, resource_state=state)},
+                    {"KMR": _equals(resource_location=start, resource_state=before)},
+                    {"KMR": _sets(resource_location=end, resource_state=after)},
                     capability=({"resource_location": start}, {"resource_location": end}),
                     notes="Retain held_part while moving along the configured route.",
                     finish_guards={"KMR": {"held_part": held}},
+                    program_variant=("empty_return" if end == "Storage" else "empty") if variant else "",
                 )
+    before, after = _kmr_task_states("pick_approach")
     _activity(
         models,
         "pick_approach",
@@ -498,14 +513,15 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
             "origin_resource_location": "Storage",
         },
         {
-            "KMR": _equals(resource_state="idle", resource_location="Storage", held_part=None),
+            "KMR": _equals(resource_state=before, resource_location="Storage", held_part=None),
             "Storage": {"inventory.{part_name}": {"equals": True}},
         },
-        {"KMR": {**_sets(resource_state="at_pick"),
+        {"KMR": {**_sets(resource_state=after),
                  "approached_part": {"set_from_param": "part_name"}}},
         parameters={"part_name": _part_parameter("Storage", "slots")},
         capability=({"part_location": "Storage"}, {"part_location": "Storage"}),
     )
+    before, after = _kmr_task_states("pick_part")
     _activity(
         models,
         "pick_part",
@@ -517,13 +533,13 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
             "handoff_acknowledged": True,
         },
         {
-            "KMR": {**_equals(resource_state="at_pick", resource_location="Storage", held_part=None),
+            "KMR": {**_equals(resource_state=before, resource_location="Storage", held_part=None),
                     "approached_part": {"equals_from_param": "part_name"}},
             "Storage": {"inventory.{part_name}": {"equals": True}},
         },
         {
             "KMR": {
-                **_sets(resource_state="carrying", approached_part=None),
+                **_sets(resource_state=after, approached_part=None),
                 "held_part": {"set_from_param": "part_name"},
             },
             "Storage": {"inventory.{part_name}": {"set": False}},
@@ -531,6 +547,8 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
         parameters={"part_name": _part_parameter("Storage", "slots")},
         capability=({"part_location": "Storage"}, {"part_location": "KMR"}),
     )
+    approach_before, approach_after = _kmr_task_states("place_approach")
+    release_before, release_after = _kmr_task_states("place_release")
     for machine in scene["machines"]:
         rid = machine["resource_id"]
         parameters = {"part_name": _part_parameter(rid)}
@@ -545,12 +563,12 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
             },
             {
                 "KMR": {
-                    **_equals(resource_state="carrying", resource_location=rid),
+                    **_equals(resource_state=approach_before, resource_location=rid),
                     "held_part": {"equals_from_param": "part_name"},
                 },
                 rid: _equals(resource_state="idle", part_name=None),
             },
-            {"KMR": _sets(resource_state="positioned")},
+            {"KMR": _sets(resource_state=approach_after)},
             parameters=parameters,
             capability=({"part_location": "KMR"}, {"part_location": "KMR"}),
         )
@@ -567,13 +585,13 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
             },
             {
                 "KMR": {
-                    **_equals(resource_state="positioned", resource_location=rid),
+                    **_equals(resource_state=release_before, resource_location=rid),
                     "held_part": {"equals_from_param": "part_name"},
                 },
                 rid: _equals(resource_state="idle", part_name=None),
             },
             {
-                "KMR": _sets(resource_state="idle", held_part=None),
+                "KMR": _sets(resource_state=release_after, held_part=None),
                 rid: {
                     **_sets(resource_state="loaded"),
                     "part_name": {"set_from_param": "part_name"},
@@ -604,6 +622,26 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
             capability=(
                 {"part_location": rid, f"{rid}.resource_state": "loaded"},
                 {"part_location": rid, f"{rid}.resource_state": "completed"},
+            ),
+        )
+
+    # The KMR's move_home enters from any state with an empty gripper, as the robots' does, but a start
+    # never interrupts a running activity: it starts from each rest state. It parks the arm where the
+    # KMR stands and ends any approach: its start leaves the part it approached, so moving_home names none.
+    home_before, home_after = _kmr_task_states("move_home")
+    for rest in ("idle", "at_pick", "placed"):
+        _activity(
+            models,
+            "move_home",
+            "KMR",
+            _KMR_RUNNING_STATES["move_home"],
+            {"resource_id": "KMR"},
+            {"KMR": _equals(resource_state=rest, held_part=None)},
+            {"KMR": _sets(resource_state=home_after, approached_part=None)},
+            start_updates={"KMR": {"approached_part": {"set": None}}},
+            capability=(
+                {"resource_id": "KMR", "resource_state": home_before},
+                {"resource_id": "KMR", "resource_state": home_after},
             ),
         )
 

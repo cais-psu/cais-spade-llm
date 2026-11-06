@@ -1,5 +1,101 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Uniform resource model and received states — November 5, 2026 — approved by the user ("all recommendations"), in progress (uncommitted)
+
+**Why.** The Opus 5.5 Machining outline from `08c3df4` stated M2 `resource_state: loaded` on M2's `select_program`
+(event 8) instead of on ur5e-2's load (event 7). The RA accepted it through the `resource_state` exception in
+`ra_feasibility._Check.condition()` ("a name no primitive of the resource declares needs nothing"); composition, which
+has the same exception at `recovery_composition.py` 487-513 but checks M2's own job model, refused
+(`composition_26c94703…`, 7 of 17). The user: an LLM error the framework must refuse; the exception reads like a hidden
+rule; "the most accurate way, instead of faking it" (no hand edits or trims of reference outlines); the KMR and the robots
+"should be in the same way".
+
+**What the code checks found (five read-only checkers, workflow `wf_33a40477-91f`, results in the session scratchpad).**
+- The KMR already runs every nominal task as a declared program of its own primitives (`kmr_tasks.KMR_TASKS`, saved in the
+  scene's `resource_programs`, run by `kmr_tasks.execute_composition` in the worker). The gaps: the served KMR events carry
+  no `composition_contract.steps` (`environment_recovery._owned_event`); `nominal_des` writes the KMR states by hand; idle
+  drives are served with the loaded program; program effects are never applied; KMR primitives declare no state effects
+  (the ur5e's do: `grasp_part` picked, `release_part` idle, `move_to_named_pose` idle).
+- Machine `loaded`/`idle` and Exit `occupied` are declared only as consequences inside the receiving model (KMR
+  `place_release` → machine `loaded`; ur5e pick → machine `idle`; ur5e-3 place → Exit `occupied`). The RA never reads them,
+  the LLM is not shown them, and live robot completion applies none.
+- The ur5e's served steps come from the code registry, not from the saved Gazebo program that runs.
+- Changing the KMR programs changes the scene's program revision (`39425952…`), which every capture records and the code
+  checks, so a Gazebo re-capture of all four is required; every `08c3df4` outline and composition stops loading.
+
+**Decisions (user, November 5).** D1 every resource's tasks are declared programs of its own primitives, served with the
+steps that run; one `resource_state` rule for the RA and composition, no name-based exception. D2 received states are
+declared in the receiving model, found by the RA's place/pick checks, stated by the LLM (left out or stated elsewhere →
+refused); code writes nothing. D3 KMR end states `idle`, `at_pick`, `carrying` (kept), `positioned`, `placed`;
+`place_release` ends `placed`; a new KMR `move_home` (running state `moving_home`) ends `idle`; running states
+`approaching_pick`, `approaching_place`, `grasping`, `releasing`, `travelling` (drive only, never an end state).
+D4 reference results are the model's outputs composed unedited. D5 re-capture, failure videos, delete the `08c3df4`
+results, paid reruns on a new go, Gazebo runs with 20x video. Recommendations accepted ("all recommendations"):
+1. the KMR's withdraw stays in `place_release` (ends `placed`, gripper lifted clear); only park moves to `move_home`.
+   **Revised November 5 night (user, "Park inside place_release")** after the code review: the withdraw leaves the arm
+   0.10 m over the machine's workholding, the KMR's release check needs 0.15 m, the machine's clearance check refuses a
+   start under the arm, and nothing orders a machine start after the KMR's `move_home`. `place_release` therefore keeps
+   its park (descend, release, withdraw, park: the motion the v6 captures ran) and ends `placed` with the arm parked;
+   `move_home` is the one step `move_to_named_pose transport`, parking from where the arm stands (as `pick_approach`
+   parks), and ends `idle`;
+2. KMR `move_home` starts from any rest state with no part held, like the ur5e, and reuses the place's transport path;
+3. the empty return drive keeps its final home step;
+4. `at_pick` and `positioned` are not recovery end states (no primitive makes them);
+5. the ur5e's `release_part` declares `placed`, as the KMR's does;
+6. a recorded fault stays through a resource's own motions because the model declares it, not by a code rule;
+7. a received state applies whichever resource places or takes the part;
+8. when the receiving resource's guards fail, the event is refused with those facts;
+9. machines declare unload from `loaded` → `idle` and from the fault state `interrupted` (part removed, fault kept);
+10. the received-state facts are served to the LLM, and the wrong served line "new values are allowed" is corrected;
+11. the live commit paths write the stated state (KMR state from `held_part` and the robot path without received states
+    are fixed);
+12. PAPER_FRAMEWORK.md line 99 is reworded with the program source.
+
+**Steps.** (1) One shared function in `recovery_transition_derivation.py` gives the values a primitive leaves a variable at:
+its own declared effect, plus the end state of a declared program of the same resource that always runs it; the RA
+(`condition`, `producers`, `setters`, `left_by`, the handling row in `found`) and composition (`recovery_composition.py`,
+`robot/recovery_composition.py`) both use it; the exception, `ends_by_transition`, the fault rule and `declared_value` go.
+(2) Same model: KMR primitive state effects, D3 programs and renames, served steps that run (empty-drive variants
+included), `nominal_des` states from the programs, the ur5e served steps and capability decompositions from the saved
+program, every owned event's steps served. (3) Received states: one function in `environment_models.py` (the receiving
+owner's declared updates for a part put at or taken from a place, guards evaluated), used by RA `found()`, composition's
+receivers and live `_declared_consequence`; machine unload declarations; served facts. (4) Tests, offline replay, one free
+Gazebo check of the changed KMR tasks. (5) PAPER_FRAMEWORK.md and this plan. (6) Commit, re-capture all four, failure
+videos, delete the `08c3df4` results, paid reruns on a new go, Gazebo runs with video.
+
+**Status.** Started November 5 evening; the user's "go for all 9" (November 5 night) covers steps 1-6, including one
+paid rerun. Steps 1-5 are done offline:
+- One rule: the `resource_state` exception, the fault rule, `ends_by_transition` and `declared_value` are gone from the RA,
+  and both exceptions from composition. A stated label holds only when it already holds, a declared effect of the acting
+  resource's primitives makes it, or the event's pick or place leaves it as the receiving model declares.
+- Primitive declarations take `alternatives` (KMR `move_to_named_pose`: idle without a part, `carrying` with one and only to
+  `transport`); the RA and composition's step projection pick the alternative the state and the step's parameters allow.
+- Received states: `environment_models.received_values` (the receiving owner's declared updates for a part put at or taken
+  from its place, matched by slot, any actor, the owner's own guards evaluated; part variables are the place check's) is
+  used by the RA's `found`, `capacity` and `custody`, composition's receivers and source records, and the live commits
+  (`slippage_execution._declared_consequence`, KMR and ur5e). Machines declare unload from `loaded` and from `interrupted`
+  (part removed, fault kept). The facts are served in each resource row and the condition rule line is corrected.
+- KMR: `place_release` ends `placed` with its arm parked, new `move_home` (`move_to_named_pose transport`,
+  `moving_home`) ends `idle`; served steps, `nominal_des` states and idle-drive variants come from the programs that
+  run; the live KMR commit writes the stated `resource_state`.
+- ur5e: `release_part` declares `placed`; served `composition_contract.steps` come from the saved Gazebo program
+  (`resource_primitives._running_task_definition`, as `robot_task_runtime` runs it); the capability decompositions
+  keep the October 30 code templates, because the saved programs' display parameters are stale.
+- Tests updated to the one rule (RA, composition, nominal diagram, delivery, slippage) and added for `received_values`,
+  alternatives, served robot steps and live consequences; PAPER_FRAMEWORK.md note reworded.
+- Code review before the freeze (workflow `wf_7fa03e9c-905`, 6 reviewers, every finding checked by an adversarial
+  verifier; 13 confirmed, 6 refuted), all fixed: KMR composition passes the grasp's origin so a KMR unload gets the
+  machine's declared state; the capability decomposition override (stale saved display parameters) removed, the October
+  30 templates are served again; composition refuses a program whose declared effects change a value the event leaves
+  out (as the RA's `left_by`); a take-and-put event that ends at a named posture checks the move after the release and
+  ends at its state; a part taken out of a machine and put back in one event ends as the place leaves it (capacity reads
+  what the pick left); `received_values` reads a cleared per-part flag as the taken slot and evaluates collection guards
+  (the printer's last output leaves it idle), and the served received facts use the same slot test on outcome-level
+  events; the KMR's `move_home` start ends its approach; the served values rule names every way a check finds a value;
+  regression tests for each, plus RA tests on the real machine models and a live KMR commit of a stated `placed`.
+Remaining: commit, re-capture all four, failure videos, paid reruns, Gazebo runs. The `08c3df4` results were deleted on
+November 5 night (`recapture_v2_20261015/results_before_uniform_model_20261105_deletion_list.json`).
+
 ## No hidden rules in recovery events — October 31, 2026 — standing rule
 
 **Request (user).** "are there more hidden rules like this in proposing recovery events? do not ever do this. record

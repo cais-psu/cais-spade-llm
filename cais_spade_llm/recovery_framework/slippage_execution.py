@@ -190,6 +190,8 @@ async def _reconcile_completion(runtime, owner, task: dict, task_id: str, result
     entry = deepcopy(context.part_tracker.get(part))
     buffer_zone = None
     released_buffer_fields = []
+    # What the model of the resource a part leaves or enters declares that leaves it, as for the KMR.
+    consequences = []
     if entry is not None:
         if owner._held_part == part:
             if entry["location"] == "Buffer For Machined parts":
@@ -197,6 +199,9 @@ async def _reconcile_completion(runtime, owner, task: dict, task_id: str, result
                                           if field.startswith("zone_") and field.endswith("_part") and value == part]
                 if len(released_buffer_fields) != 1:
                     raise ValueError("Recovery pickup does not identify the previous Buffer zone custody")
+            elif entry["location"] is not None and (
+                    source := _declared_consequence(context, entry["location"], part, taken=True)) is not None:
+                consequences.append(source)
             entry.update(location=owner.agent_name)
         elif end.get("part_location") == context.product_name:
             target = _part_geometry(context, part).get("target_origin_pose")
@@ -222,6 +227,11 @@ async def _reconcile_completion(runtime, owner, task: dict, task_id: str, result
                 raise ValueError(f"{part} was not observed at {destination}")
             observed["part_pose"] = position
             entry.update(location=destination, observed_pose=position)
+            if destination == "Exit":
+                receiver = _declared_consequence(context, destination, part, taken=False)
+                if receiver is None:
+                    raise ValueError(f"{destination} does not accept {part} in its current state")
+                consequences.append(receiver)
             if destination == "Buffer For Machined parts":
                 buffer_zone = next((zone["zone"] for zone in context.inputs["scene"][destination]["zones"]
                                     if math.dist(zone["pose"][:3], [target[axis] for axis in ("x", "y", "z")]) < .006), None)
@@ -245,6 +255,10 @@ async def _reconcile_completion(runtime, owner, task: dict, task_id: str, result
                 buffer.valuation[f"zone_{buffer_zone}_part"] = part
             buffer.revision += 1
             buffer.evidence = "resource"
+        for rid, updates in consequences:
+            context.resources[rid].valuation.update(updates)
+            context.resources[rid].revision += 1
+            context.resources[rid].evidence = "resource"
         context.revision += 1
         runtime.agent.part_tracker = deepcopy(context.part_tracker)
         context.transitions.append({
@@ -262,46 +276,19 @@ async def _reconcile_completion(runtime, owner, task: dict, task_id: str, result
     return observed
 
 
-def _guard_holds(values: dict, field: str, rule: dict, params: dict) -> bool:
-    # The same typed comparison the environment model uses when it projects an event.
-    if len(rule) != 1:
-        return False
-    operator, expected = next(iter(rule.items()))
-    if operator.endswith("_from_param"):
-        expected = params.get(expected)
-    value = values.get(field)
-    equal = field in values and type(value) is type(expected) and value == expected
-    if operator in {"equals", "equals_from_param"}:
-        return equal
-    return operator in {"not_equals", "not_equals_from_param"} and not equal
+def _declared_consequence(context, location: str, part: str, *, taken: bool) -> tuple[str, dict] | None:
+    """Return the owner of a location and what its model declares a part taken from, or put at, it leaves.
 
-
-def _declared_consequence(context, event_names: set[str], location_field: str, location: str,
-                          part: str) -> tuple[str, dict] | None:
-    """Return an owner's own declared consequence of a part being taken from, or put at, a location.
-
-    The consequence is read from the owner's recorded handoff events, whichever
-    robot they were declared for, with ``{part_name}`` fields bound to the part.
+    The owner's model declares the consequence on other resources' events at that place, whichever resource
+    takes or puts the part, with ``{part_name}`` fields bound to the part (``received_values``, which the RA's
+    checks and composition read as well).
     """
-    from cais_spade_llm.resources.environment_models import _bound
-    from cais_spade_llm.resources.nominal_des import outcome_models
+    from cais_spade_llm.resources.environment_models import received_values
 
-    params = {"part_name": part}
-    # A handoff's consequence is its whole activity: the start's guards and the finish's updates.
-    for rid, model in outcome_models(context.models).items():
-        resource = context.resources.get(rid)
-        if resource is None:
-            continue
-        for event in model.get("events", []):
-            bindings = event.get("parameter_bindings", {})
-            if (event.get("event_name") not in event_names
-                    or bindings.get(location_field) != {"equals": location}
-                    or bindings.get("resource_id", {}).get("equals") == rid):
-                continue
-            if all(_guard_holds(resource.valuation, _bound(field, params), rule, params)
-                   for field, rule in event.get("guards", {}).items()):
-                return rid, {_bound(field, params): params[rule["set_from_param"]] if "set_from_param" in rule
-                             else deepcopy(rule["set"]) for field, rule in event.get("updates", {}).items()}
+    for rid, resource in context.resources.items():
+        updates, _ = received_values(context.models, rid, location, None, part, resource.valuation, taken=taken)
+        if updates:
+            return rid, updates
     return None
 
 
@@ -340,7 +327,7 @@ def _observed_release(context, part: str, pose: list, settled: bool) -> tuple[st
         conditions = storage_placement_conditions(context.models[rid], context.inputs["scene"], values, part)
         updates = {field: rule["set"] for field, rule in conditions["updates"].items()}
     else:
-        declared = _declared_consequence(context, {"place_release"}, "destination_location", area, part)
+        declared = _declared_consequence(context, area, part, taken=False)
         if declared is None or declared[0] != rid:
             raise ValueError(f"{area} does not accept {part} in its current state")
         updates = declared[1]
@@ -387,13 +374,15 @@ async def _reconcile_mobile_completion(runtime, owner, task: dict, task_id: str,
         entry = deepcopy(context.part_tracker[picked])
         # A part located only by its observed pose has no owner to update.
         if entry["location"] is not None:
-            source = _declared_consequence(context, {"pick_grasp", "pick_part"}, "origin_resource_location",
-                                           entry["location"], picked)
+            source = _declared_consequence(context, entry["location"], picked, taken=True)
             if source is None:
                 raise ValueError(f"{entry['location']} declares no consequence of {picked} being taken")
         entry.update(location=owner.agent_name, last_task=task_id)
         entry.pop("observed_pose", None)
-    values["resource_state"] = "carrying" if held_after else "idle"
+    # The state the event states, which composition checked its program's declared effects leave, as the
+    # robots' macros end at the stated state.
+    if "resource_state" in end:
+        values["resource_state"] = deepcopy(end["resource_state"])
     if "approached_part" in declared:
         values["approached_part"] = None
     observed = {"base_pose": deepcopy(state.get("base_pose")), "resource_location": values.get("resource_location"),

@@ -34,7 +34,7 @@ class KMRResourceAgent(ResourceAgent):
         self._released_part = None
         self.current_state = 'idle'
         for name in ('pick_approach', 'pick_part', 'move_to_resource',
-                     'place_approach', 'place_release'):
+                     'place_approach', 'place_release', 'move_home'):
             self.executables[name] = getattr(self, name)
 
     def configure_recovery_safety_observer(self, observer, record: dict) -> None:
@@ -153,13 +153,25 @@ class KMRResourceAgent(ResourceAgent):
         ---
         description: Place and release the held part into M1 workholding.
         in_state: positioned
-        out_state: idle
+        out_state: placed
         params:
           part_name: {type: string}
           destination_location: {type: string}
         ---
         """
         return await self._execute('place_release', params)
+
+    async def move_home(self, **params) -> dict:
+        """Park the empty arm in its transport posture where the KMR stands.
+
+        ---
+        description: Park the empty arm in its transport posture.
+        in_state: any
+        out_state: idle
+        params: {}
+        ---
+        """
+        return await self._execute('move_home', params)
 
     async def _execute(self, name: str, params: dict) -> dict:
         runtime = self.delivery_runtime
@@ -187,13 +199,10 @@ class KMRResourceAgent(ResourceAgent):
             return {'status': 'failed:gazebo', 'content': str(exc), 'observations': exc.result}
         ack = {**pending, 'status': 'completed', 'evidence': 'gazebo', 'observations': result['observations']}
         validate_execution_evidence(ack, scene=runtime.context.inputs['scene'])
-        self.current_state = {
-            'pick_approach': 'at_pick',
-            'pick_part': 'carrying',
-            'move_to_resource': 'carrying',
-            'place_approach': 'positioned',
-            'place_release': 'idle',
-        }[name]
+        from cais_spade_llm.recovery_framework.kmr_tasks import KMR_TASKS
+
+        # The task's program declares the state it ends in.
+        self.current_state = KMR_TASKS[name].program.success_state
         return {'status': 'completed', 'observations': {'nominal_acknowledgement': ack}}
 
     def record_primitive_evidence(self, result: dict) -> None:

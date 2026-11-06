@@ -75,6 +75,17 @@ def migrate_resource_programs(programs: dict) -> None:
     if isinstance(kmr, dict):
         # Coordinate travel is composed from move_base; it is no longer a saved KMR function.
         kmr.get("functions", {}).pop("move_to_location", None)
+        if "place_release" in kmr.get("functions", {}):
+            # The KMR's place ends placed with its arm parked, and move_home parks the empty arm from where it
+            # stands and ends idle, as a robot's does.
+            import json
+            from dataclasses import asdict
+
+            from cais_spade_llm.recovery_framework.kmr_tasks import KMR_TASKS
+
+            for name in ("place_release", "move_home"):
+                kmr["functions"][name] = {"function_name": name, "status": "implemented",
+                                          "program": json.loads(json.dumps(asdict(KMR_TASKS[name].program)))}
     printer = resources.get("3D Printing Station")
     if isinstance(printer, dict) and "print_part" in printer.get("functions", {}):
         # Printing starts the print; its output appears when the completion is observed.

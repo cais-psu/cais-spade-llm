@@ -361,16 +361,23 @@ def environment_recovery_descriptor(evidence: dict, snapshot: dict, *, resource_
 
 
 def _owned_event(declared: dict, bindings: dict, model: dict) -> dict:
-    """Copy one of the resource's own events with the primitives its program composes."""
+    """Copy one of the resource's own events with the program it runs, as a robot's event carries its program."""
     event = deepcopy(declared)
+    program = declared.get('program', {})
     event['primitive_support'] = [dict(deepcopy(step), primitive=step['op'])
-                                  for step in declared.get('program', {}).get('steps', [])]
+                                  for step in program.get('steps', [])]
     event['composition_contract'] = {'event_id': declared['event_id'],
         'parameter_bindings': deepcopy(bindings), 'completion_evidence': deepcopy(declared.get('completion_evidence', {})),
         'participants': deepcopy(declared.get('participants', [])),
         'product_effects': deepcopy(declared.get('product_effects', {})),
-        'source_model_fingerprint': recovery_validation_fingerprint(model)}
+        'source_model_fingerprint': recovery_validation_fingerprint(model),
+        **{key: deepcopy(program[key]) for key in _PROGRAM_CONTRACT_KEYS if key in program}}
     return event
+
+
+# The program fields a robot's served event carries in its composition contract (resource_primitives).
+_PROGRAM_CONTRACT_KEYS = ('steps', 'entry_state', 'part_in_state', 'entry_guards', 'required_context_keys',
+                          'effects', 'part_transition')
 
 
 def _shared_event(declared: dict) -> dict:

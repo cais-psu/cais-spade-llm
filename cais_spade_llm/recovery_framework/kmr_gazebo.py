@@ -278,7 +278,8 @@ def run(request: dict, session: dict | None = None) -> dict:
     held_part = valuation.get('KMR', {}).get('held_part')
     part = (parameters.get('part_name') or request.get('primitive_parameters', {}).get('part_name')
             or held_part or pending.get('part_name'))
-    if part is None and mode in {'probe', 'task', 'environment_task'}:
+    # move_home parks the arm and binds no part; every other task falls back to the configured part.
+    if part is None and mode in {'probe', 'task', 'environment_task'} and name != 'move_home':
         part = config['part_name']
     part_geometry = request.get('geometry', {}).get(part, {})
     if part_geometry.get('dimensions_m'):
@@ -1708,6 +1709,13 @@ def run(request: dict, session: dict | None = None) -> dict:
         executor.spin_once(timeout_sec=.1)
         return dict(part_location=target_resource, attached=False, robot_clear=True)
 
+    def observe_parked():
+        target = transport_pose()
+        if math.dist(tcp()[:3], target[:3]) > .015:
+            raise ValueError('KMR arm did not reach its transport posture')
+        operations.append({'operation': 'observed_parked_arm', 'success': True, 'tcp_pose': tcp()})
+        return {'part_name': None, 'attached': False, 'arm_parked': True}
+
     def compute_pick_targets(initial=None):
         from cais_spade_llm.recovery_framework.kmr_recovery import pick_targets
 
@@ -1912,7 +1920,7 @@ def run(request: dict, session: dict | None = None) -> dict:
                        'composition': capability_decompositions(function_name=name, scene=scene)}
         if mode == 'environment_task':
             if name not in {'pick_approach', 'pick_part', 'move_to_resource',
-                             'place_approach', 'place_release'}:
+                             'place_approach', 'place_release', 'move_home'}:
                 raise ValueError('Unsupported environmental KMR event')
             if name in {'pick_approach', 'pick_part'}:
                 from cais_spade_llm.recovery_framework.kmr_recovery import pickup_docking_pose
@@ -2026,6 +2034,8 @@ def run(request: dict, session: dict | None = None) -> dict:
             observation.update(observe_place_approach(outputs['place'], previous['grasp_transform']))
         elif name == 'place_release':
             observation.update(observe_release(previous['place_targets']['destination']))
+        elif name == 'move_home':
+            observation.update(observe_parked())
         observation['controllers_succeeded'] = True
         observation['timing'] = timings()
         node.get_logger().info(f'[KMR] {name} completed: part={part}; task={pending.get("task_id")}')

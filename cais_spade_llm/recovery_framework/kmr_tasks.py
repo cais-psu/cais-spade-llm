@@ -22,7 +22,7 @@ def _path(name, *path):
 
 
 def delivery_bindings(part_name: str) -> dict[str, dict]:
-    """Bind the five KMR functions used for the Storage-to-M1 delivery."""
+    """Bind the KMR functions used for the Storage-to-M1 delivery."""
     return {
         'pick_approach': {'resource_id': 'KMR', 'part_name': part_name,
                           'origin_resource_location': 'Storage'},
@@ -36,6 +36,7 @@ def delivery_bindings(part_name: str) -> dict[str, dict]:
         'place_release': {'resource_id': 'KMR', 'part_name': part_name,
                           'destination_location': 'M1', 'handoff_acknowledged': True,
                           'robot_clear': True},
+        'move_home': {'resource_id': 'KMR'},
     }
 
 
@@ -81,12 +82,20 @@ _place_approach = (
     _step('clearance', 'move_cartesian', target=_path('place', 'approach'),
           waypoints=_path('place', 'transfer_waypoints')),
 )
+# The KMR's arm may not wait over a machine's work area, so its place parks on the place's own transfer path
+# back (user decision, November 5): that path keeps the pre-placement wrist orientation, so repeated
+# placements never add a half turn at the wrist limit.
 _place = (
     _step('descend', 'move_cartesian', target=_state('previous', 'place_targets', 'target')),
     _step('release', 'release_part', transform=_state('previous', 'grasp_transform')),
     _step('withdraw', 'move_cartesian', target=_state('previous', 'place_targets', 'retreat')),
     _step('park', 'move_cartesian', target=_state('previous', 'place_targets', 'transport'),
           waypoints=_state('previous', 'place_targets', 'withdraw_waypoints')),
+)
+# move_home parks the empty arm in its transport posture along the transfer path from where it stands, as
+# pick_approach parks it; right after a place the arm is already there.
+_move_home = (
+    _step('park', 'move_to_named_pose', pose_name='transport'),
 )
 _empty_move = (
     _step('transport', 'move_base', target_pose=_state('base_target_pose'),
@@ -99,7 +108,7 @@ _empty_return = (
 )
 
 
-def _definition(name, before, after, steps):
+def _definition(name, before, after, steps, guards=()):
     bindings = delivery_bindings('')[name]
     return RobotTaskDefinition(
         name=name, description=f'Observed KMR {name} through reusable primitives.',
@@ -108,7 +117,8 @@ def _definition(name, before, after, steps):
         source='recovery_framework/kmr_tasks.py',
         program=RobotTaskProgram(
             entry_state=before, success_state=after,
-            entry_guards=(RobotTaskGuard('bound_task', description='Matching task, scene, and fresh resource observations'),),
+            entry_guards=(RobotTaskGuard('bound_task', description='Matching task, scene, and fresh resource observations'),
+                          *guards),
             steps=steps, effects=(RobotTaskEffect('resource_state', 'set', after),),
             notes=('Nominal effects are committed only by the existing task acknowledgement.',),
         ),
@@ -120,7 +130,11 @@ KMR_TASKS = {
     'pick_part': _definition('pick_part', 'at_pick', 'carrying', _pick),
     'move_to_resource': _definition('move_to_resource', 'carrying', 'carrying', _move),
     'place_approach': _definition('place_approach', 'carrying', 'positioned', _place_approach),
-    'place_release': _definition('place_release', 'positioned', 'idle', _place),
+    'place_release': _definition('place_release', 'positioned', 'placed', _place),
+    'move_home': _definition('move_home', 'any', 'idle', _move_home, guards=(
+        RobotTaskGuard('held_part_empty', message='Cannot park the arm while still holding a part.',
+                       description='held_part is empty',
+                       condition={'field': 'held_part', 'operator': 'equals', 'value': None}),)),
 }
 
 KMR_MOVE_VARIANTS = {

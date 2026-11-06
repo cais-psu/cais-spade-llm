@@ -701,14 +701,35 @@ def test_KMR_pickup_reconciles_its_measured_custody_and_the_source_owner_consequ
 
     part, context, runtime, owner = _kmr_reconcile_fixture(
         {"held_part": "KET4_Square_4mm", "resource_location": "M1", "base_pose": [-4.7, 2.2, 1.5708]})
+    # The KMR's state is the one the checked event states; the source's is what M1's model declares.
     task = {"part_name": part, "outline_id": "RECOVERY_SEQ2", "macro_name": "pick_part",
-            "expected_end_state": {"held_part": part}}
+            "expected_end_state": {"held_part": part, "resource_state": "carrying"}}
     observed = asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-task", {}))
     assert observed == {"base_pose": [-4.7, 2.2, 1.5708], "resource_location": "M1", "held_part": part}
     assert context.resources["KMR"].valuation["resource_state"] == "carrying"
     assert context.resources["M1"].valuation == {"resource_state": "idle", "part_name": None}
     assert context.part_tracker[part]["location"] == "KMR"
     assert context.transitions[0]["acknowledgement"]["evidence"] == "resource"
+
+
+def test_a_committed_pick_or_place_applies_what_the_owner_s_model_declares_for_any_actor():
+    from cais_spade_llm.recovery_framework import SCENE_PATH
+    from cais_spade_llm.recovery_framework.slippage_execution import _declared_consequence
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    part = "KET4_Square_4mm"
+    resources = {"M1": {"resource_state": "completed", "part_name": part, "staging_part": None},
+                 "Exit": {"resource_state": "empty", "part_name": None},
+                 "Storage": {f"inventory.{part}": True}}
+    context = SimpleNamespace(models=build_environment_models(json.loads(SCENE_PATH.read_text())),
+                              resources={rid: SimpleNamespace(valuation=values) for rid, values in resources.items()})
+    assert _declared_consequence(context, "M1", part, taken=True) == ("M1", {"resource_state": "idle", "part_name": None})
+    assert _declared_consequence(context, "Exit", part, taken=False) == (
+        "Exit", {"resource_state": "occupied", "part_name": part})
+    assert _declared_consequence(context, "Storage", part, taken=True) == ("Storage", {f"inventory.{part}": False})
+    # A machine still running declares no unload, so nothing is committed for it.
+    context.resources["M1"].valuation["resource_state"] = "running"
+    assert _declared_consequence(context, "M1", part, taken=True) is None
 
 
 def test_KMR_coordinate_move_reconciles_a_location_no_dock_names():
@@ -763,7 +784,10 @@ def test_KMR_release_onto_the_belt_is_recorded_where_the_part_rests():
     from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
 
     part, context, runtime, owner, task = _kmr_release_fixture([-3.0, 0.5, 1.016, 0.0, 0.0, 0.0, 1.0])
+    # The committed state is the one the checked event states, here the release's placed.
+    task["expected_end_state"] = {"held_part": None, "resource_state": "placed"}
     observed = asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
+    assert context.resources["KMR"].valuation["resource_state"] == "placed"
     belt = context.resources["Conveyor"].valuation
     assert belt[f"part_location.{part}"] == "after loading_position_1" and belt[f"part_order.{part}"] == 0
     assert context.part_tracker[part]["location"] == "Conveyor" and "state" not in context.part_tracker[part]

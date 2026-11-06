@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import deepcopy
 import math
+from typing import Any
 
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
 
@@ -118,15 +119,19 @@ def preview_composition_output(*, primitive: str, params: dict, recovery_snapsho
 
 
 def _source_records(part: str, acting_jid: str, grounding_context: dict, physical_evidence: dict,
-                    stated: dict) -> list[tuple]:
+                    stated: dict, origin: Any = None) -> list[tuple]:
     """Return the stated values that record the part where it rested, with the value each takes once it has left.
 
     As the RA's pick finds them (``ra_feasibility._Check.source_variables``): a resource-scope value that is the
     part, or a per-part variable for the part that is not null or false; it becomes null, or false where its
     declared values have no null. Code writes no value the event leaves out, so only the values its
     ``neighbor_end_state`` (``stated``) names are returned. The RA refuses one left out unless it is private or a
-    ``task_ctx.`` or ``_`` name, and the postcondition compares the stated ones with these.
+    ``task_ctx.`` or ``_`` name, and the postcondition compares the stated ones with these. What the owner's model
+    declares taking the part from that slot leaves (``received_values``, such as a machine left idle) is returned
+    for the values the event states too.
     """
+    from cais_spade_llm.resources.environment_models import received_values
+
     records = []
     for owner, model in physical_evidence.get("environment_models", {}).items():
         jid = physical_evidence.get("jids", {}).get(owner)
@@ -145,6 +150,11 @@ def _source_records(part: str, acting_jid: str, grounding_context: dict, physica
                 domain = (declaration or {}).get("domain") or []
                 nullable = not domain or any(item is None for item in domain)
                 records.append((jid, name, None if nullable or not any(item is False for item in domain) else False))
+                if isinstance(origin, str):
+                    received, _ = received_values(physical_evidence.get("environment_models", {}), owner, origin, name,
+                                                  part, values, taken=True)
+                    records.extend((jid, field, found) for field, found in received.items()
+                                   if field != name and field in (stated.get(jid) or {}))
     return records
 
 
@@ -298,7 +308,8 @@ def receive_placed_part(part_name: str, destination: str, origin: dict, *, groun
 
     Code writes no value the event leaves out: the receiving resource takes only the values the event states
     for it. The RA refuses a place that leaves the receiving slot or a belt's order out, and the postcondition
-    compares the stated values with these.
+    compares the stated values with these. What the receiving resource's model declares the part leaves there
+    (``received_values``, such as a machine loaded) is taken for the values the event states too.
 
     Args:
         part_name: The placed part.
@@ -314,7 +325,7 @@ def receive_placed_part(part_name: str, destination: str, origin: dict, *, groun
         The part's ``location``, the receiving ``owner``, its ``values`` and ``model``; or ``failure`` with its
         ``status`` when no single free slot takes the part.
     """
-    from cais_spade_llm.resources.environment_models import product_state_from_custody
+    from cais_spade_llm.resources.environment_models import product_state_from_custody, received_values
 
     if physical_evidence.get("environment_models", {}).get(destination, {}).get("assignments", {}).get("loading_positions"):
         return _load_onto_belt(part_name, destination, origin, acting_jid, grounding_context=grounding_context,
@@ -334,8 +345,12 @@ def receive_placed_part(part_name: str, destination: str, origin: dict, *, groun
         return {"failure": "The receiving occupancy contract is missing", "status": "NEEDS_CONTEXT"}
     if values[field] not in (None, part_name):
         return {"failure": "The receiving zone is occupied", "status": "INFEASIBLE"}
+    received, _ = received_values(physical_evidence.get("environment_models", {}), owner, destination, field,
+                                  part_name, values, taken=False)
     values[field] = part_name
-    if field in (stated.get(jid) or {}):
+    named = set(stated.get(jid) or {})
+    values.update({name: value for name, value in received.items() if name in named})
+    if named & {field, *received}:
         projected_resources[jid] = values
     product = product_state_from_custody(part_name, owner, values, physical_evidence.get("product_name"))
     return {"location": product["location"], "owner": owner, "values": values, "model": model}
@@ -456,7 +471,7 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                         event, {"origin_resource_location": location}, {"resource_location"}):
                     return fail("The owner has no supported pickup location effect")
             for jid, field, empty in _source_records(part_name, task["resource_jid"], grounding_context, physical_evidence,
-                                                     task.get("neighbor_end_state") or {}):
+                                                     task.get("neighbor_end_state") or {}, origin=location):
                 projected_resources.setdefault(jid, {})[field] = empty
             part["part_holder_resource_jid"] = task["resource_jid"]
             observed = target.get("observed_pose", {})
@@ -471,12 +486,9 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
             event = events.get("place_insert", {})
             destination = target.get("destination_location")
             # release_part declares no location, so a stated location takes where the place ends and the postcondition
-            # compares them. No primitive declares the event's own state, so it holds only when the event names it.
+            # compares them. The resource's state is the one release_part declares.
             end_state = task.get("expected_end_state") or {}
             fields = {"resource_location"} & set(end_state)
-            if "resource_state" in end_state and end_state["resource_state"] == (
-                    event.get("updates", {}).get("resource_state") or {}).get("set"):
-                fields.add("resource_state")
             if not apply_updates(event, {"destination_location": destination}, fields):
                 return fail("The owner has no supported placement completion effects")
             part["part_holder_resource_jid"] = None
@@ -543,7 +555,8 @@ def project_composition_completion(*, task: dict, trace: list, recovery_des_mode
                     or steps[0].get("params", {}).get("pose_name") != last_motion["resolved_params"].get("pose_name")):
                 continue
             for field, effect in event.get("updates", {}).items():
-                if set(effect) != {"set"} or field not in {"resource_state", "resource_location"}:
+                # move_to_named_pose declares the resource's state; the named pose's place comes from this event.
+                if set(effect) != {"set"} or field != "resource_location":
                     continue
                 if field in stated:
                     set_field(field, effect["set"])

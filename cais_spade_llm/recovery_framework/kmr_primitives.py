@@ -83,7 +83,30 @@ class KMRPrimitives:
         return await self._call('compute_place_targets', {'transform': transform, 'part_pose': part_pose})
 
     async def move_to_named_pose(self, pose_name: str) -> dict:
-        """Move the arm to a configured home or transport posture."""
+        """
+        ---
+        description: Move the arm to a configured home or transport posture.
+        params:
+          pose_name: {type: string, description: "home or transport"}
+        preconditions: {}
+        effects: {}
+        alternatives:
+          - preconditions:
+              held_part:
+                equals: null
+            effects:
+              resource_state:
+                set: idle
+          - preconditions:
+              held_part:
+                not_equals: null
+            parameters:
+              pose_name: {required: true, type: string, domain: [transport]}
+            effects:
+              resource_state:
+                set: carrying
+        ---
+        """
         return await self._call('move_to_named_pose', {'pose_name': pose_name})
 
     async def move_cartesian(self, target: list[float],
@@ -139,6 +162,8 @@ class KMRPrimitives:
           held_part:
             equals: null
         effects:
+          resource_state:
+            set: carrying
           held_part:
             set_from_param_any_of: [part_name]
           gripper_state:
@@ -155,6 +180,8 @@ class KMRPrimitives:
           held_part:
             not_equals: null
         effects:
+          resource_state:
+            set: placed
           held_part:
             set: null
           gripper_state:

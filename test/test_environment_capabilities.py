@@ -2543,7 +2543,12 @@ def test_saved_function_contracts_cover_every_resource_graph_variant():
             assert edge["function_name"] == contract["function_name"]
             assert resource_id in contract["participants"]
             saved = scene["resource_programs"]["resources"][contract["resource_id"]]["functions"]
-            assert contract["steps"] == saved[contract["program_key"]]["program"]["steps"]
+            # A start that runs a saved variant, such as the KMR's empty drive, has that variant's steps.
+            variant = next(event for event in model["events"] if event["event_id"] == edge["event_id"]).get(
+                "program_variant")
+            function = saved[contract["program_key"]]
+            program = function["variants"][variant] if variant else function["program"]
+            assert contract["steps"] == program["steps"]
             assert contract["program_revision"] == model["program_revision"]
     ur_event = next(
         event for event in models["ur5e-1"]["events"]

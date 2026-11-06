@@ -53,9 +53,10 @@ def startup_logs(monkeypatch, caplog):
 def observation(task):
     name = task['event_name']
     return {'launch_id': 'launch', 'scene_fingerprint': 'scene',
-            'part_name': 'KET4_Square_4mm', 'part_location': ('Storage' if name == 'pick_approach' else
+            'part_name': None if name == 'move_home' else 'KET4_Square_4mm',
+            'part_location': ('Storage' if name == 'pick_approach' else
                               'M1' if name == 'place_release' else 'KMR'),
-            'attached': name not in {'pick_approach', 'place_release'}, 'arm_parked': True,
+            'attached': name not in {'pick_approach', 'place_release', 'move_home'}, 'arm_parked': True,
             'approach_observed': name in {'pick_approach', 'place_approach'},
             'robot_clear': True, 'controllers_succeeded': True,
             'resource_location': 'Storage' if name == 'pick_approach' else 'M1',
@@ -66,18 +67,19 @@ def gazebo_ack(pending):
     return {**pending, 'status': 'completed', 'evidence': 'gazebo', 'observations': observation(pending)}
 
 
-def test_delivery_goal_has_five_tasks_and_preserves_assembly_semantics(inputs):
+def test_delivery_goal_has_six_tasks_and_preserves_assembly_semantics(inputs):
     from cais_spade_llm.recovery_framework.kmr_tasks import KMR_TASKS, delivery_bindings
 
     context = NominalProductContext(**inputs)
     tasks = context.plan()['tasks']
-    assert [task['event_name'] for task in tasks] == ['pick_approach', 'pick_part', 'move_to_resource', 'place_approach', 'place_release']
+    assert [task['event_name'] for task in tasks] == ['pick_approach', 'pick_part', 'move_to_resource', 'place_approach',
+                                                      'place_release', 'move_home']
     for task in tasks:
         assert task['parameters'] == delivery_bindings('KET4_Square_4mm')[task['event_name']]
         assert set(task['parameters']) == {arg.name for arg in KMR_TASKS[task['event_name']].arguments}
         assert context.acknowledge_gazebo(gazebo_ack(context.prepare(task)))
     assert context.plan()['status'] == 'completed'
-    assert context.revision == 5
+    assert context.revision == 6
     values = context.snapshot()
     assert values['M1']['part_name'] == 'KET4_Square_4mm'
     assert values['M1']['resource_state'] == 'loaded'
@@ -112,7 +114,8 @@ def test_saved_setup_selects_full_order_and_preserves_eight_pegs_and_delivery_de
     tasks = NominalProductContext(**{
         key: inputs[key] for key in ('scene', 'product_order', 'geometry')
     }).plan()['tasks']
-    assert [task['event_name'] for task in tasks] == ['pick_approach', 'pick_part', 'move_to_resource', 'place_approach', 'place_release']
+    assert [task['event_name'] for task in tasks] == ['pick_approach', 'pick_part', 'move_to_resource', 'place_approach',
+                                                      'place_release', 'move_home']
     assert {task['resource_id'] for task in tasks} == {'KMR'}
     assert recovery_setup.load_setup()['selected_product_order_file'] == full_order
 

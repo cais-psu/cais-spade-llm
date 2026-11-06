@@ -4636,7 +4636,7 @@ class GazeboPickPlaceController:
             not_equals: failed
         effects:
           current_state:
-            set: idle
+            set: placed
           gripper_state:
             set: open
           held_part:

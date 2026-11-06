@@ -554,6 +554,31 @@ def test_a_kmr_grasp_gives_it_custody_and_needs_its_retreat():
     assert result["projected_part_context"]["part_holder_resource_jid"] == "kmr"
 
 
+def test_a_kmr_grasp_out_of_a_machine_leaves_what_the_machine_s_model_declares():
+    slot = {"reference": "part_name", "scope": "resource"}
+    unload = {"event_id": 1, "event_name": "pick_grasp", "participants": ["robot", "M9"],
+              "parameter_bindings": {"resource_id": {"equals": "robot"}, "origin_resource_location": {"equals": "M9"}},
+              "guards": {"resource_state": {"equals": "completed"}, "part_name": {"equals_from_param": "part_name"}},
+              "updates": {"resource_state": {"set": "idle"}, "part_name": {"set": None}}}
+    physical = {"jids": {"M9": "m9"}, "environment_models": {"M9": {
+        "state_variables": {"part_name": slot, "resource_state": {"scope": "resource"}}, "events": [unload]}},
+        "environment_valuation": {"M9": {"part_name": "P", "resource_state": "completed"}}}
+    grasp = {"step_index": 0, "primitive": "grasp_part", "resolved_params": {"part_name": "P"}}
+    motion = {"step_index": 1, "primitive": "move_relative", "resolved_params": {}}
+
+    def pick(neighbors):
+        return _kmr_completion(trace=[grasp, motion], stated={"held_part": "P", "part_location": "kmr"},
+                               snapshot={"held_part": "P"}, part_context={"part_location": "M9"}, physical=physical,
+                               neighbors=neighbors)
+
+    # The machine's model declares what taking its part leaves it, whichever resource takes it (a robot's unload here).
+    result = pick({"m9": {"part_name": None, "resource_state": "idle"}})
+    assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
+    assert result["projected_resources"]["m9"] == {"part_name": None, "resource_state": "idle"}
+    # A value the event leaves out is not written.
+    assert pick({"m9": {"part_name": None}})["projected_resources"]["m9"] == {"part_name": None}
+
+
 def test_a_kmr_release_gives_the_part_to_the_slot_that_receives_it():
     part = {"reference": "part_name", "scope": "resource"}
     physical = {"product_name": "board", "jids": {"Rack": "rack"},
@@ -958,7 +983,7 @@ def test_one_event_takes_a_part_and_puts_it_down_with_each_transfer_checked(monk
             task={"outline_id": "move", "event_name": "move", "resource_jid": "robot", "part_name": "P",
                   "expected_end_state": end, "neighbor_end_state": neighbors}, trace=trace,
             recovery_des_model=model, recovery_snapshot={"resource_state": "idle"},
-            projected_snapshot={"resource_state": "idle", "current_pose": away}, part_context={"part_location": "Rack"},
+            projected_snapshot={"resource_state": "placed", "current_pose": away}, part_context={"part_location": "Rack"},
             grounding_context={"resources": {"rack": {"zone_1_part": "P", "zone_2_part": None}}}, primitive_catalog=[],
             resource_evidence=_GRIP_EVIDENCE, physical_evidence={**physical, **_PART_GEOMETRY})
 
@@ -984,7 +1009,8 @@ def test_one_event_takes_a_part_and_puts_it_down_with_each_transfer_checked(monk
     left_out = complete({})
     assert left_out["feasibility_status"] == "FEASIBLE", left_out.get("reason")
     assert "resource_location" not in left_out["projected_snapshot"]
-    assert left_out["projected_snapshot"]["resource_state"] == "idle"
+    # The state is what the program's release leaves, whatever the event states.
+    assert left_out["projected_snapshot"]["resource_state"] == "placed"
     # A stated location the place does not end at takes where it ends, so the postcondition refuses it.
     assert complete({"resource_location": "home"})["projected_snapshot"]["resource_location"] == "Rack"
 
@@ -1100,9 +1126,8 @@ def test_a_destination_receives_into_its_own_slot():
     assert _receiving_slot("P", "M9 staging tray", {"x": 0.0, "y": 0.0}, physical) == ("M9", "staging_part")
 
 
-@pytest.mark.parametrize("stated, declared, status", [
-    ("loaded", False, "FEASIBLE"), ("paused", True, "INFEASIBLE")])
-def test_a_neighbour_state_no_primitive_of_it_declares_is_named_by_the_event(stated, declared, status):
+@pytest.mark.parametrize("stated, declared", [("loaded", False), ("paused", True)])
+def test_a_neighbour_state_neither_its_primitives_nor_a_received_part_make_is_refused(stated, declared):
     catalog = [{"name": "pause_job", "effects": {"resource_state": {"set": "paused"}}}] if declared else []
     task = {"outline_id": "load", "event_name": "load", "resource_jid": "owner", "part_name": None,
             "expected_start_state": {}, "expected_end_state": {"resource_state": "idle"},
@@ -1114,9 +1139,8 @@ def test_a_neighbour_state_no_primitive_of_it_declares_is_named_by_the_event(sta
         grounding_context={"resources": {"m9": {"resource_state": "idle", "execution_primitive_catalog": catalog}}},
         primitive_catalog=[{"name": "move_cartesian", "params": {}, "required_params": [], "effects": {}}],
         validate_primitive=feasible)
-    assert result["feasibility_status"] == status, result["reason"]
-    if status == "FEASIBLE":
-        assert result["projected_resources"]["m9"]["resource_state"] == "loaded"
+    assert result["feasibility_status"] == "INFEASIBLE"
+    assert f"m9's resource_state: achieved 'idle', required '{stated}'" in result["reason"]
 
 
 def test_a_named_state_never_replaces_the_state_a_step_declares():
@@ -1691,7 +1715,9 @@ def test_machine_commands_leave_the_job_record_their_later_steps_and_events_read
         {"resource_state": "running", "part_name": "RGOCG4-50_Round_4mm", "selected_program": "circle"},
         {"current_process": {"process": "trim", "result": "circle", "status": "running", "machine": "M2"},
          "processCompleted": []},
-        {"resource_state": "paused", "selected_program": "square"})
+        # The pause changes the part's job record, so the event states it, as the RA requires.
+        {"resource_state": "paused", "selected_program": "square",
+         "current_process": {"process": "trim", "result": "circle", "status": "paused", "machine": "M2"}})
     assert result["feasibility_status"] == "FEASIBLE", result["reason"]
     # The program selection is checked against the record the pause left, not the failure-time one.
     assert seen == ["running", "paused"]
@@ -1715,8 +1741,8 @@ def test_an_awaited_completion_finishes_the_active_job_in_the_record_later_event
     assert job["processing_active_sec"] == machine["simulation_process"]["processing_time_sec"]
 
 
-@pytest.mark.parametrize("named, status", [("standby", "FEASIBLE"), ("idle", "INFEASIBLE")])
-def test_a_resource_state_no_primitive_declares_is_named_by_the_event(named, status):
+@pytest.mark.parametrize("named", ["standby", "idle"])
+def test_a_resource_state_comes_only_from_the_primitives_in_the_program(named):
     catalog = [{"name": "move_cartesian", "params": {}, "required_params": [], "effects": {}},
                {"name": "move_to_named_pose", "params": {}, "required_params": [],
                 "effects": {"current_state": {"set": "idle"}}}]
@@ -1727,13 +1753,33 @@ def test_a_resource_state_no_primitive_declares_is_named_by_the_event(named, sta
         recovery_des_model={"state_variables": {"resource_state": {"scope": "resource"}}},
         recovery_snapshot={"resource_state": "failed"}, part_context={}, grounding_context={},
         primitive_catalog=catalog, validate_primitive=feasible)
-    assert result["feasibility_status"] == status, result["reason"]
-    if status == "FEASIBLE":
-        # Later events start from the named state, as the outline's projection does.
-        assert result["projected_snapshot"]["resource_state"] == "standby"
-    else:
-        # move_to_named_pose declares idle, so idle comes only from that primitive in the program.
-        assert "achieved 'failed', required 'idle'" in result["reason"]
+    # No primitive declares standby, and idle comes only from move_to_named_pose, which the program does not run.
+    assert result["feasibility_status"] == "INFEASIBLE"
+    assert f"achieved 'failed', required '{named}'" in result["reason"]
+
+def test_a_program_that_changes_a_value_the_event_leaves_out_is_refused():
+    # As the RA's left_by: the home move sets idle, so an event that leaves resource_state out would leave the
+    # outline at placed while the program ends idle.
+    declarations = {"resource_state": {"scope": "resource"}, "gripper_state": {"scope": "resource"}}
+    catalog = [{"name": "open_gripper", "params": {}, "required_params": [], "effects": {"gripper_state": {"set": "open"}}},
+               {"name": "move_to_named_pose", "params": {}, "required_params": [],
+                "effects": {"current_state": {"set": "idle"}}}]
+
+    def compose(steps, end):
+        task = {"outline_id": "home", "event_name": "home", "resource_jid": "owner", "part_name": None,
+                "expected_start_state": {"resource_state": "placed"}, "expected_end_state": end}
+        return validate_recovery_primitive_composition(
+            task=task, primitive_steps=steps, recovery_des_model={"state_variables": declarations},
+            recovery_snapshot={"resource_state": "placed", "gripper_state": "closed"}, part_context={},
+            grounding_context={}, primitive_catalog=catalog, validate_primitive=feasible)
+
+    both = [{"primitive": "open_gripper", "params": {}}, {"primitive": "move_to_named_pose", "params": {}}]
+    refused = compose(both, {"gripper_state": "open"})
+    assert refused["feasibility_status"] == "INFEASIBLE"
+    assert refused["reason"] == "The program changes resource_state from 'placed' to 'idle', and the event does not state it"
+    assert compose(both, {"gripper_state": "open", "resource_state": "idle"})["feasibility_status"] == "FEASIBLE"
+    assert compose(both[:1], {"gripper_state": "open"})["feasibility_status"] == "FEASIBLE"
+
 
 def test_a_derived_pose_condition_is_read_through_the_effect_field_it_follows():
     declarations = {"pose": {"scope": "resource", "type": "object", "fields": ["x", "y", "z"], "effect": "current_pose"}}

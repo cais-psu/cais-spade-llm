@@ -549,6 +549,7 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
                 "move_to_resource",
                 "place_approach",
                 "place_release",
+                "move_home",
             }:
                 actor.bind_executor(
                     event_name,
@@ -820,6 +821,9 @@ def _validate_kmr_completion(task: dict, evidence: dict, scene: dict | None = No
                 and home.get("gripper_open") is True and observations.get("attached") is False
                 and observations.get("part_name") is None):
             return False
+    if task["event_name"] == "move_home" and not (
+            observations.get("arm_parked") is True and observations.get("attached") is False):
+        return False
     if task["event_name"] in {"pick_approach", "place_approach"}:
         if observations.get("approach_observed") is not True:
             return False

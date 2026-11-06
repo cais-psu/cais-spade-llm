@@ -172,7 +172,7 @@ def create_resource_agents(
             raise ValueError("KMR delivery execution requires simulation mode")
         for controller in prewarmed.values():
             controller.shutdown()
-        ALLOWED_FUNCS['KMR'].update({'pick_part', 'move_to_resource', 'place_release'})
+        ALLOWED_FUNCS['KMR'].update({'pick_part', 'move_to_resource', 'place_release', 'move_home'})
         return [
             KMRResourceAgent(
                 "KMR@localhost", "none", cca_jid=cca_jid, tool_timeout_s=360,

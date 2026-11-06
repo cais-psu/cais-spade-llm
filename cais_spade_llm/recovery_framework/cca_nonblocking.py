@@ -52,7 +52,8 @@ SEARCH_BUDGET = {"max_states": 200_000, "seconds": 900.0}
 # The events the runtime binds an executor to (workflow_execution.bind_environment_executors).
 _ROBOT_EVENTS = frozenset({"pick_approach", "pick_grasp", "place_approach", "place_insert", "place_release",
                            "move_home"})
-_KMR_EVENTS = frozenset({"pick_approach", "pick_part", "move_to_resource", "place_approach", "place_release"})
+_KMR_EVENTS = frozenset({"pick_approach", "pick_part", "move_to_resource", "place_approach", "place_release",
+                         "move_home"})
 _WORKER_EVENTS = frozenset({"machine_part", "complete_job", "select_program", "start_job", "pause_job",
                             "resume_job", "stop_job", "advance_conveyor", "advance_part"})
 _STATE_FIELDS = ("held_part", "part_name", "staging_part", "resource_location")

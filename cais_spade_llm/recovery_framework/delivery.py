@@ -171,6 +171,7 @@ def validate_execution_evidence(ack: dict, *, scene: dict | None = None) -> None
         'place_approach': {'part_location': 'KMR', 'attached': True,
                            'approach_observed': True, 'resource_location': 'M1'},
         'place_release': {'part_location': 'M1', 'attached': False, 'robot_clear': True},
+        'move_home': {'part_name': None, 'attached': False, 'arm_parked': True},
     }
     if name not in requirements:
         raise ValueError('Unsupported Gazebo nominal event')
@@ -241,12 +242,12 @@ class DeliveryRuntime:
                     'in_state': {
                         'pick_approach': 'idle', 'pick_part': 'at_pick',
                         'move_to_resource': 'carrying', 'place_approach': 'carrying',
-                        'place_release': 'positioned',
+                        'place_release': 'positioned', 'move_home': 'placed',
                     }[task['event_name']],
                     'out_state': {
                         'pick_approach': 'at_pick', 'pick_part': 'carrying',
                         'move_to_resource': 'carrying', 'place_approach': 'positioned',
-                        'place_release': 'idle',
+                        'place_release': 'placed', 'move_home': 'idle',
                     }[task['event_name']]}
             if nodes:
                 nodes[-1]['successors'].append(node['id'])

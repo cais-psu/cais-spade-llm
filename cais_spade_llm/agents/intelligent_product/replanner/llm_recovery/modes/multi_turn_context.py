@@ -466,7 +466,11 @@ _CONDITION_KEYS = {"scope", "domain", "domain_complete", "type", "description", 
 # How the listed values of a condition variable are read; shown with every variables lookup.
 _CONDITION_VALUES_RULE = ("A variable whose values name places, parts or positions must name a known one; for "
                           "any other variable the domain lists the values normal production uses (domain_complete "
-                          "refers to normal production), and new values are allowed.")
+                          "refers to normal production). A value, listed or not, holds after an event only when it "
+                          "already held, a declared effect of the acting resource's primitives sets it, or one of the "
+                          "event's checks finds it: its pick or place (a part put into or taken from a place leaves "
+                          "that place's resource what its model declares), its transport, its move or navigation to "
+                          "a place, its stated pose, or a stated completed process entry, which ends that process.")
 
 
 def _public_resource_state_variables(entry: dict) -> dict:

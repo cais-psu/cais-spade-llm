@@ -51,6 +51,63 @@ def test_primitive_declarations_never_set_a_location_slot_or_custody(scene):
                      for field in ("current_pose_ref", "occupancy.location")}
 
 
+def test_a_kmr_named_pose_move_declares_one_alternative_with_a_part_and_one_without(scene):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_primitives import (
+        resource_snapshot_field_value, validate_and_project_steps_with_trace,
+    )
+    from cais_spade_llm.function_analyzer import FunctionAnalyzer
+
+    contracts = current_primitive_declarations(scene)["KMR"]["move_to_named_pose"]
+    assert [(contract["preconditions"]["held_part"], contract["effects"], contract.get("parameters"))
+            for contract in contracts] == [
+        ({"equals": None}, {"resource_state": {"set": "idle"}}, None),
+        ({"not_equals": None}, {"resource_state": {"set": "carrying"}},
+         {"pose_name": {"required": True, "type": "string", "domain": ["transport"]}})]
+    # Composition takes the alternative the projected state and the step's pose allow, as the RA does.
+    frontmatter = FunctionAnalyzer._extract_yaml_frontmatter(KMRPrimitives.move_to_named_pose)
+    entry = {"name": "move_to_named_pose", "params": frontmatter.get("params") or {}, "required_params": ["pose_name"],
+             "preconditions": {}, "effects": {}, "alternatives": frontmatter["alternatives"]}
+
+    def move(held, pose):
+        return validate_and_project_steps_with_trace(
+            [{"primitive": "move_to_named_pose", "params": {"pose_name": pose}}], [entry],
+            {"held_part": held, "resource_state": "placed"})
+
+    assert resource_snapshot_field_value(move(None, "home")["projected_snapshot"], "resource_state") == "idle"
+    assert resource_snapshot_field_value(move("P", "transport")["projected_snapshot"], "resource_state") == "carrying"
+    refused = move("P", "home")
+    assert not refused["valid"]
+    assert refused["validation_error"] == ("in the projected state it takes pose_name only in ['transport'], "
+                                           "not 'home' at step 0 (move_to_named_pose)")
+
+
+def test_a_robot_with_saved_programs_serves_the_steps_it_runs(scene):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _capability_decomposition_for_resource,
+    )
+    from cais_spade_llm.resources.resource_primitives import _running_task_definition
+    from cais_spade_llm.resources.robot.robot_task_registry import robot_task_capability_decompositions
+    from cais_spade_llm.resources.robot.robot_task_registry import robot_task_registry
+
+    registry = robot_task_registry()
+    agent = SimpleNamespace(agent_name="ur5e-3", gazebo_program_scene=scene,
+                            **{name: SimpleNamespace(__tool_spec__=task) for name, task in registry.items()})
+    served = _running_task_definition(agent, "place_insert").program.steps
+    assert served == saved_robot_definition(scene, "ur5e-3", "place_insert").program.steps
+    assert [step.id for step in served] != [step.id for step in registry["place_insert"].program.steps]
+    agent.gazebo_program_scene = None
+    assert _running_task_definition(agent, "place_insert") is registry["place_insert"]
+    # A decomposition looked up during composition keeps the code template (October 30), whose parameters are the
+    # ones the steps run with; a saved program's display parameters are not served there.
+    stale = [{"primitive": "move_relative", "params": {"dz": 0.08}}]
+    prepared = {"recovery_resources": {"robot": {"resource_type": "robot", "recovery_des_model": {
+        "events": [{"event_name": "place_insert", "recovery_visible_steps": stale}]}}}}
+    decomposition = _capability_decomposition_for_resource(
+        prepared_recovery_request=prepared, resource_jid="robot", function_name="place_insert")
+    assert decomposition["recovery_visible_steps"] == robot_task_capability_decompositions(
+        function_name="place_insert", resource_jid="robot")["recovery_visible_steps"]
+
+
 def test_machine_contracts_follow_the_machine_automaton(scene):
     # The job commands and the machine's own automaton declare the same job control and must not drift.
     models = build_environment_models(scene)
@@ -127,7 +184,7 @@ def test_saved_catalog_covers_exact_resources_and_unused_executors(scene):
     }
     assert len(resources) == 12
     assert set(resources["KMR"]["functions"]) == {
-        "pick_approach", "pick_part", "move_to_resource", "place_approach", "place_release",
+        "pick_approach", "pick_part", "move_to_resource", "place_approach", "place_release", "move_home",
     }
     assert set(resources["KMR"]["primitives"]) == robot | {"move_base"}
     for rid in ("ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4"):

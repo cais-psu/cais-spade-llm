@@ -44,10 +44,14 @@ def primitive_summary(
     description: str,
     preconditions: dict[str, Any],
     effects: dict[str, Any],
+    alternatives: list[dict[str, Any]] | None = None,
 ) -> str:
     base = description or "Recovery primitive"
-    pre_keys = ", ".join(sorted(str(key) for key in preconditions)) if preconditions else ""
-    effect_keys = ", ".join(sorted(str(key) for key in effects)) if effects else ""
+    # An alternative adds its own preconditions and effects to the primitive's shared ones.
+    pre = {*preconditions, *(key for row in alternatives or [] for key in row.get("preconditions") or {})}
+    changes = {*effects, *(key for row in alternatives or [] for key in row.get("effects") or {})}
+    pre_keys = ", ".join(sorted(str(key) for key in pre)) if pre else ""
+    effect_keys = ", ".join(sorted(str(key) for key in changes)) if changes else ""
     detail_parts: list[str] = []
     if pre_keys:
         detail_parts.append(f"pre: {pre_keys}")
@@ -206,10 +210,13 @@ def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any
             "output_schema": observation_schema,
             "synthesis_hidden": bool(frontmatter.get("synthesis_hidden", False)),
         }
+        if frontmatter.get("alternatives"):
+            entry["alternatives"] = deepcopy(frontmatter["alternatives"])
         entry["semantic_summary"] = primitive_summary(
             description=str(entry.get("description") or ""),
             preconditions=preconditions,
             effects=effects,
+            alternatives=entry.get("alternatives"),
         )
         entries.append(entry)
     return filter_recovery_primitive_catalog(entries, resource_type=resource_type)
@@ -248,7 +255,7 @@ def current_primitive_declarations(scene: dict[str, Any]) -> dict[str, dict[str,
             contracts = {name: [deepcopy(contract)] for name, contract in TRANSPORT_PRIMITIVE_CONTRACTS.items()}
         else:
             owner = KMRPrimitives if rid == "KMR" else robot_primitive_owner_class(rid) if rid in robots else None
-            contracts = {name: [_frontmatter_contract(getattr(owner, name))]
+            contracts = {name: _frontmatter_contracts(getattr(owner, name))
                          for name in bundle["primitives"] if callable(getattr(owner, name, None))}
         declarations[rid] = {name: contracts.get(name, []) for name in bundle["primitives"]
                              if not ((rid in robots or rid == "KMR") and name in INTERNAL_GRIPPER_PRIMITIVES)}
@@ -264,13 +271,43 @@ def current_primitive_declarations(scene: dict[str, Any]) -> dict[str, dict[str,
     return declarations
 
 
-def _frontmatter_contract(fn: Any) -> dict[str, Any]:
+def _running_task_definition(resource_agent: Any, event_name: str) -> Any:
+    """Return the task definition a resource runs for one of its events.
+
+    A robot with saved Gazebo programs runs the saved steps (``robot_task_runtime``), so its served event carries
+    those, not the code's own program.
+    """
+    from cais_spade_llm.resources.robot.robot_task_registry import robot_task_registry
+
+    task_definition = getattr(getattr(resource_agent, event_name, None), "__tool_spec__", None)
+    scene = getattr(resource_agent, "gazebo_program_scene", None)
+    if (task_definition is None or event_name not in robot_task_registry()
+            or not isinstance(scene, dict) or "resource_programs" not in scene):
+        return task_definition
+    from cais_spade_llm.resources.gazebo_programs import saved_robot_definition
+
+    return saved_robot_definition(scene, resource_agent.agent_name, event_name)
+
+
+def _frontmatter_contracts(fn: Any) -> list[dict[str, Any]]:
+    """Return a primitive's declared contracts: one, or one per declared alternative.
+
+    An alternative adds its own preconditions, effects and parameter values to the primitive's shared ones,
+    as a machine's contracts declare one alternative per program.
+    """
     frontmatter = FunctionAnalyzer._extract_yaml_frontmatter(fn) or {}
     contract = {"preconditions": deepcopy(frontmatter.get("preconditions") or {}),
                 "effects": deepcopy(frontmatter.get("effects") or {})}
     if frontmatter.get("capability_constraints"):
         contract["capability_constraints"] = deepcopy(frontmatter["capability_constraints"])
-    return contract
+    alternatives = frontmatter.get("alternatives") or []
+    if not alternatives:
+        return [contract]
+    return [{**deepcopy(contract),
+             "preconditions": {**contract["preconditions"], **deepcopy(row.get("preconditions") or {})},
+             "effects": {**contract["effects"], **deepcopy(row.get("effects") or {})},
+             **({"parameters": deepcopy(row["parameters"])} if row.get("parameters") else {})}
+            for row in alternatives]
 
 
 def filter_synthesis_primitive_catalog(
@@ -425,7 +462,7 @@ def build_recovery_des_model(
         ):
             if key in raw_event:
                 event[key] = deepcopy(raw_event.get(key))
-        task_definition = getattr(getattr(resource_agent, event_name, None), "__tool_spec__", None)
+        task_definition = _running_task_definition(resource_agent, event_name)
         program = getattr(task_definition, "program", None)
         if program is not None and is_dataclass(program):
             contract = deepcopy(event.get("composition_contract") or {})

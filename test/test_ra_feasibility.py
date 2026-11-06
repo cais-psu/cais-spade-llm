@@ -83,7 +83,7 @@ def session():
 def _release():
     return {"outline_id": "R1", "event_name": "release_into_zone_1", "resource_jid": UR, "part_name": "P1",
             "expected_end_state": {"held_part": None, "part_location": "Buffer For Machined parts",
-                                   "resource_location": "Buffer For Machined parts", "resource_state": "idle",
+                                   "resource_location": "Buffer For Machined parts", "resource_state": "placed",
                                    "gripper_state": "open"},
             "neighbor_end_state": {BUFFER: {"zone_1_part": "P1"}}}
 
@@ -468,13 +468,13 @@ def test_a_machine_program_comes_from_its_declared_options_while_not_running(cel
         assert any(reason in text for text in result["reasons"])
 
 
-def test_a_new_state_name_and_a_value_that_already_holds_need_nothing(cell, session):
-    # No ur5e-3 primitive declares "recovered", so it names the new state; home is where ur5e-3 already is.
-    result = check_event(_event(UR, {"resource_state": "recovered", "resource_location": "home"}), session, {}, cell)
+def test_a_value_that_already_holds_needs_nothing(cell, session):
+    # home is where ur5e-3 already is.
+    result = check_event(_event(UR, {"resource_location": "home"}), session, {}, cell)
     assert result["feasibility_status"] == "FEASIBLE"
     assert [(row["status"], "producers" in row, "found_by" in row) for row in result["conditions"]] == [
-        ("FEASIBLE", False, False), ("FEASIBLE", False, False)]
-    assert result["conditions"][1]["before"] == result["conditions"][1]["after"]
+        ("FEASIBLE", False, False)]
+    assert result["conditions"][0]["before"] == result["conditions"][0]["after"]
 
 
 def test_a_private_field_nothing_sets_is_refused(cell, session):
@@ -490,9 +490,9 @@ def test_a_device_that_reports_itself_unavailable_runs_none_of_its_primitives(ce
     checked = check_event(_running("square"), session, {}, cell)
     assert checked["feasibility_status"] == "INFEASIBLE"
     assert "availability = available; projected availability is unavailable" in " | ".join(checked["reasons"])
-    # A name none of its primitives declares needs no primitive, but the event is still M1's own, so it needs
-    # what all of M1's primitives need.
-    label = check_event(_event(M1, {"resource_state": "idle"}, part="P2"), session, {}, cell)
+    # A value that already holds needs no primitive, but the event is still M1's own, so it needs what all of
+    # M1's primitives need.
+    label = check_event(_event(M1, {"resource_state": "loaded"}, part="P2"), session, {}, cell)
     assert [(row["status"], "producers" in row) for row in label["conditions"]] == [("FEASIBLE", False)]
     assert label["feasibility_status"] == "INFEASIBLE"
     assert label["reasons"] == ["M1's primitives need availability = available; projected availability is unavailable"]
@@ -736,9 +736,10 @@ def test_a_machine_reaches_a_label_its_job_commands_produce_only_through_them(ce
                                   "is paused; selected_program = circle; projected selected_program is square; "
                                   "start_job (result square) needs resource_state = loaded; projected resource_state "
                                   "is paused"]
-    # No job command declares loaded, so it names M1's new state and needs no primitive.
+    # No job command sets loaded: M1 is loaded when a part is put into it, so its own event cannot make it.
     loaded = check_event(_event(M1, {"resource_state": "loaded"}, part="P2"), session, {}, cell)
-    assert [(row["status"], "producers" in row) for row in loaded["conditions"]] == [("FEASIBLE", False)]
+    assert loaded["feasibility_status"] == "INFEASIBLE"
+    assert loaded["reasons"][0].startswith("start_job (result circle): it sets running, not loaded; ")
 
 
 def test_an_event_states_every_part_value_its_primitive_changes(cell, session):
@@ -786,7 +787,7 @@ def test_a_pick_leaves_what_its_primitive_declares_whether_stated_or_left_out(ce
     assert contradicted["feasibility_status"] == "INFEASIBLE"
 
 
-def test_a_move_home_states_what_it_declares_and_a_fault_left_out_stays(cell, session):
+def test_a_move_home_states_what_it_declares_and_leaves_no_value_it_changes_unstated(cell, session):
     session["symbolic_resources"][UR].update(held_part=None, resource_state="failed", gripper_state="open",
                                              resource_location="Buffer For Machined parts")
     session["recovery_des_models"][UR]["state_variables"]["resource_location"]["domain"].append("home")
@@ -794,42 +795,31 @@ def test_a_move_home_states_what_it_declares_and_a_fault_left_out_stays(cell, se
     assert "move_to_named_pose: it sets idle, not failed" in stated["reasons"]
     assert check_event(_event(UR, {"resource_location": "home", "resource_state": "idle"}), session, {}, cell)[
         "feasibility_status"] == "FEASIBLE"
-    # Nothing declared sets a fault, so it is no state the move's effect replaces, and left out it stays.
-    assert check_event(_event(UR, {"resource_location": "home"}), session, {}, cell)["feasibility_status"] == "FEASIBLE"
-    # A label a declared transition sets is one, and the move leaves another.
-    session["symbolic_resources"][UR]["resource_state"] = "placed"
-    session["recovery_des_models"][UR]["events"] = [{"event_name": "place_insert", "updates": {"resource_state": {"set": "placed"}}}]
+    # The move sets idle from whatever label it starts at, so left out, the label it changes is unstated.
     left_out = check_event(_event(UR, {"resource_location": "home"}), session, {}, cell)
-    assert left_out["reasons"] == ["move_to_named_pose changes ur5e-3's resource_state, which is placed, and the event does not state it"]
+    assert left_out["feasibility_status"] == "NEEDS_CONTEXT"
+    assert left_out["reasons"] == ["move_to_named_pose changes ur5e-3's resource_state, which is failed, and the event does not state it"]
 
 
-def test_a_place_may_end_at_its_transition_s_value_and_a_move_home_only_at_its_own(cell, session):
-    model = session["recovery_des_models"][UR]
-    model["events"] = [
-        {"event_name": "place_insert", "updates": {"resource_state": {"set": "placed"}},
-         "composition_contract": {"steps": [{"op": "release_part"}]}},
-        {"event_name": "move_home", "updates": {"resource_state": {"set": "idle"}},
-         "composition_contract": {"steps": [{"op": "move_to_named_pose"}]}},
-        {"event_name": "place_approach", "updates": {"resource_state": {"set": "positioned"}},
-         "composition_contract": {"steps": [{"op": "move_to_named_pose"}]}}]
+def test_a_place_ends_at_its_release_s_value_and_a_move_home_only_at_its_own(cell, session):
+    # release_part declares placed and move_to_named_pose idle; a transition's name or value adds no other end.
     released = _release()
-    released["expected_end_state"]["resource_state"] = "placed"
     assert check_event(released, session, {}, cell)["feasibility_status"] == "FEASIBLE"
     released["expected_end_state"]["resource_state"] = "done"
-    assert "release_part: it sets idle, not done" in check_event(released, session, {}, cell)["reasons"]
+    assert "release_part: it sets placed, not done" in check_event(released, session, {}, cell)["reasons"][0]
     session["symbolic_resources"][UR].update(held_part=None, resource_state="placed", gripper_state="open",
                                              resource_location="Buffer For Machined parts")
-    # A move home's own effect is one of its transitions' values, so another of them is not its end.
     move = check_event(_event(UR, {"resource_location": "home", "resource_state": "positioned"}), session, {}, cell)
-    assert "move_to_named_pose: it sets idle, not positioned" in move["reasons"]
+    assert "move_to_named_pose: it sets idle, not positioned" in move["reasons"][0]
 
 
 def test_an_event_no_declared_transition_supports_has_nothing_to_run(cell, session):
+    # Every stated value already holds, so no primitive is needed, and no declared M1 transition makes them.
     model = session["recovery_des_models"][M1]
-    model["events"] = [{"event_name": "pause_job", "updates": {"resource_state": {"set": "paused"}}, "guards": {},
-                        "primitive_support": [{"primitive": "pause_job"}], "composition_contract": {}}]
+    model["events"] = [{"event_name": "resume_job", "updates": {"resource_state": {"set": "running"}}, "guards": {},
+                        "primitive_support": [{"primitive": "resume_job"}], "composition_contract": {}}]
     session["symbolic_resources"][M1]["resource_state"] = "paused"
-    refused = check_event(_event(M1, {"resource_state": "loaded"}, part="P2"), session, {}, cell)
+    refused = check_event(_event(M1, {"resource_state": "paused"}, part="P2"), session, {}, cell)
     assert refused["feasibility_status"] == "INFEASIBLE"
     assert refused["reasons"] == ["no declared M1 transition makes what this event states, so nothing carries it out"]
 
@@ -870,15 +860,107 @@ def test_a_job_command_that_names_no_part_is_unresolved_on_the_event_not_on_v(ce
                                   "no part"]
 
 
-def test_a_state_name_no_primitive_declares_names_the_new_state_for_robots_and_neighbours(cell, session):
-    # No ur5e-3 primitive declares waiting, and no M1 primitive declares loaded.
+def test_a_state_name_nothing_declares_is_refused_for_robots_and_neighbours(cell, session):
+    # No ur5e-3 primitive declares waiting. No M1 primitive declares loaded, and without M1's model no check
+    # finds it received.
     robot = check_event(_event(UR, {"resource_state": "waiting"}), session, {}, cell)
-    assert [(row["status"], "producers" in row) for row in robot["conditions"]] == [("FEASIBLE", False)]
+    assert robot["feasibility_status"] == "INFEASIBLE"
+    assert robot["reasons"] == ["grasp_part: it sets picked, not waiting; move_to_named_pose: it sets idle, not "
+                                "waiting; release_part: it sets placed, not waiting"]
     session["symbolic_resources"][M1].update(part_name=None, resource_state="idle")
     loaded = check_event({**_event(UR, {"held_part": None, "part_location": "M1"}, part="P1"),
                           "neighbor_end_state": {M1: {"resource_state": "loaded", "part_name": "P1"}}}, session, {}, cell)
     state = next(row for row in loaded["conditions"] if row["condition"] == "resource_state")
-    assert (state["status"], "producers" in state) == ("FEASIBLE", False)
+    assert state["status"] == "INFEASIBLE"
+    assert state["reason"] == "M1 does not act in this event, and no check of it finds M1's resource_state at loaded"
+
+
+def _machine_cell(cell):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    return replace(cell, environment_models=build_environment_models(cell.scene))
+
+
+def test_a_part_put_into_a_machine_leaves_what_the_machine_s_model_declares(cell, session):
+    machines = _machine_cell(cell)
+    session["symbolic_resources"][M1].update(part_name=None, resource_state="idle")
+
+    def put(state):
+        return check_event({**_event(UR, {"held_part": None, "part_location": "M1", "resource_state": "placed",
+                                          "gripper_state": "open"}, part="P1"),
+                            "neighbor_end_state": {M1: {"resource_state": state, "part_name": "P1"}}},
+                           session, {}, machines)
+
+    # Whichever resource puts the part in, M1's model declares it loaded. This cell records no geometry for M1, so
+    # the place check, and with it what it finds, stays unresolved.
+    found = [(row["before"], row["after"], row["status"]) for row in put("loaded")["conditions"]
+             if row["condition"] == "resource_state" and row.get("found_by") == "place"]
+    assert found == [("idle", "loaded", "NEEDS_CONTEXT")]
+    assert "the place check finds M1's resource_state loaded, not idle" in put("idle")["reasons"]
+    session["symbolic_resources"][M1]["resource_state"] = "running"
+    capacity = next(row for row in put("loaded")["capability"] if row["check"] == "capacity")
+    assert (capacity["status"], capacity["reason"]) == (
+        "INFEASIBLE", "M1's model takes a part into M1 only with resource_state idle, and its resource_state is running")
+
+
+@pytest.mark.parametrize("state, stated, reason", [
+    ("completed", {"part_name": None, "resource_state": "idle"}, None),
+    ("completed", {"part_name": None},
+     "the pick check finds M1's resource_state idle, and the event leaves resource_state completed"),
+    # A part taken out of M1 in its fault state leaves the fault there.
+    ("interrupted", {"part_name": None}, None),
+    ("interrupted", {"part_name": None, "resource_state": "idle"},
+     "M1 does not act in this event, and no check of it finds M1's resource_state at idle"),
+])
+def test_a_part_taken_out_of_a_machine_leaves_what_the_machine_s_model_declares(cell, session, state, stated, reason):
+    session["symbolic_resources"][UR].update(held_part=None, gripper_state="open", resource_state="idle")
+    session["symbolic_resources"][M1].update(part_name="P2", resource_state=state)
+    session["symbolic_parts"]["P2"]["part_location"] = "M1"
+    result = check_event({**_event(UR, {"held_part": "P2", "part_location": "ur5e-3", "resource_state": "picked",
+                                        "gripper_state": "closed"}, part="P2"), "neighbor_end_state": {M1: stated}},
+                         session, {}, _machine_cell(cell))
+    # The cell records no geometry for M1, so the pick itself stays unresolved.
+    assert [text for text in result["reasons"] if text != "M1 has no recorded geometry"] == ([reason] if reason else [])
+
+
+def test_a_part_taken_out_of_a_machine_and_put_back_in_one_event_ends_as_the_place_leaves_it(cell, session):
+    session["symbolic_resources"][UR].update(held_part=None, gripper_state="open", resource_state="idle")
+    session["symbolic_resources"][M1].update(part_name="P2", resource_state="completed")
+    session["symbolic_parts"]["P2"]["part_location"] = "M1"
+
+    def put_back(state):
+        return check_event({**_event(UR, {"held_part": None, "part_location": "M1", "resource_state": "placed",
+                                          "gripper_state": "open"}, part="P2"),
+                            "neighbor_end_state": {M1: {"part_name": "P2", "resource_state": state}}},
+                           session, {}, _machine_cell(cell))
+
+    # The pick leaves M1 idle and the place then loaded; the place's guards are read on what the pick left.
+    back = put_back("loaded")
+    assert next(row for row in back["capability"] if row["check"] == "capacity")["status"] == "FEASIBLE"
+    assert [text for text in back["reasons"] if text != "M1 has no recorded geometry"] == []
+    assert "the place check finds M1's resource_state loaded, not idle" in put_back("idle")["reasons"]
+
+
+def test_a_part_taken_put_down_and_then_home_in_one_event_ends_at_what_the_last_step_leaves(cell, session):
+    # Grasp, release, then the move home: the move's idle is the event's last state, not the release's placed.
+    session["symbolic_resources"][UR].update(held_part=None, gripper_state="open", resource_state="placed",
+                                             resource_location="Buffer For Machined parts")
+    session["recovery_des_models"][UR]["state_variables"]["resource_location"]["domain"].append("home")
+    session["symbolic_resources"][CONVEYOR]["part_location.P1"] = None
+    session["symbolic_resources"][BUFFER]["zone_1_part"] = "P1"
+    session["symbolic_parts"]["P1"]["part_location"] = "Buffer For Machined parts"
+
+    def take_put_home(state):
+        return check_event({**_event(UR, {"held_part": None, "part_location": "Buffer For Machined parts",
+                                          "resource_location": "home", "resource_state": state,
+                                          "gripper_state": "open"}, part="P1"),
+                            "neighbor_end_state": {BUFFER: {"zone_1_part": "P1"}}}, session, {}, cell)
+
+    home = take_put_home("idle")
+    handling = next(row for row in home["capability"] if row["check"] == "handling")
+    assert handling["primitives"] == ["grasp_part", "release_part", "move_to_named_pose"]
+    assert home["feasibility_status"] == "FEASIBLE", home["reasons"]
+    assert take_put_home("placed")["reasons"] == ["the handling check finds ur5e-3's resource_state idle, not placed"]
 
 
 def test_a_robot_state_name_its_primitives_declare_as_current_state_comes_only_from_them(cell, session):
@@ -907,7 +989,7 @@ def test_an_event_of_a_resource_that_declares_no_primitives_is_refused(cell, ses
     result = check_event(_event(exit_jid, {"resource_state": "empty"}), session, {},
                          replace(cell, rids={**cell.rids, exit_jid: "Exit"}))
     assert result["feasibility_status"] == "INFEASIBLE"
-    assert result["reasons"] == ["Exit declares no primitives"]
+    assert result["reasons"] == ["no Exit primitive sets Exit's resource_state to empty", "Exit declares no primitives"]
 
 
 def test_a_part_location_other_than_where_the_place_check_puts_the_part_is_refused(cell, session):
@@ -1385,7 +1467,7 @@ def _pose_place_cell(cell, bodies, regions=None, resources=None):
 
 
 def _release_here(**end):
-    return _event(UR, {"held_part": None, "part_location": None, "resource_location": None, "resource_state": "idle",
+    return _event(UR, {"held_part": None, "part_location": None, "resource_location": None, "resource_state": "placed",
                        "gripper_state": "open", "pose": dict(zip("xyz", ARM["reference_pose"][:3], strict=True)), **end},
                   part="P1")
 

@@ -1754,7 +1754,7 @@
     }
   },
   "resource_programs": {
-    "revision": 7,
+    "revision": 8,
     "resources": {
       "ur5e-1": {
         "functions": {
@@ -10859,7 +10859,7 @@
             "status": "implemented",
             "program": {
               "entry_state": "positioned",
-              "success_state": "idle",
+              "success_state": "placed",
               "part_in_state": "",
               "required_context_keys": [],
               "context_mapping": {},
@@ -10961,6 +10961,73 @@
                         "withdraw_waypoints"
                       ]
                     }
+                  },
+                  "store_as": "park",
+                  "exposed": true,
+                  "public_params": null,
+                  "note": "",
+                  "when": [],
+                  "dry_run_output": null,
+                  "continue_on_failure": false,
+                  "failure_observations": {},
+                  "physical_position_required": false
+                }
+              ],
+              "effects": [
+                {
+                  "target": "resource_state",
+                  "action": "set",
+                  "value": "placed",
+                  "when": [],
+                  "skip_empty_values": false
+                }
+              ],
+              "success_response": {},
+              "dry_run_description": "",
+              "dry_run_duration": 5.0,
+              "failure_part": "",
+              "notes": [
+                "Nominal effects are committed only by the existing task acknowledgement."
+              ]
+            }
+          },
+          "move_home": {
+            "function_name": "move_home",
+            "status": "implemented",
+            "program": {
+              "entry_state": "any",
+              "success_state": "idle",
+              "part_in_state": "",
+              "required_context_keys": [],
+              "context_mapping": {},
+              "part_transition": null,
+              "entry_guards": [
+                {
+                  "predicate": "bound_task",
+                  "args": {},
+                  "message": "",
+                  "description": "Matching task, scene, and fresh resource observations",
+                  "condition": {}
+                },
+                {
+                  "predicate": "held_part_empty",
+                  "args": {},
+                  "message": "Cannot park the arm while still holding a part.",
+                  "description": "held_part is empty",
+                  "condition": {
+                    "field": "held_part",
+                    "operator": "equals",
+                    "value": null
+                  }
+                }
+              ],
+              "steps": [
+                {
+                  "id": "park",
+                  "op": "move_to_named_pose",
+                  "executor": "primitive",
+                  "params": {
+                    "pose_name": "transport"
                   },
                   "store_as": "park",
                   "exposed": true,
