@@ -2308,6 +2308,18 @@ def test_kmr_finds_a_constant_heading_route_where_a_lattice_path_fails_its_sweep
     assert kmr_base.constant_heading_route(occupancy_map, start, (-2.13, 1.82, math.pi / 2)) is None
 
 
+def test_kmr_route_ends_on_the_clear_grid_pose_nearest_a_dock_with_little_room() -> None:
+    occupancy_map = _kmr_test_map()
+    # From where the KMR stopped at Storage (the v7 Machining run and the tray_01 test) the grid pose nearest the M2 dock
+    # fails the padded check; the route ends on the clear one next to it and its sweep to the dock is checked.
+    target = (-2.7, 2.2, math.pi / 2)
+    for start in ((-5.53885009843858, 2.1346181452047577, 1.575079441289245),
+                  (-5.535318682780695, 2.1301808164172535, 1.5748575318152886)):
+        route, clearance = kmr_base.constant_heading_route(occupancy_map, start, target)
+        assert route[-1] == pytest.approx(target) and kmr_base.base_path_is_clear(occupancy_map, route)
+        assert math.dist(clearance[-1][:2], target[:2]) < 0.075
+
+
 def test_kmr_sweep_rejects_corner_crossing_with_clear_endpoints() -> None:
     occupancy_map = _kmr_test_map(previous_machine_bounds=True)
     start, finish = (-8.15, 2.3, -math.pi / 2), (-5.0, 3.85, -math.pi / 2)

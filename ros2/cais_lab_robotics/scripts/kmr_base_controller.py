@@ -587,10 +587,12 @@ def constant_heading_route(
 
     An omnidirectional base can translate without turning. Grid poses anchored at the start are each checked with
     the full padded footprint check; the route prefers poses away from blocked ones, and its corners are joined by
-    the same checked sweep. Base poses in ``avoid``, where the arm or its payload met geometry, are kept
-    ``avoid_radius_m`` away from. Returns the poses from the start to the target and, for every grid pose along it in
-    order, its x, y and clearance: the distance in metres it can travel toward the nearest blocked pose, half a grid
-    step short of it. None when no route lies within ``margin_m`` of the start and target.
+    the same checked sweep. The target falls between grid poses: the route ends on the nearest one when its pose and
+    sweep to the target are clear and a route reaches it, else on the next nearest around the target that serves.
+    Base poses in ``avoid``, where the arm or its payload met geometry, are kept ``avoid_radius_m`` away from (its
+    last step to the target excepted). Returns the poses from the start to the target and, for every grid pose along
+    it in order, its x, y and clearance: the distance in metres it can travel toward the nearest blocked pose, half a
+    grid step short of it. None when no route lies within ``margin_m`` of the start and target.
     """
 
     info = occupancy_map.info
@@ -607,9 +609,13 @@ def constant_heading_route(
     free = {(i, j) for i in range(columns[0], columns[1] + 1) for j in range(rows[0], rows[1] + 1)
             if all(math.dist(centre((i, j)), point) > avoid_radius_m for point in avoid)
             and base_path_is_clear(occupancy_map, ((*centre((i, j)), yaw),))}
-    end = (round((target[0] - start[0]) / step), round((target[1] - start[1]) / step))
-    if (0, 0) not in free or end not in free or not base_path_is_clear(
-            occupancy_map, ((*centre(end), yaw), tuple(target))):
+    # A dock may allow less than half a grid step, so the grid pose nearest the target is not always clear; the
+    # route may end on another one around the target, nearest first.
+    nearest = (round((target[0] - start[0]) / step), round((target[1] - start[1]) / step))
+    ends = [cell for cell in sorted(((nearest[0] + dx, nearest[1] + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)),
+                                    key=lambda cell: (cell != nearest, math.dist(centre(cell), target[:2]), cell))
+            if cell in free and base_path_is_clear(occupancy_map, ((*centre(cell), yaw), tuple(target)))]
+    if (0, 0) not in free or not ends:
         return None
     neighbours = [(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy]
     # Cells from the nearest blocked one, up to clearance_cells.
@@ -628,33 +634,39 @@ def constant_heading_route(
     def cost(cell: tuple[int, int]) -> float:
         return 1.0 + 3.0 * (clearance_cells - clearance.get(cell, clearance_cells)) / clearance_cells
 
-    queue, came, spent = [(0.0, (0, 0))], {(0, 0): None}, {(0, 0): 0.0}
-    while queue:
-        _, cell = heapq.heappop(queue)
-        if cell == end:
-            break
-        for dx, dy in neighbours:
-            near = (cell[0] + dx, cell[1] + dy)
-            if near not in free or (dx and dy and ((cell[0] + dx, cell[1]) not in free
-                                                   or (cell[0], cell[1] + dy) not in free)):
-                continue
-            total = spent[cell] + math.hypot(dx, dy) * cost(near)
-            if total < spent.get(near, math.inf):
-                spent[near], came[near] = total, cell
-                heapq.heappush(queue, (total + math.dist(near, end), near))
-    if end not in came:
-        return None
-    cells = [end]
-    while came[cells[-1]] is not None:
-        cells.append(came[cells[-1]])
-    cells.reverse()
-    corners = [cells[0], *[here for before, here, after in zip(cells, cells[1:], cells[2:])
-                           if (here[0] - before[0], here[1] - before[1]) != (after[0] - here[0], after[1] - here[1])],
-               cells[-1]]
-    route = tuple([(start[0], start[1], yaw), *[(*centre(cell), yaw) for cell in corners[1:]], tuple(target)])
-    if not base_path_is_clear(occupancy_map, route):
-        return None
-    return route, tuple((*centre(cell), step * (clearance.get(cell, clearance_cells) + 0.5)) for cell in cells)
+    reachable = None
+    for end in ends:
+        # A search that did not reach its end has met every cell reachable from the start.
+        if reachable is not None and end not in reachable:
+            continue
+        queue, came, spent = [(0.0, (0, 0))], {(0, 0): None}, {(0, 0): 0.0}
+        while queue:
+            _, cell = heapq.heappop(queue)
+            if cell == end:
+                break
+            for dx, dy in neighbours:
+                near = (cell[0] + dx, cell[1] + dy)
+                if near not in free or (dx and dy and ((cell[0] + dx, cell[1]) not in free
+                                                       or (cell[0], cell[1] + dy) not in free)):
+                    continue
+                total = spent[cell] + math.hypot(dx, dy) * cost(near)
+                if total < spent.get(near, math.inf):
+                    spent[near], came[near] = total, cell
+                    heapq.heappush(queue, (total + math.dist(near, end), near))
+        if end not in came:
+            reachable = came
+            continue
+        cells = [end]
+        while came[cells[-1]] is not None:
+            cells.append(came[cells[-1]])
+        cells.reverse()
+        corners = [cells[0], *[here for before, here, after in zip(cells, cells[1:], cells[2:])
+                               if (here[0] - before[0], here[1] - before[1]) != (after[0] - here[0], after[1] - here[1])],
+                   cells[-1]]
+        route = tuple([(start[0], start[1], yaw), *[(*centre(cell), yaw) for cell in corners[1:]], tuple(target)])
+        if base_path_is_clear(occupancy_map, route):
+            return route, tuple((*centre(cell), step * (clearance.get(cell, clearance_cells) + 0.5)) for cell in cells)
+    return None
 
 
 def braking_speed_limit(distance: float, acceleration: float, reaction_time: float) -> float:
