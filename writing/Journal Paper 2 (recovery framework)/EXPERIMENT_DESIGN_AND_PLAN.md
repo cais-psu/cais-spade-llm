@@ -210,6 +210,10 @@ differences into the configuration effect.
 
 ### Study 1: component ablation, 2 × 2 (first study)
 
+> The current Study 1 design and its analysis are in
+> [Study 1 analysis plan](#study-1-analysis-plan-stated-before-collection). Where older text in this file
+> differs (2 × 2 design, 80-turn budget, pilot counts, models), that section governs.
+
 **Question:** What do validation and incremental generation each change in
 the feasibility, safety, and completeness of recovery outlines, and what do
 they cost?
@@ -643,6 +647,76 @@ overlap, plot them as separate durations instead of a total decomposition.
 - List exclusions with their reasons and counts. Freeze confirmatory settings
   before collection. Neither small pilots nor zero observed violations prove
   universal safety or recovery capability.
+
+### Study 1 analysis plan (stated before collection)
+
+Status: approved by the user on 2026-11-06 ("yes for all") and frozen before the first Study 1 attempt; any
+later change is listed under Deviations with its reason. It governs where older text in this file differs.
+
+**Design.**
+
+- Models: `claude-opus-5-5`, `gpt-6.1-sol` and `gpt-6.1-terra`, all at reasoning effort medium, chosen by the
+  2026-11-06 screen (`/home/jongh/recovery_review_1030/screen_20261106/SCREEN.md`). Screen attempts are not
+  results.
+- Settings: Baseline, Informed baseline and Neuro-symbolic framework, each outline-level and event-level (code
+  labels `LLM`, `LLM + rules`, `Framework` × `single-pass`, `incremental`). Safety rules are given only to the
+  Informed baseline, in the prompt.
+- Captures: Part slippage `capture_f97ce5528f8c4a19a54211c74beec8c0` (drop point (0.15, 0.72), commit
+  `cc2f4ac`); Machining breakdown during part processing `capture_6cd8cd6940fa4691b67fa68a0099ed34`; Conveyor
+  breakdown `capture_460d78e95f8e48bdaa3517076ebc51ee`; ur5e-1 breakdown `capture_4f9097aa46bf450ca0717840262806a4`.
+- Repetitions: 10 per model, setting and scenario, the same for every cell: 3 × 6 × 4 × 10 = 720 attempts.
+- Budget: 40 provider requests per attempt. One frozen commit for every batch; a batch stops if a frozen file
+  changes, and batches on different commits are not pooled.
+- Order: settings are shuffled within each scenario block with a recorded scheduling seed.
+
+**Outcome.** An attempt passes when the independent outline audit passes its finished outline. Every started
+attempt is in the denominator. An attempt that ends any other way counts as not passed and is reported under its
+own stop cause: an audit failure (with its first failing check and event), the 40-request budget, the stall stop,
+a provider error after all tries, or a harness error. No attempt is re-run. If a harness fault is found during
+collection, the affected batches stop, the fault is fixed in a new commit, and those batches are re-run in full;
+both are recorded as a deviation.
+
+**Stopping and retries.**
+
+- Stall stop: an event-level Framework attempt stops after 15 provider requests in a row without a newly
+  accepted event. Outline-level Framework attempts accept no single events, so they run to the 40-request budget.
+  Baselines have no checks and are never stall-stopped.
+- Retries: a provider call that got no reply (dropped connection, rate limit 429, server error 5xx) gets up to
+  three tries, waiting as long as the provider asks, up to 60 s (commit `4cb029f`). Every try is recorded. A reply
+  the model sent is never asked for again.
+
+**Confirmatory comparisons.** Pooled over the three models and stratified by scenario × model:
+
+1. Neuro-symbolic framework against Baseline, event-level.
+2. Neuro-symbolic framework against Baseline, outline-level.
+3. Neuro-symbolic framework against Informed baseline, event-level.
+4. Neuro-symbolic framework against Informed baseline, outline-level.
+
+Each uses the Cochran–Mantel–Haenszel test on pass or not passed (the exact conditional version when a stratum
+has an expected count below 5), two-sided, α = 0.05, with Holm correction over these four. The effect size is the
+difference in pass proportion with its 95% interval. The same four comparisons for each model separately are
+secondary, with Holm correction within each model.
+
+**Descriptive only (no test).** Event-level against outline-level within each method (H4 stays open; no direction
+is assumed), Baseline against Informed baseline, and differences between models. These report counts, proportions
+and 95% Wilson intervals.
+
+**Secondary measures (descriptive).** For Framework settings, refusals per attempt by check (RA feasibility, CCA
+safety, CCA nonblocking); for every attempt, outline length in events, provider requests, lookups, tokens and
+elapsed time (medians and interquartile ranges); for attempts that did not pass, the audit's first failing check
+and event.
+
+**Reporting.** Every cell as n/N with a 95% Wilson interval. Fig. 13 top: pass share per setting, pooled over the
+four scenarios, one mark with its interval per model and a grey bar pooling all three models; bottom: for
+Framework, event-level, the share of each model's checked candidate events that each check rejected (RA
+feasibility, RA physical evidence, CCA safety). CCA nonblocking refusals are reported per attempt in the tables.
+Two or three failed baseline outlines are shown with the concrete error their check found.
+
+**Study 2 selection rule (stated now).** For each scenario, the passed event-level Framework outline from Opus 5.5
+with the fewest events is composed into primitive programs and executed in Gazebo; when two tie, the one that ran
+first. The paper states that Study 2 executes the shortest passed outline per scenario.
+
+**Deviations.** None yet.
 
 ### Tables and exports required for the paper
 

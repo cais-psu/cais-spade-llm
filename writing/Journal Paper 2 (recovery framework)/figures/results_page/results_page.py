@@ -1,7 +1,7 @@
 """Write the RCIM results page (Section 6.3 figures and tables) from the Study 1 batch records.
 
 The page has the layout of the figure mock-ups: Fig. 11, Table 6, Fig. 12 (outline rows) and Table 7 for the
-main model, Fig. 13 for both models, and every attempt. With ``--placeholder`` it is filled with layout numbers
+main model, Fig. 13 for every model, and every attempt. With ``--placeholder`` it is filled with layout numbers
 instead, so the page can be reviewed before any batch has run.
 
 Usage, from the repository root:
@@ -37,13 +37,15 @@ logger = logging.getLogger(__name__)
 
 TEMPLATE = HERE / "results_template.html"
 OUTPUT = HERE / "results.html"
-# The main model gives every Section 6.3.1 result; the second model appears only in the model comparison.
-# planned: attempts per setting and scenario.
+# The main model gives every Section 6.3.1 result; the other models appear only in the model comparison (Fig. 13).
+# planned: attempts per setting and scenario (user decision 2026-11-06: 10 for every model). mark: Fig. 13 shape.
 MODELS = [
-    {"id": "opus", "model": "claude-opus-4-7", "name": "Claude Opus 4.7 medium", "role": "main model",
-     "vendor": "Claude", "color": "var(--s3)", "planned": 20},
-    {"id": "gpt54", "model": "gpt-5.4", "name": "gpt-5.4 medium", "role": "second model",
-     "vendor": "OpenAI", "color": "var(--s1)", "planned": 20},
+    {"id": "opus55", "model": "claude-opus-5-5", "name": "Claude Opus 5.5 medium", "role": "main model",
+     "vendor": "Claude", "color": "var(--s3)", "mark": "square", "planned": 10},
+    {"id": "sol", "model": "gpt-6.1-sol", "name": "GPT-6.1 Sol medium", "role": "second model",
+     "vendor": "OpenAI", "color": "var(--s1)", "mark": "circle", "planned": 10},
+    {"id": "terra", "model": "gpt-6.1-terra", "name": "GPT-6.1 Terra medium", "role": "third model",
+     "vendor": "OpenAI", "color": "var(--s5)", "mark": "diamond", "planned": 10},
 ]
 EFFORT = "medium"
 MAX_TURNS = 40
@@ -287,7 +289,7 @@ _PLACEHOLDER_COMPOSITION = {
 
 def placeholder_cells() -> dict:
     """Return layout numbers in the shape cells_from_attempts returns."""
-    main, second = MODELS[0], MODELS[1]
+    main, others = MODELS[0], MODELS[1:]
     cells = {model["id"]: [{scenario: empty_cell() for scenario in SCENARIOS} for _ in CONFIGURATIONS]
              for model in MODELS}
     for scenario in SCENARIOS:
@@ -296,28 +298,31 @@ def placeholder_cells() -> dict:
             tokens_k, minutes, lookups = _PLACEHOLDER_EFFORT[scenario][setting]
             cell = cells[main["id"]][setting][scenario]
             classes = [counts[0], counts[1], 0, counts[2], counts[3], 0, counts[4], 0]
-            cell.update(n=main["planned"], classes=classes, tokens_k=tokens_k, minutes=minutes, lookups=lookups,
-                        completed=main["planned"] - counts[4] if setting < FW_SINGLE else counts[0])
-            passed, rest = _PLACEHOLDER_SECOND_PASSED[scenario][setting], second["planned"] - _PLACEHOLDER_SECOND_PASSED[scenario][setting]
-            if setting < FW_SINGLE:
-                infeasible, unsafe = round(rest * 0.55), round(rest * 0.2)
-                continuation = min(round(rest * 0.2), rest - infeasible - unsafe)
-                second_counts = [passed, infeasible, 0, unsafe, continuation, 0,
-                                 rest - infeasible - unsafe - continuation, 0]
-            else:
-                second_counts = [passed, 0, 0, 0, 0, 0, rest, 0]
-            cells[second["id"]][setting][scenario].update(
-                n=second["planned"], classes=second_counts, tokens_k=round(tokens_k * 1.3),
-                minutes=round(minutes * 1.8, 1), lookups=lookups + 2,
-                completed=second["planned"] - second_counts[6] if setting < FW_SINGLE else passed)
+            cell.update(n=sum(counts), classes=classes, tokens_k=tokens_k, minutes=minutes, lookups=lookups,
+                        completed=sum(counts) - counts[4] if setting < FW_SINGLE else counts[0])
+            for second in others:
+                passed = _PLACEHOLDER_SECOND_PASSED[scenario][setting]
+                rest = second["planned"] - passed
+                if setting < FW_SINGLE:
+                    infeasible, unsafe = round(rest * 0.55), round(rest * 0.2)
+                    continuation = min(round(rest * 0.2), rest - infeasible - unsafe)
+                    second_counts = [passed, infeasible, 0, unsafe, continuation, 0,
+                                     rest - infeasible - unsafe - continuation, 0]
+                else:
+                    second_counts = [passed, 0, 0, 0, 0, 0, rest, 0]
+                cells[second["id"]][setting][scenario].update(
+                    n=second["planned"], classes=second_counts, tokens_k=round(tokens_k * 1.3),
+                    minutes=round(minutes * 1.8, 1), lookups=lookups + 2,
+                    completed=second["planned"] - second_counts[6] if setting < FW_SINGLE else passed)
         for offset, setting in enumerate((FW_SINGLE, FW_INCREMENTAL)):
             redo, ra, physical, cca, eq6, proposals = _PLACEHOLDER_CHECKS[scenario][offset]
             cells[main["id"]][setting][scenario].update(
                 redo=redo, proposals=proposals, rejections={"ra": ra, "physical": physical, "cca": cca, "eq6": eq6})
-            cells[second["id"]][setting][scenario].update(
-                redo=redo, proposals=round(proposals * 0.55) if proposals else None,
-                rejections={"ra": round(ra * 0.6), "physical": round(physical * 0.6), "cca": round(cca * 0.65),
-                            "eq6": round(eq6 * 0.5)})
+            for second in others:
+                cells[second["id"]][setting][scenario].update(
+                    redo=redo, proposals=round(proposals * 0.55) if proposals else None,
+                    rejections={"ra": round(ra * 0.6), "physical": round(physical * 0.6), "cca": round(cca * 0.65),
+                                "eq6": round(eq6 * 0.5)})
         cells[main["id"]][FW_INCREMENTAL][scenario]["references"] = dict(_PLACEHOLDER_REFERENCES[scenario])
     return cells
 
