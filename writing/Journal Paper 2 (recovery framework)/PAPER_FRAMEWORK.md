@@ -226,7 +226,9 @@ name the section or equation it implements. If it maps to none, ask the user fir
   - contacts by design come only from recorded facts: a lifted part leaving the recorded support it rests on, the
     final segment of the descent before a release touching the support the part comes to rest on (the path up to
     that segment is checked with no contact allowed, and the descent must end with the part within the recorded
-    contact layer of that support), and an insertion along the recorded mating corridor of its slot;
+    contact layer of that support), and an insertion along the recorded mating corridor of its slot (every motion on
+    the way to the slot release that is an aligned stage inside the corridor carries it, not only the last one: a
+    split descent is the same insertion; November 7, `47b5170`);
   - "resting" is judged within Gazebo's recorded `contact_surface_layer` (1 mm) on either side of the support face:
     a computed set-down lands within numerical residue of the face (0.54 µm inside a belt in the fixtures), and a
     release above that layer is a drop, which is not modelled.

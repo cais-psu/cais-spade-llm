@@ -29,9 +29,10 @@ from cais_spade_llm.ui.recovery_setup import (
 
 logger = logging.getLogger(__name__)
 
-# Captures of the cell with both staging trays 0.30 m north of their first spot (2026-11-05).
+# Captures of the cell with both staging trays 0.30 m north of their first spot (2026-11-05); Part slippage's with the
+# Exit tray 5 cm east and the gear dropped at (0.25, 0.45) (2026-11-07).
 _DEFAULT_OBSERVATIONS = {
-    "Part slippage": "capture_be3e6112cf09475fa6a2d0fb5073af3a",
+    "Part slippage": "capture_6a4195fe2aaa4a72839cdecf895a75ee",
     "Machining breakdown during part processing": "capture_6cd8cd6940fa4691b67fa68a0099ed34",
     "Conveyor breakdown": "capture_460d78e95f8e48bdaa3517076ebc51ee",
     "ur5e-1 breakdown": "capture_4f9097aa46bf450ca0717840262806a4",

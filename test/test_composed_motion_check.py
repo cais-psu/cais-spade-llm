@@ -16,6 +16,8 @@ import pytest
 from cais_spade_llm.recovery_framework import composed_motion_check as cmc
 
 RECORDS = Path(__file__).resolve().parents[1] / "cais_spade_llm/monitor/environment_runs/recovery"
+# The flown v7b programs these tests replay, kept as fixtures after the v7b records were retired (README there).
+FIXTURES = Path(__file__).resolve().parents[1] / "cais_spade_llm/monitor/environment_runs/regression_fixtures/composed_motion"
 MACHINING = "capture_6cd8cd6940fa4691b67fa68a0099ed34"
 PART_SLIPPAGE = "capture_be3e6112cf09475fa6a2d0fb5073af3a"
 UR5E1_BREAKDOWN = "capture_4f9097aa46bf450ca0717840262806a4"
@@ -30,13 +32,13 @@ def _model(capture: str) -> cmc.CapturedMotionModel:
     pytest.importorskip("moveit_msgs.msg")
     pytest.importorskip("cais_lab_robotics.action")
     path = RECORDS / capture / "observations.json"
-    if not path.exists() or not (RECORDS / "draft_compositions" / COMPOSITIONS[capture]).exists():
+    if not path.exists() or not (FIXTURES / COMPOSITIONS[capture] / "composition.json").exists():
         pytest.skip("the recorded capture or composition is not on this machine")
     return cmc.load_captured_motion_model(path)
 
 
 def _rows(capture: str) -> dict[str, dict]:
-    path = RECORDS / "draft_compositions" / COMPOSITIONS[capture] / "composition.json"
+    path = FIXTURES / COMPOSITIONS[capture] / "composition.json"
     return {row["outline_id"]: row for row in json.loads(path.read_text())["accepted_primitive_program"]}
 
 
@@ -546,7 +548,7 @@ def test_a_kmr_program_is_checked_from_the_owner_drive_and_moves_alike(ur5e1_bre
     from cais_spade_llm.recovery_framework.offline_recovery import SavedRecoveryResource
     from cais_spade_llm.recovery_framework.recovery_observations import read_observations
 
-    folder = RECORDS / "draft_compositions" / UR5E1_COMPOSITION
+    folder = FIXTURES / UR5E1_COMPOSITION
     source = json.loads((folder / "outline_request.json").read_text())
     composition = json.loads((folder / "composition.json").read_text())
     request = {key: value for key, value in source.items() if key not in {"multi_turn_session_state", "recovery_debug"}}
@@ -735,7 +737,7 @@ def test_a_composed_program_is_checked_by_moveit_from_the_owner(part_slippage):
     from cais_spade_llm.recovery_framework.offline_recovery import SavedRecoveryResource
     from cais_spade_llm.recovery_framework.recovery_observations import read_observations
 
-    folder = RECORDS / "draft_compositions" / PART_SLIPPAGE_COMPOSITION
+    folder = FIXTURES / PART_SLIPPAGE_COMPOSITION
     source = json.loads((folder / "outline_request.json").read_text())
     composition = json.loads((folder / "composition.json").read_text())
     request = {key: value for key, value in source.items() if key not in {"multi_turn_session_state", "recovery_debug"}}

@@ -1,12 +1,12 @@
 {
   "model": "claude-opus-5-5, reasoning effort medium",
-  "outline_commit": "29e13d2",
-  "composition_commit": "29e13d2",
+  "outline_commit": "29e13d2 (Part slippage: a338cfe)",
+  "composition_commit": "a338cfe (Part slippage: 47b5170; all four replay unchanged at 47b5170)",
   "scenarios": [
-    {"key": "part_slippage", "scenario": "Part slippage", "outline": "draft_f286f2ccca514f02bb15b99a7434405f", "composition": "composition_1c097f870b1b47b1a3c56a7d9726f9e5"},
-    {"key": "conveyor", "scenario": "Conveyor breakdown", "outline": "draft_520ea8f366964c67bebd9659c133e315", "composition": "composition_659e0cb4ffa244e4a42509984955b66e"},
-    {"key": "ur5e1", "scenario": "ur5e-1 breakdown", "outline": "draft_d3a6030384384607903da4f00469d438", "composition": "composition_26c14804483f4c218342ac0097888757"},
-    {"key": "machining", "scenario": "Machining breakdown during part processing", "outline": "draft_b351abd84d434e859a290ca861472403", "composition": "composition_3a25bdf42fdc4852be9dfdf446f31d59"}
+    {"key": "part_slippage", "scenario": "Part slippage", "outline": "draft_355260e1cd5740afaabb37421641e733", "composition": "composition_9e399125f54a4e2ba7b3b9cda41ffdc4"},
+    {"key": "conveyor", "scenario": "Conveyor breakdown", "outline": "draft_520ea8f366964c67bebd9659c133e315", "composition": "composition_aeedc6de4dc24caf80bcf20f419ac02f"},
+    {"key": "ur5e1", "scenario": "ur5e-1 breakdown", "outline": "draft_d3a6030384384607903da4f00469d438", "composition": "composition_d382703a8d2044ecbca07c2276ad5796"},
+    {"key": "machining", "scenario": "Machining breakdown during part processing", "outline": "draft_b351abd84d434e859a290ca861472403", "composition": "composition_4c05a6b139774037837929eafc88a2f5"}
   ],
   "worked_example": {"key": "conveyor", "turns": [11, 12, 13]}
 }

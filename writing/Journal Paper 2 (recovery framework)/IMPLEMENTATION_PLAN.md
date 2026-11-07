@@ -132,9 +132,41 @@ F1, fixed (Stage 5's check bug, `verification.md`). The resting test counted a p
 7. The native check's numbers vary slightly between processes on identical inputs (Part slippage event 2: 3.6596 to
    3.6622 mm), so a refusal's text is not byte-stable across runs.
 
-**Next.** Paid recompose of the four scenarios from the frozen commit (Opus 5.5 medium; the go was given November 6
-~21:00, "Full fix, then paid run", retry once then stop), a paid Part slippage outline on `capture_6a4195fe…` first,
-then Gazebo recordings; status in GAZEBO_QUEUE items 117 onward.
+**Paid runs, November 7 (Opus 5.5 medium; go November 6 ~21:00 "Full fix, then paid run", retry once then stop).**
+Frozen snapshots: `a338cfe` (the fix with F1) and `47b5170` (one more check fix, below). Tokens are the effort measure.
+| Scenario | Outline | Composition | Events | Calls | Tokens |
+|---|---|---|---|---|---|
+| Part slippage | `draft_355260e1…` on `capture_6a4195fe…` (new, from `a338cfe`; 9 calls, 62,507 tokens) | `composition_9e399125…` (`47b5170`) | 5/5 | 13 | 187,726 |
+| Conveyor breakdown | `draft_520ea8f3…` (v7, unchanged) | `composition_aeedc6de…` (`a338cfe`) | 7/7 | 17 | 222,839 |
+| ur5e-1 breakdown | `draft_d3a60303…` (v7, unchanged) | `composition_d382703a…` (`a338cfe`) | 8/8 | 20 | 170,050 |
+| Machining breakdown | `draft_b351abd8…` (v7, unchanged) | `composition_4c05a6b1…` (`a338cfe`) | 24/24 | 59 | 716,793 |
+
+All four replay unchanged offline with D1 on at `47b5170`. The Part slippage outline now sends ur5e-4 home before
+ur5e-3 picks the gear, so the robot-robot contact of the flown v7/v7b order no longer arises. The hand-trimmed Machining demo
+was rebuilt from the v8 composition (`draft_demo_trimmed_c9ed21daaf68`, 18/18, `gazebo_diag/machining_trimmed_demo_v8`).
+
+Finished failed attempts (recovery handoff). Part slippage try 1, `composition_d466b165…` (`a338cfe`, 17 calls, 432,815
+tokens): stopped at event 4 after 3 accepted. Every program the model wrote reached the slot through more than one motion
+(approach -> `target_pose` -> `insert_pose`, where `target_pose` equals `insert_pose`, or approach -> `pre_insert_pose` ->
+`insert_pose`), and the recorded insertion corridor was bound only to the motion right before the release, so the gear's
+0.006 mm contact with `Gear_Shaft_1` on the first descent was refused; the flown structure (approach -> `target_pose` ->
+release) passes. A scoping artifact, not physics. Fixed in `47b5170`: every motion that reaches a slot release through
+motions alone carries the corridor when `prepare_mating_contact` fits it (an aligned vertical stage inside it); one it does
+not fit is checked with no allowance; a descent 2 mm off the shaft axis is still refused. The automatic retry was stopped at
+event 1 (`composition_a9cf72b2…`, 2 calls, 33,856 tokens) and the one retry ran from `47b5170`. Next step: none (both
+failed attempts' outputs are disposable). Paid total tonight: 1,826,586 tokens.
+
+Live finding (Gazebo, not a composition refusal). The first v8 Conveyor recording stopped at event 5 step 5: the composed
+KMR approach at M1 (one straight move to the calculated approach) ended with `joint_a6` on its bound 2.0942, which
+composition accepted through `_continued_path` (MoveIt's state where the refinement stops at a bound); the measured start
+of the next Cartesian motion read past the bound and the worker's `resolve_waypoints` refused it. The ur5e-1 composition's
+KMR pick at M1 and Conveyor event 6 end on the same bound. Runner-only answer for tonight (stage 22): the KMR worker's
+Cartesian start gets the cell's declared MoveIt `FixStartStateBounds` (`start_state_max_bounds_error` 0.1). Open for the
+user: keep accepting motions that end on a joint bound and put the start-state fix into the executor, or refuse such a
+motion in composition (the four flown KMR picks at M1 also end on a bound in MoveIt's IK path, not in the worker's).
+
+**Next.** Gazebo recordings with video of the four v8 compositions and the trimmed demo (GAZEBO_QUEUE item 119), then the
+superseded v7b results and the `capture_f97ce552…` set are retired.
 
 ## Uniform resource model and received states — November 5, 2026 — approved by the user ("all recommendations"), in progress (uncommitted)
 
