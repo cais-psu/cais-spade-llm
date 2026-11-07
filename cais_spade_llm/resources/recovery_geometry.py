@@ -345,12 +345,26 @@ def _part_support_geometry(evidence: dict, state: dict, part_name: str) -> dict:
     return physics
 
 
-def projected_part_support(*, part_name: str, state: dict, evidence: dict) -> dict:
+def projected_part_support(*, part_name: str, state: dict, evidence: dict,
+                           contact_layer_tolerance: bool = False) -> dict:
     """Calculate resting contact for a proposed deposit from exact collision shapes.
 
     Rigid boxes, upright cylinders, and exact captured meshes may contact
     recorded horizontal box faces. Collision AABBs alone never establish
     contact or stability. The contact margin comes from the physics record.
+
+    Args:
+        part_name: The deposited part.
+        state: The projected state holding the part's pose.
+        evidence: The recorded physics, geometry and support policy.
+        contact_layer_tolerance: Count a vertex within the recorded
+            ``contact_surface_layer`` of a support face, on either side, as
+            touching it. Primitive composition sets it for a part a computed
+            motion sets down: its end lands within numerical residue of the
+            face (5.4e-7 m inside a belt in the fixtures), which the exact test
+            here, ``min(contact_min_depth, contact_surface_layer)`` below the
+            face and 1e-12 m above it, does not count. The RA's calls keep the
+            exact test.
     """
     from cais_spade_llm.recovery_framework.geometry import compose, rotate
 
@@ -463,7 +477,9 @@ def projected_part_support(*, part_name: str, state: dict, evidence: dict) -> di
                     raise ValueError("Recorded contact_min_depth is unavailable or invalid")
                 # Gazebo's documented contact allowance is capped by both
                 # surfaces and the world setting. It cannot bridge an air gap.
-                margin = min(depths)
+                margin, above = min(depths), 1e-12
+                if contact_layer_tolerance:
+                    margin, above = max(margin, surface_layer), surface_layer
                 distances = [sum((point[index] - plane[index]) * up[index] for index in range(3)) for point in points]
                 if min(distances) < -margin - 1e-12:
                     continue
@@ -471,7 +487,7 @@ def projected_part_support(*, part_name: str, state: dict, evidence: dict) -> di
                 contact_points = []
                 contact_depths = []
                 for point, distance in zip(points, distances, strict=True):
-                    if distance > 1e-12 or distance < -margin - 1e-12:
+                    if distance > above or distance < -margin - 1e-12:
                         continue
                     local = rotate(inverse_surface, [point[index] - surface_pose[index] for index in range(3)])
                     if all(abs(local[index]) <= sizes[index] / 2 for index in range(3) if index != axis):
@@ -492,7 +508,8 @@ def projected_part_support(*, part_name: str, state: dict, evidence: dict) -> di
                         else evidence['part_support_geometry']['fingerprint']),
                     "excluded_support_resources": physics.get('excluded_support_resources', []),
                     "part_pose": deepcopy(recorded_pose), "policy_fingerprint": recovery_validation_fingerprint(policy),
-                    "contact_margins": contact_margins},
+                    "contact_margins": contact_margins,
+                    **({"contact_layer_tolerance": True} if contact_layer_tolerance else {})},
             physics_evidence=physics)
         return supported
     except (KeyError, ValueError, TypeError, IndexError) as exc:

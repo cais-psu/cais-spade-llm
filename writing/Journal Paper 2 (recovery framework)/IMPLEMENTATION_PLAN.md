@@ -1,5 +1,141 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Primitive composition with MoveIt physical checks — November 6–7, 2026 — decided by the user; built offline in the `composition-physics` worktree, committed on `recovery-framework-journal` November 7 (overnight go); the open choices below were decided overnight and await the user's review
+
+**Why.** Composition checked end points and symbols. A hand-written program passing it said little about physics ("Hand
+check limits", November 2): a ur5e move was checked at its end point and at one point nearest the arm's base axis, no
+arm's joints were carried from step to step, and nothing checked collisions. At the same time fixed rules demanded
+particular moves: a robot's motion right after a transfer had to reach the calculated `retreat_pose` exactly
+(October 30); the KMR had to reach its calculated retreat exactly (October 31), follow its calculated waypoints
+(`4289468`, November 3; `1805c1b`, November 4) and keep its arm at the transport pose before a base move and at the end
+of an event (November 3). The flown v7b Part slippage event 2 drove ur5e-3's gripper through the stopped ur5e-4 (up to
+about 75 mm in MoveIt); Gazebo, with one model and `avoid_collisions` false, did not register it.
+
+**Decisions (user, November 6).**
+- A composition refusal comes only from the primitive's declared contract, from a fact in 𝒦 that is missing or does not
+  match, or from a physical calculation on the recorded models at the program's own parameters. No fixed rule demands
+  particular moves. Code decides, fills or corrects no event value, and no category is invented (`AGENTS.md`).
+- D1: every number in a program's params is a reference into 𝒦 (`context_ref`); strings and booleans stay literal. One
+  finding lists every number the program writes, with its path and value. `move_relative` cannot be used unless its
+  offsets are references.
+- D2: a robot's `resource_location` is the last place it reached. A transfer sets it by its declared effect; a motion
+  whose end locates (a recorded area holding the gripper point, or a named pose's place) sets it; a motion that ends in
+  no recorded area leaves it. The event's statement must equal the result.
+- Collision model: MoveIt itself, on the capture's recorded model and scene (the installed native
+  `preview_recovery_motion` in file mode, with the capture's `native_preview_model/parameters.yaml`). Contact between
+  robots is checked; no allowance between two robots is ever added (the SRDF disables no cross-robot pair).
+- Kept as a stated scope limit: "Only one custody transfer, or a grasp followed by a release, is supported in one event".
+- Part slippage: the drop point moved to (0.15, 0.72) (`cc2f4ac`), clear of the Exit tray and of ur5e-4's arm;
+  re-captured as `capture_f97ce5528f8c4a19a54211c74beec8c0` (queue item 115). The flown v7b Part slippage event 2 is
+  physically invalid and an expected refusal, not a fixture that must pass.
+- Part slippage again (user, November 7 ~03:30: "make the exit more shifted right side and have the gear slipped where
+  it was", approved "Yes, do it"): the Exit tray moved from x 0.50 to x 0.55 and the drop point back to (0.25, 0.45)
+  (`0d9b484`), so the tray's edge is 10 cm from the gear instead of the 5 cm where ur5e-3's open gripper grazed it.
+  Re-captured as `capture_6a4195fe2aaa4a72839cdecf895a75ee` (queue item 117; gear at (0.2499, 0.4500, 1.0250),
+  upright). `capture_f97ce552…` and its outline `draft_496300ab…` are superseded.
+
+**Superseded by these decisions.**
+- October 30 ("Robot pick and place in one event", "Composition follows the outline's stated values"): the transfer at
+  its calculated target and "The motion right after a transfer is its retreat and must reach the calculated retreat
+  pose".
+- October 31 ("KMR composition, the legacy way"): "the KMR must reach the calculated retreat exactly, as the arms must",
+  and a transfer at the owner's calculated target. The LLM still writes no number of its own: under D1 every number is a
+  reference into 𝒦.
+- November 2 ("Three more fixes"): the base-axis point check (`_nearest_base_axis`), now MoveIt's check of the whole
+  path.
+- November 2 item 6 (`4289468`) and November 4 (`1805c1b`): the KMR's calculated-waypoint, pending-pose,
+  arm-at-transport-pose and end-of-event posture rules.
+
+**What changed** (worktree `/home/jongh/recovery_review_1030/wt_composition_physics`, branch `composition-physics` from
+`cc2f4ac`; design `DESIGN_v2.md` and stage reports `stage_0.md` … `stage_4.md` in
+`/home/jongh/recovery_review_1030/composition_physics/`).
+- Stage 0: a replay harness (`harness/replay.py`) and baselines. At `cc2f4ac` all nine fixtures (the four v7 flown
+  compositions, the trimmed Machining demo and the four v7b records) were FEASIBLE, 106 of 106 events.
+- Stage 1: `recovery_framework/composed_motion_check.py`, the MoveIt check: each capture loaded once; every part with its
+  recorded collision; a lean scene verified against `project_preview_scene`; the waypoints the ur5e controller and the
+  KMR worker fly; one native request costs about 1.45 s.
+- Stage 2, the ur5e: the owner runs a physical check and then an advance step after each step its evaluator accepts.
+  MoveIt checks each motion from the joints the program reached, with every robot at its projected joints; the first
+  motion after a grasp carries the part's departure from its recorded support, and the descent before a release the
+  (part, support) contact or the slot's recorded mating corridor. A grasp is the controller's payload check at the actual
+  tool pose; a release must rest on recorded support in a recorded area of one place, or match the stated assembly slot
+  (projected at the controller's snap pose). Removed: the ordering and exact-target rules, the retreat search and its
+  refusals, the nominal lift-contract assertion, the moved/retreat location logic, the trace-fact requirements
+  (`pick_target_grounded`, `release_target_grounded`, `motion_landed_on_target`), the category-gated
+  `release_destination_mismatch`, and the end-point witness and base-axis check of moves. The owner preview states one
+  fact per given parameter. `prepare_support_departure` takes `exact_cylinders` (default off; only composition sets it).
+- Stage 3, the KMR: arm motions by MoveIt with the worker's own limits; the grasp at the worker's precondition (TCP
+  within 0.06 m of the part); the release rest shared with the ur5e; `part_pose` passed to the calculation and refused
+  as the worker refuses it (another part within 0.08 m); `move_base` an existence check (the base controller's own
+  preconditions, its footprint test, and the RA's drive search with the arm at its composed joints and the held part);
+  D2 writes the location's mirrors. Removed: the retreat, pending-pose, waypoint, stale-calculation, ordering,
+  target-equality and `part_pose` rules, the arm-at-transport-pose refusals, and the joint search in the KMR's move
+  capability.
+- Stage 4: D1 (`typed_number_refusal` in `resources/recovery_composition.py`, called before any step resolves); served
+  guidance (the D1 contract fact, where the numbers of the nominal steps are, D2, the KMR's `part_pose`); the diagnostic
+  runner accepts a Conveyor `move_relative` that leaves out `speed_mps`; this note and `PAPER_FRAMEWORK.md`.
+
+**Results** (offline: no Gazebo, no LLM call; ROS 2 sourced for the native check, file mode only; the harness switches
+D1 off with a scratch patch and records what it would say).
+- With D1 off, all nine fixtures replay as in stage 3: every event FEASIBLE except Part slippage event 2 (v7 and v7b),
+  which MoveIt refuses at step 2 with ur5e-3's gripper base about 3.66 mm into ur5e-4's wrist (ur5e-4 still stands at its
+  failure joints): the expected refusal. Every program is the saved one, every outline replay equals its record, and
+  no record was written.
+- D1 lists exactly the 74 numbers the fixtures type, in 64 of the 106 events, and nothing else: `speed` 0.45 on
+  `move_cartesian` (32) and 0.25 on `move_to_named_pose` (6), `z_adjustment_m` 0.0 (24), the Conveyor's `speed_mps` 2.0
+  (3), the v7b Conveyor KMR `move_base` `target_pose` [-0.68, 1.45, 1.571] (3), and v7b Machining event 22's x, y and z
+  (6). Each has a source in 𝒦: the nominal steps in the resource's model
+  (`/resources/<jid>/recovery_des_model/events/<i>/composition_contract/steps/<j>/params/<name>`), ur5e-2's declared
+  route (`controller_config/cartesian_motion/transit_waypoints`), and the event's stated pose
+  (`/outline_event/expected_end_state/pose`). With D1 on, each of the 64 events is refused before any step with that one
+  finding.
+- Tests: the failing test ids equal the stage-0 baselines, with and without ROS sourced.
+- `check_retained.py` on the four reference drafts and `check_retained_trimmed.py` on the trimmed demo print the
+  baseline's lines.
+
+**Stated limits** (also in `PAPER_FRAMEWORK.md`, "Primitive composition checks"): one transfer per event; the KMR's arm
+checks follow MoveIt's IK path, not the worker's `/compute_ik`; a drive is an existence check on the map script's floor,
+not a mirror of the controller's route; the live ur5e executor runs without collision avoidance, so composition is the
+stricter check; contacts by design come only from recorded facts; D1 checks the form of a reference, not its meaning.
+
+**Decided overnight, for the user's review** (the user went to sleep after "do you need decisions from me or can i
+sleep now", answered "no decisions needed"; each choice keeps a refusal to contract, 𝒦 or physics; details in the
+stage reports).
+1. Kept: Stage 3, design choice 1. When the native tool's 1e-13 endpoint refinement stops at a joint on its limit after
+   MoveIt reached the waypoint, the check takes MoveIt's state and goes on (`composed_motion_check._continued_path`):
+   every state of that path was checked within the bounds and free of collision, so refusing it would refuse a
+   numerical limit of the refinement, not physics. Without it the four flown KMR picks at M1 are refused. The
+   alternative, a fix of the refinement in `ros2/`, is left.
+2. Kept: Stage 2, the `exact_cylinders` keyword on the shared `prepare_support_departure` (default off, only
+   composition sets it; the native check measures cylinders exactly), and D2 applying a transfer's declared location
+   effect also when the event does not state the location (a declared primitive effect; a program that moves the robot
+   with the location left out is refused, as before).
+F1, fixed (Stage 5's check bug, `verification.md`). The resting test counted a part as resting only within
+   [-min(`contact_min_depth`, `contact_surface_layer`), +1e-12 m] of its support face, and KET4's recorded
+   `contact_min_depth` is 0, so a valid KMR descent that states a waypoint, ending 0.54 µm inside the belt, was refused.
+   `projected_part_support` takes `contact_layer_tolerance` (default off: the RA's calls are unchanged); composition
+   sets it, so a vertex within the recorded `contact_surface_layer` (1 mm, Gazebo's) of the face on either side touches
+   it, as DESIGN_v2 states. The place-arrival allowance now covers only the final segment of the descent: the path up
+   to its last waypoint is checked first with no contact allowed (`composed_motion_check._approach_refusal`). Probes on
+   v7b Conveyor event 6: a stated midpoint waypoint is FEASIBLE (was refused), a waypoint 5 mm or 20 mm below the target
+   is refused by the belt contact before the arrival; tests in `test/test_composed_motion_check.py`.
+3. Composition now needs ROS 2 sourced (`rclpy`, `moveit_msgs`, `cais_lab_robotics`); about +0.5 GB per process and about
+   2 s per robot motion step (2.5 s for a KMR arm step). Batching consecutive motions is not done.
+4. D1 checks only the form of a reference. `move_relative` cannot be used unless its offsets are references: 𝒦 holds the
+   nominal lift's `dx` and `dy` (0.0, in the model's steps), but no `dz`, which the nominal step calculates when it runs
+   (`travel_z` minus the current z).
+5. The diagnostic runner (`gazebo_diag/diag_run.py`, outside the repository) now accepts a Conveyor `move_relative` that
+   leaves out `speed_mps` when the saved function's speed is the declared transport speed; a stated speed must still
+   equal the saved one, as before (copy `diag_run.py.before_stage21`).
+6. Not wired: pose places (a release onto a support with no receiving slot stays NEEDS_CONTEXT), `move_pose`,
+   `move_joints`, `rotate_joint` and `move_insert` (NEEDS_CONTEXT in composition), `attach_part` and `detach_part`.
+7. The native check's numbers vary slightly between processes on identical inputs (Part slippage event 2: 3.6596 to
+   3.6622 mm), so a refusal's text is not byte-stable across runs.
+
+**Next.** Paid recompose of the four scenarios from the frozen commit (Opus 5.5 medium; the go was given November 6
+~21:00, "Full fix, then paid run", retry once then stop), a paid Part slippage outline on `capture_6a4195fe…` first,
+then Gazebo recordings; status in GAZEBO_QUEUE items 117 onward.
+
 ## Uniform resource model and received states — November 5, 2026 — approved by the user ("all recommendations"), in progress (uncommitted)
 
 **Why.** The Opus 5.5 Machining outline from `08c3df4` stated M2 `resource_state: loaded` on M2's `select_program`
@@ -197,7 +333,9 @@ Composition's writes of this shape, in `project_composition_completion` (`resour
 are gone (user go, October 31; uncommitted). For a value the event leaves out it writes nothing. A stated location takes
 where the program ends (the part's place or null on a pick, the destination on a place, the declared value on a named
 move) and the postcondition compares them, so a wrong stated value is refused; `placed` holds only when the event names
-it. A program that moves the robot with the location left out is refused with the fact.
+it. A program that moves the robot with the location left out is refused with the fact. (November 6, D2: a stated
+location takes the last place the robot reached, not where its program ends; see "Primitive composition with MoveIt
+physical checks".)
 
 Composition's writes to other resources are gone too (user go, November 3; uncommitted). A pick wrote every value that
 recorded the part where it rested (`_source_records`), and a place wrote the receiving slot and, onto the belt, its
@@ -724,7 +862,8 @@ against `35df668`. Previous versions: `/home/jongh/recovery_review_1030/before_l
 - Item 5: `_note_declared_route` adds only "Nominally the controller flies this move through the declared route …". No path
   check. Nothing makes a model follow it.
 - Item 6: `advance_kmr_program` refuses a calculated pose reached without its calculated waypoints, a base move with the arm
-  out or with a calculated pose pending, and a program that ends away from the transport pose.
+  out or with a calculated pose pending, and a program that ends away from the transport pose. (Removed November 6;
+  see "Primitive composition with MoveIt physical checks".)
 - Item 7: a primitive `move_base` with no waypoints checks endpoints only, so the controller plans and sweeps the path.
   Task routes keep their sampled check. No dock or route added. Not run in Gazebo.
 
@@ -774,7 +913,8 @@ through (0, 0.05, 1.5) enters the board while ur5e-4 is there. Only the CCA chec
 
 **Three more fixes and two lookups (November 2, user go; uncommitted in main).**
 - `check_robot_primitive_capability` tests the point of a straight move nearest the arm's base axis (`_nearest_base_axis`, the
-  chain's `root_xyz`) with the same joint witness and refuses with the measured distance. It adds no number. Saved programs:
+  chain's `root_xyz`) with the same joint witness and refuses with the measured distance (replaced November 6 by MoveIt's
+  check of the whole path; see "Primitive composition with MoveIt physical checks"). It adds no number. Saved programs:
   Part slippage event 2 and Machining event 4 are refused at 3.7 and 4.2 cm; Machining events 6 and 10 stand behind event 4 in
   that replay. With the declared route, Part slippage composes 5 of 5.
 - `_mating_pick_orientation` turns a pick about the vertical so the fingers cross the row at the slot. The row comes from the
@@ -955,6 +1095,8 @@ compose primitives from them.
       `d491e1fd`, batch `4db0aa`; hand-written programs, no model call).** All six events now compose. Changes:
       - The motion right after a transfer is its retreat and must reach the calculated retreat pose; later motions may
         take the robot elsewhere (an event may end at a stated pose). Before, the event had to end at the retreat pose.
+        (Superseded November 6: no motion has to reach a calculated pose; MoveIt checks the path the program flies. See
+        "Primitive composition with MoveIt physical checks".)
       - A robot event that states a pose but no location, or a location without a transfer, leaves the robot at the
         place whose recorded area holds its final pose (`multi_turn_diagnostic._place_of`, the function the outline
         projection's `_locate_by_pose` and the RA's `place_at` use); a named posture stays the move_home outcome.
@@ -1150,6 +1292,9 @@ compose primitives from them.
       calculated approach and retreat, and the KMR must reach the calculated retreat exactly, as the arms must. A
       `clearance` pose was added and removed the same day. Do not change the height rule in `release_targets`: at
       Storage it keeps the approach at z 1.16 against 0.74 for release + 7 cm, and all nominal KMR places use it.
+      (Superseded November 6 for composition: no motion has to reach the calculated retreat; the LLM still writes no
+      number of its own, since every number in a program is a reference into 𝒦. See "Primitive composition with
+      MoveIt physical checks".)
       **RA approach and retreat (user go, October 31; uncommitted).** `reach_area` takes `transfer` and, for a mobile
       resource, requires the owner's own heights (`kmr_recovery.transfer_heights`) from the same base as the spot,
       inside the base search. Arms are not covered: their heights come from the pick's context, which an outline does

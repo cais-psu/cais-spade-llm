@@ -149,6 +149,39 @@ def _vertices(collision: dict, model: dict, evidence: dict) -> list[list[float]]
         (*vertex, 0., 0., 0., 1.))[:3])) for vertex in vertices})]
 
 
+def _cylinder(collision: dict, model: dict) -> dict:
+    """Return a recorded cylinder collision in its part model's frame: centre, axis, radius and length."""
+    from cais_spade_llm.recovery_framework.geometry import rotate
+
+    shape = collision["geometry"]
+    radius, length = shape.get("radius"), shape.get("length")
+    if not _number(radius) or not _number(length) or radius <= 0 or length <= 0:
+        raise ValueError("Recorded cylinder geometry is incomplete")
+    local = list(map(float, _compose(_unit_pose(_inverse(model["pose"]), "inverse model pose"),
+                                     _unit_pose(collision["pose"], "collision pose"))))
+    return {"center": local[:3], "axis": rotate(local[3:], [0., 0., 1.]),
+            "radius": float(radius), "length": float(length)}
+
+
+def _cylinder_minimum(affine, cylinder: dict) -> tuple[float, float]:
+    """Bound the least signed distance of a carried cylinder from a support plane.
+
+    Over a cylinder, the least of ``affine`` is its value at the centre less half the length times
+    ``|n . axis|`` and the radius times the plane normal's length across the axis: the formula
+    ``preview_recovery_motion``'s ``SupportDeparture::signed_distance`` evaluates for a cylinder.
+    """
+    normal = affine[:3]
+    centre = _add(_sum(_mul(normal[i], interval(cylinder["center"][i])) for i in range(3)), affine[3])
+    along = _sum(_mul(normal[i], interval(cylinder["axis"][i])) for i in range(3))
+    along = interval(0. if along[0] <= 0. <= along[1] else min(abs(along[0]), abs(along[1])),
+                     max(abs(along[0]), abs(along[1])))
+    across = add(_sum(mul(value, value) for value in normal), neg(mul(along, along)))
+    across = (math.nextafter(math.sqrt(max(0., across[0])), -math.inf),
+              math.nextafter(math.sqrt(max(0., across[1])), math.inf))
+    reach = add(mul(interval(cylinder["length"] / 2), along), mul(interval(cylinder["radius"]), across))
+    return add(centre, neg(reach))
+
+
 def _object_id(collision_id: str, evidence: dict) -> str:
     candidates = []
     for binding in evidence.get("scene_object_bindings", {}).values():
@@ -197,13 +230,17 @@ def _minimum(affine, vertices):
     return min(v[0] for v in values), min(v[1] for v in values)
 
 
-def prepare_support_departure(*, resource_id: str, state: dict, evidence: dict) -> dict:
+def prepare_support_departure(*, resource_id: str, state: dict, evidence: dict,
+                              exact_cylinders: bool = False) -> dict:
     """Bind a just-acquired part to its recorded support without allowing deeper contact.
 
     Args:
         resource_id: Exact owning resource identity.
         state: Projected snapshot immediately after grasp, before departure.
         evidence: Frozen physics, scene mappings and resource geometry.
+        exact_cylinders: Bound a cylinder part's initial penetration by its exact surface, as the native
+            check measures it, instead of refusing it. Only the composition's MoveIt check sets it; its pairs
+            then carry ``part_cylinder`` in place of the ``part_vertices`` the continuous proof reads.
 
     Returns:
         A private contact record, or explicit unavailable evidence. No motion is sent.
@@ -228,7 +265,9 @@ def prepare_support_departure(*, resource_id: str, state: dict, evidence: dict) 
         if projected_support:
             support_state = deepcopy(state)
             support_state["parts"][part_name]["current_pose"] = deepcopy(support["current_pose"])
-            derived = projected_part_support(part_name=part_name, state=support_state, evidence=evidence)
+            derived = projected_part_support(
+                part_name=part_name, state=support_state, evidence=evidence,
+                contact_layer_tolerance=bool(support.get("source", {}).get("contact_layer_tolerance")))
             if (derived.get("status") != "supported" or
                     {key: value for key, value in derived.items() if key != "physics_evidence"} != support):
                 raise ValueError("Projected support no longer matches its established model calculation")
@@ -281,19 +320,25 @@ def prepare_support_departure(*, resource_id: str, state: dict, evidence: dict) 
                     if not length or not math.isclose(abs(sum(a * b for a, b in zip(value, normal, strict=True))) / length,
                                                      1., abs_tol=1e-12, rel_tol=1e-12):
                         raise ValueError("Recorded contact is not normal to the supporting face")
-            vertices = _vertices(own[part_id], model, evidence)
-            signed = _minimum(_affine(attached, normal, point), vertices)
+            if exact_cylinders and own[part_id]["geometry"].get("type") == "cylinder":
+                cylinder = _cylinder(own[part_id], model)
+                signed = _cylinder_minimum(_affine(attached, normal, point), cylinder)
+                shape, geometry = {"part_cylinder": cylinder}, {"cylinder": cylinder}
+            else:
+                vertices = _vertices(own[part_id], model, evidence)
+                signed = _minimum(_affine(attached, normal, point), vertices)
+                shape, geometry = {"part_vertices": vertices}, {"vertices": vertices}
             if signed[0] > 0:
                 raise ValueError("Recorded part is already separated from the requested supporting face")
             pairs.append({"part_object_id": _object_id(part_id, evidence),
                 "support_object_id": _object_id(support_id, evidence),
                 "part_collision_id": part_id, "support_collision_id": support_id,
-                "plane_point": point, "plane_normal": normal, "part_vertices": vertices,
+                "plane_point": point, "plane_normal": normal, **shape,
                 "initial_signed_distance": list(signed), "initial_penetration_bound": max(0., -signed[0]),
                 "recorded_contact_depths": [v for row in records for v in row["depths"]],
                 "source_contact_fingerprint": recovery_validation_fingerprint(records),
                 "geometry_fingerprint": recovery_validation_fingerprint({"part": own[part_id], "support": surface,
-                    "vertices": vertices}), "contact_tolerance_added": 0.})
+                    **geometry}), "contact_tolerance_added": 0.})
         binding = {"state_fingerprint": recovery_validation_fingerprint(state),
             "model_fingerprint": recovery_validation_fingerprint({key: value
                 for key, value in evidence["resource_models"][resource_id].items()

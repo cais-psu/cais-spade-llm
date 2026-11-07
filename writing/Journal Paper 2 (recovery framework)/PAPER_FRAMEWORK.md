@@ -185,6 +185,51 @@ name the section or equation it implements. If it maps to none, ask the user fir
     $s_N$ (see below).
 - **Primitive composition (Section 5.2).** The RA's LLM orders primitives and grounds parameters
   from $\mathcal{K}$, then checks structure, bindings and Eq. 7.
+- **Primitive composition checks (decided by the user, November 6, 2026; built offline November 6–7 in the
+  `composition-physics` worktree and committed on `recovery-framework-journal` on November 7; to be written into
+  Section 5.2).** A refusal comes only from (i) the
+  primitive's declared contract, (ii) a fact in $\mathcal{K}$ that is missing or does not match, or (iii) a physical
+  calculation on the recorded models at the program's own parameters. No fixed rule demands particular moves (no
+  retreat, waypoint or arm-posture rule), and code decides, fills or corrects no event value. The RA checks each
+  authored program $PC_k$ in this order:
+  1. *Contract.* Each step names a primitive of the acting resource's catalog, with parameters its schema accepts,
+     and the primitive's declared preconditions hold on the projected state.
+  2. *Grounding in $\mathcal{K}$ (D1).* Every number in a step's parameters is a reference into $\mathcal{K}$
+     (`context_ref`); strings and booleans stay literal. One finding lists every number the program writes (step,
+     path, value). The check reads only the form of a parameter: a reference establishes where a number comes from,
+     not what it means, and any number in $\mathcal{K}$ passes. `move_relative` cannot be used unless its offsets are
+     references; $\mathcal{K}$ holds no `dz` for the nominal lift, which calculates it when it runs.
+  3. *Eq. 7 through declared effects, with D2.* The declared effects of the steps, applied in order from
+     $v_{i(k)}$, must give the stated $v'_{i(k)}$, and a value the program changes that the event leaves out is
+     refused. Location is a definition (D2): a robot's `resource_location` is the last place it reached, set by a
+     transfer's declared effect, by a named pose's declared place, or by the place whose recorded area holds the
+     gripper where a motion ends; a motion that ends in no recorded area leaves it as it was (persistence, not a
+     measurement). A KMR is at the place whose declared dock its base ends on, or at none. The event's statement must
+     equal the result.
+  4. *Eq. 12 at the authored $\theta$.* $C_\rho(v,v',\theta)=1$ is evaluated by MoveIt on the capture's recorded
+     model and scene (the installed native `preview_recovery_motion` in file mode with the capture's
+     `native_preview_model`): each motion's Cartesian path as its controller flies it, from the joints the program
+     has reached, with every robot at its projected joints (robot–robot contact is checked, and no contact between
+     two robots is ever allowed), held parts attached at their grasp and released parts at rest. A grasp is the
+     controller's own grasp check at the actual tool pose; a release must leave the part resting on recorded support
+     within the recorded contact layer, in a recorded area of one place, or seated in its recorded assembly slot.
+  Refusals state the fact: the contract, the missing or mismatched fact, or the calculation (step, robot, waypoint,
+  each colliding pair with its depth). Stated limits:
+  - one custody transfer, or a grasp then a release of the event's part, in one event;
+  - the KMR's arm checks follow one IK path (MoveIt's `computeCartesianPath`), not the worker's own `/compute_ik`
+    path;
+  - a KMR drive is an existence check: the base controller's own preconditions, its footprint test, and a route on
+    the RA's model of the recorded bodies; the controller chooses its own route at run time, and the floor map is the
+    map script's, not a recorded fact;
+  - the live ur5e executor runs without collision avoidance (`avoid_collisions` false since October 24), so the
+    composition check is stricter than the live run;
+  - contacts by design come only from recorded facts: a lifted part leaving the recorded support it rests on, the
+    final segment of the descent before a release touching the support the part comes to rest on (the path up to
+    that segment is checked with no contact allowed, and the descent must end with the part within the recorded
+    contact layer of that support), and an insertion along the recorded mating corridor of its slot;
+  - "resting" is judged within Gazebo's recorded `contact_surface_layer` (1 mm) on either side of the support face:
+    a computed set-down lands within numerical residue of the face (0.54 µm inside a belt in the fixtures), and a
+    release above that layer is a drop, which is not modelled.
 - **Safety monitoring (Section 5.3).** The RA supplies physical evidence (trajectories, geometry),
   which is mapped to the predefined APs. A local parallel composition covers recovery
   alternatives, running tasks and the steps needed for completion, with monitors starting from
@@ -276,7 +321,9 @@ name the section or equation it implements. If it maps to none, ask the user fir
     own): the CCA cannot prevent them, so a safe state must stay safe under each of them
     (controllability).
   - The outline uses the RA's reach configuration as the robot's posture; the executed trajectory is
-    checked again at composition (Section 5.3).
+    checked again at composition (Section 5.3). Since November 6 composition's own check (Section 5.2, Eq. 12 at
+    the authored $\theta$) runs MoveIt on each composed motion, robots included; the CCA's check of the composed
+    trace against $\Phi$ (Section 5.3) is still not built.
   - Captures are taken with the CCA bypassed, so a failure state may already break a specification
     (Part slippage: ur5e-3's arm, waiting with KET4 at buffer zone 4, reaches into the board area while
     ur5e-4 is over it). The check then stops unless an assumption is declared; for Part slippage the

@@ -398,7 +398,8 @@ def test_saved_release_capability_uses_recorded_custody(captured, held, attachme
     assert row["feasibility_status"] == status
     assert row["evidence"]["command_sent"] is False
     if status == "FEASIBLE":
-        assert "motion_landed_on_target" in row["evidence"]["composition_obligations"]
+        # Composition checks where the released part comes to rest at the step, not a trace fact.
+        assert row["evidence"]["composition_obligations"] == ["where the released part comes to rest"]
 
 
 def test_saved_pose_restoration_preserves_null_and_detects_conflict(captured):
@@ -1061,7 +1062,9 @@ def test_saved_grasp_capability_checks_recorded_tool_part_custody_without_motion
     assert row["feasibility_status"] == status
     assert row["evidence"]["command_sent"] is False
     if status == "FEASIBLE":
-        assert row["evidence"]["composition_obligations"] == ["pick_target_grounded", "motion_landed_on_target"]
+        # Composition checks the grasp with the controller's payload check at the step, not a trace fact.
+        assert row["evidence"]["composition_obligations"] == [
+            "the controller's payload check at the tool pose the program reaches"]
     assert (snapshot, evidence, context) == before
 
 

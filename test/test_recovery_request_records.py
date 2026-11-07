@@ -154,8 +154,9 @@ def test_composition_records_retrieval_rejection_revision_and_cancellation(tmp_p
     case = contract.__wrapped__()
     prepared = _prepared(case)
     prepared["recovery_debug"] = {"artifact_directory": str(tmp_path), "per_turn_debug_dir": str(tmp_path)}
+    # Every number in a program is a reference into the served context, so the count the program binds is served.
+    prepared["grounding_context"]["limit"] = case["grounding_context"]["limit"]
     steps = deepcopy(case["primitive_steps"])
-    steps[1]["params"]["count"] = 3
     event = case["task"]
     reply = {"plan": "Contract fixture", "outline_id": event["outline_id"], "resource_jid": event["resource_jid"]}
     replies = [{**reply, "decision": "primitive_steps_ready", "primitive_steps": list(reversed(steps))},

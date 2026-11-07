@@ -545,8 +545,9 @@ def _kmr_composition_guidance(resource_jid: str) -> str:
         "compute_pick_targets and compute_place_targets publish their calculated values under "
         "event_facts.pick_targets.<part> and event_facts.place_targets.<part>, by the names the decompositions use: "
         "the poses target, approach, lift, retreat and transport, and the waypoints approach_waypoints, "
-        "lift_waypoints, transfer_waypoints and withdraw_waypoints. compute_place_targets reads the place from the event's "
-        f"part_location and the zone it names. The recorded grasp is /resources/{resource_jid}/resource_evidence/"
+        "lift_waypoints, transfer_waypoints and withdraw_waypoints. compute_place_targets reads the place from a given "
+        "part_pose, else from the event's part_location and the zone it names. The recorded grasp is "
+        f"/resources/{resource_jid}/resource_evidence/"
         f"attachment/grasp_transform, and a place's dock is /resources/{resource_jid}/docks/<place>. move_base takes "
         "[x, y, yaw]. "
     )
@@ -577,7 +578,7 @@ def _capability_decomposition_for_resource(
     profile = get_resource_profile(resource_type or "resource")
     # The arm's declared route is served only as the fact under its cartesian_motion lookup, never as a note on a
     # nominal step: the note read as how to fly the move (user decision, 2026-11-06). A straight move the arm cannot
-    # fly is refused by the owner's base-axis check, with that fact.
+    # fly is refused by composition's MoveIt check of its path, with that fact.
     return resource_capability_decompositions(
         profile,
         function_name=function_name,
@@ -2301,10 +2302,16 @@ async def generate_primitive_batch_with_llm_agent(
         if prepared_recovery_request.get("composition_validation_version") == 1:
             prompt_text += (
                 "\n\nRA composition validation: author an ordered program that establishes every intended "
-                "resource and part postcondition from declared effects; a location no primitive declares is read "
-                "from where the program ends. Primitive support is only a union "
-                "of possible contributors, not a sequence or a requirement to use every primitive. "
+                "resource and part postcondition from declared effects. A robot's resource_location is the last "
+                "place it reached: a transfer's declared effect, a named pose's declared place, or the place whose "
+                "recorded area holds the gripper where a motion ends; a motion that ends in no recorded area leaves "
+                "it as it was. A KMR's is the place whose declared dock its base ends on, or none. Primitive support "
+                "is only a union of possible contributors, not a sequence or a requirement to use every primitive. "
                 "Use exact primitive identities and explicit {\"context_ref\": \"/path\"} bindings. "
+                "Every number in params is such a reference, and a number written into a program is refused; "
+                "strings and booleans may be literals. The numbers of a resource's nominal steps are in its "
+                "model, under /resources/<jid>/recovery_des_model/events/<index>/composition_contract/steps/"
+                "<index>/params. "
                 "A contract with controllable false is the resource's own outcome, after after_sec: a step that "
                 "names it sends no command and waits for it. "
                 f"The recovery_des_model is retrievable under /resources/{resource_jid}/recovery_des_model. "

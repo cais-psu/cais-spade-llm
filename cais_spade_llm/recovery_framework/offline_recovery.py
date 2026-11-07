@@ -47,6 +47,10 @@ class SavedRecoveryResource:
                 self.static_capabilities[field] = deepcopy(value)
 
 
+    def recorded_observation_path(self) -> str | None:
+        """Name the saved capture this resource was restored from; composition checks motions on its model."""
+        return self._observations.get("source_path")
+
     def get_recovery_resource_evidence(self) -> dict:
         """Restore supported owner facts from this capture without changing it."""
         recorded = self._resource_evidence_supplement

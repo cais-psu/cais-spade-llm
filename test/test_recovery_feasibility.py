@@ -761,32 +761,40 @@ def _placement_trace():
     ]
 
 
+# The trace facts a grasp or a release once needed (pick_target_grounded, release_target_grounded and
+# motion_landed_on_target) are gone (user decision, 2026-11-06): composition checks the grasp at the tool pose the
+# program reaches and the release where the part comes to rest, so none of these traces is refused for a missing
+# fact. What the sequence check still finds is a fact of the step itself.
+_TRACE_FACT_CODES = {"pick_target_grounding_required", "release_target_grounding_required", "trace_fact_required"}
+
+
 def test_airborne_release_does_not_establish_staging() -> None:
-    findings = _staging_validation(_placement_trace()[-1:])
-    assert {row["constraint_code"] for row in findings} >= {"release_target_grounding_required", "trace_fact_required"}
+    # Whether a release sets its part down is the release check's (where the part rests), not a trace fact's.
+    assert not _staging_validation(_placement_trace()[-1:])
     assert not _staging_validation(_placement_trace())
 
 
 def test_move_away_invalidates_release_motion_witness() -> None:
     steps = _placement_trace()
     steps.insert(2, {"primitive": "move_relative", "resolved_params": {"dx": 0, "dy": 0, "dz": 0.4}})
-    findings = _staging_validation(steps)
-    assert any(row["evidence"].get("required_trace_fact") == "motion_landed_on_target" for row in findings)
+    assert not {row["constraint_code"] for row in _staging_validation(steps)} & _TRACE_FACT_CODES
 
 
 def test_one_target_coordinate_cannot_ground_a_complete_release_pose() -> None:
     steps = _placement_trace()
     steps[1]["context_refs"] = steps[1]["context_refs"][:1]
     steps[1]["params"].update(y=5.0, z=5.0)
-    assert _staging_validation(steps)
+    assert not _staging_validation(steps)
+    # A motion target that is no number is still the step's own fact.
+    steps[1]["resolved_params"]["z"] = "high"
+    assert [row["constraint_code"] for row in _staging_validation(steps)] == ["motion_target_invalid"]
 
 
 def test_swapped_target_coordinates_cannot_establish_a_landing() -> None:
     steps = _placement_trace()
     params = steps[1]["params"]
     params["y"], params["z"] = params["z"], params["y"]
-    assert any(row["evidence"].get("required_trace_fact") == "motion_landed_on_target"
-               for row in _staging_validation(steps))
+    assert not _staging_validation(steps)
 
 
 def test_pick_target_motion_cannot_witness_placement_of_the_same_part() -> None:
@@ -798,8 +806,10 @@ def test_pick_target_motion_cannot_witness_placement_of_the_same_part() -> None:
     motion = steps[2]
     motion["params"] = {axis: {"context_ref": f"event_facts.pick_targets.gear_large.target_pose.{axis}"} for axis in ("x", "y", "z")}
     motion["context_refs"] = [value["context_ref"] for value in motion["params"].values()]
-    assert any(row["evidence"].get("required_trace_fact") == "motion_landed_on_target"
-               for row in _staging_validation(steps))
+    assert not _staging_validation(steps)
+    # The destination the place calculation binds is compared where it is calculated, not by event category.
+    steps[0]["resolved_params"]["destination_location"] = "Exit"
+    assert not _staging_validation(steps)
 
 
 def test_resource_composition_preparation_requires_owner_provider() -> None:

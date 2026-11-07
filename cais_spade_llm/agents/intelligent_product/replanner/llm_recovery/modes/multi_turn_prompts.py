@@ -3608,6 +3608,13 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
         ]
     )
 
+    # Composition validation refuses a number written into params (typed_number_refusal); the older path does not.
+    params_rule = (
+        '- Each step MUST include params. Every number in params is a {"context_ref": ...}; strings and booleans may '
+        "be literals from served context."
+        if session_state.get("composition_validation_version") == 1
+        else '- Each step MUST include params: a {"context_ref": ...} or a literal from served context. Do NOT hardcode pose/offset numeric constants.'
+    )
     sections.extend(
         [
             "",
@@ -3616,7 +3623,7 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             "- Author primitive_steps for ONLY the active DES transition shown above.",
             "- outline_id and resource_jid MUST exactly match the active transition.",
             "- primitive_steps[*].primitive MUST be a name in Visible Primitive Catalog.",
-            '- Each step MUST include params: a {"context_ref": ...} or a literal from served context. Do NOT hardcode pose/offset numeric constants.',
+            params_rule,
             "- compute_pick_targets publishes event_facts.pick_targets.<part>; compute_place_targets publishes event_facts.place_targets.<part>.",
             "- need_context: refs in context_requests, primitive_steps empty.",
             "- primitive_steps_ready: non-empty primitive_steps. need_primitive_revision or primitive_blocked: say why in rationale.",

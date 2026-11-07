@@ -83,6 +83,9 @@ def test_a_release_away_from_a_dock_puts_the_part_at_its_stated_pose(owner_conte
     owner, evidence, snapshot, transform = _held_kmr(owner_context, part)
     pose = [-2.6, 1.1, 1.0, 0., 0., 0., 1.]
     task = {'resource_jid': owner.jid, 'part_name': part}
+    # The other parts stand where the worker's compute_place_targets reads them: away from the requested pose.
+    slots = evidence['inputs']['geometry']['assembly_board']['slots']
+    evidence['observed_parts'] = {name: {'current_pose': [x, y, 1.0, 0., 0., 0., 1.]} for name, (x, y) in slots.items()}
     result = check_kmr_primitive_capability(primitive='compute_place_targets', params={'transform': transform, 'part_pose': pose},
         task=task, recovery_snapshot=snapshot, resource_evidence=evidence)
     assert result['feasibility_status'] == 'FEASIBLE', result
@@ -96,6 +99,33 @@ def test_a_release_away_from_a_dock_puts_the_part_at_its_stated_pose(owner_conte
     missing = check_kmr_primitive_capability(primitive='compute_place_targets', params={'transform': transform},
         task=task, recovery_snapshot=snapshot, resource_evidence=evidence)
     assert missing['feasibility_status'] == 'NEEDS_CONTEXT', missing
+
+
+def test_a_part_pose_is_refused_where_the_kmr_worker_refuses_it(owner_context):
+    from cais_spade_llm.recovery_framework.kmr_recovery import check_kmr_primitive_capability
+
+    part = 'KET4_Square_4mm'
+    owner, evidence, snapshot, transform = _held_kmr(owner_context, part)
+    task = {'resource_jid': owner.jid, 'part_name': part}
+    slots = evidence['inputs']['geometry']['assembly_board']['slots']
+    # The worker reads every part of the board's slots where it is; here they stand on the board at their slots.
+    evidence['observed_parts'] = {name: {'current_pose': [x, y, 1.0, 0., 0., 0., 1.]} for name, (x, y) in slots.items()}
+
+    def place(pose):
+        return check_kmr_primitive_capability(primitive='compute_place_targets',
+            params={'transform': transform, 'part_pose': pose}, task=task, recovery_snapshot=snapshot,
+            resource_evidence=evidence)
+
+    assert place([-2.6, 1.1, 1.0, 0., 0., 0., 1.])['feasibility_status'] == 'FEASIBLE'
+    small = slots['gear_small']
+    occupied = place([small[0] + .05, small[1], 1.0])
+    assert occupied['feasibility_status'] == 'INFEASIBLE'
+    assert occupied['reason'].startswith('The requested part pose is occupied by another part: gear_small at ')
+    assert '0.0500 m from' in occupied['reason'] and 'refuses a part within 0.08 m' in occupied['reason']
+    # A part with no recorded pose is asked for, not passed over.
+    evidence['observed_parts'].pop('gear_large')
+    unknown = place([-2.6, 1.1, 1.0, 0., 0., 0., 1.])
+    assert unknown['feasibility_status'] == 'NEEDS_CONTEXT' and 'observed pose of gear_large' in unknown['reason']
 
 
 def test_the_kmr_heights_the_ra_checks_are_the_ones_its_targets_use(owner_context):
@@ -205,8 +235,10 @@ def test_a_belt_takes_a_part_only_as_its_runtime_does(owner_context):
     model = evidence['environment_models']['Conveyor']
     row = next(row for row in model['assignments']['loading_positions'].values()
                if row['loading_position'] == 'loading_position_2')
+    # The loading position is the one whose recorded area holds the part, as the scene declares its areas.
     physical = {'jids': {'Conveyor': 'belt', 'ur5e-2': 'arm'}, 'environment_models': evidence['environment_models'],
-                'environment_valuation': deepcopy(evidence['environment_valuation'])}
+                'environment_valuation': deepcopy(evidence['environment_valuation']),
+                'geometry': {'regions': evidence['inputs']['scene']['safety_preparation']['regions']}}
 
     def place(values=None, at=row, stated=None, **belt):
         physical['environment_valuation']['Conveyor'].update(values or {})
@@ -224,7 +256,9 @@ def test_a_belt_takes_a_part_only_as_its_runtime_does(owner_context):
     # The belt's model sets the order with the place; code writes it only where the event states it.
     unstated = place(stated={'belt': {f'part_location.{part}': 'loading_position_2'}})[1]['belt']
     assert unstated[f'part_location.{part}'] == 'loading_position_2' and unstated[f'part_order.{part}'] is None
-    # A place between the loading positions is not one of them.
+    # Anywhere in the loading position's area is that position; a place between the loading positions is none.
+    assert place(at={'pose': [row['pose'][0] + .1, row['pose'][1] - .1]})[1]['belt'][f'part_location.{part}'] == \
+        'loading_position_2'
     assert 'failure' in place(at={'pose': [row['pose'][0] + .3, row['pose'][1]]})[0]
     assert place(resource_state='running')[0]['failure'] == 'Conveyor cannot receive a part in its recorded state'
     assert place(availability='unavailable')[0]['status'] == 'INFEASIBLE'
@@ -251,31 +285,34 @@ def test_a_place_reads_a_machine_s_workholding_height_and_a_belt_s_named_positio
 
 
 def test_the_kmr_arm_reaches_from_where_the_base_now_stands():
-    from cais_spade_llm.recovery_framework.kmr_recovery import _pose, check_kmr_primitive_capability
+    from cais_spade_llm.recovery_framework.kmr_recovery import _arm_reaches, _pose, check_kmr_primitive_capability
     from cais_spade_llm.recovery_framework.recovery_observations import read_observations
 
     observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
                                          'capture_4f9097aa46bf450ca0717840262806a4/observations.json'))
     jid = observations['jids']['KMR']
     evidence = deepcopy(observations['prepared_recovery_request']['recovery_resources'][jid]['resource_evidence'])
+    config = evidence['continuous_motion_configuration']
     target = [-4.13, 1.82, 1.155, 1., 0., 0., 0.]
-
-    def reach(base):
-        snapshot = {'held_part': None, 'base_pose': base}
-        return check_kmr_primitive_capability(primitive='move_cartesian', params={'target': target},
-            task={'resource_jid': jid}, recovery_snapshot=snapshot, resource_evidence=evidence)
-
     dock = [-4.7, 2.2, 0., 0., 0., .7071068, .7071068]
     assert _pose(dock)
-    assert reach(dock)['feasibility_status'] == 'FEASIBLE'
-    # From the captured base at Storage, the same spot at M1 is out of the arm's reach.
-    assert reach(evidence['snapshot']['base_pose'])['feasibility_status'] != 'FEASIBLE'
+    # The reach the owner's release calculation and the RA read: from M1's dock the spot is in reach, and from the
+    # captured base at Storage it is out of the arm's reach.
+    assert _arm_reaches(config, dock)(target)
+    assert not _arm_reaches(config, evidence['snapshot']['base_pose'])(target)
+    # The capability calculates no reach of its own: composition checks the move's path with MoveIt from the base
+    # and joints its program has reached.
+    checked = check_kmr_primitive_capability(primitive='move_cartesian', params={'target': target},
+        task={'resource_jid': jid}, recovery_snapshot={'held_part': None, 'base_pose': evidence['snapshot']['base_pose']},
+        resource_evidence=evidence)
+    assert checked['feasibility_status'] == 'FEASIBLE' and 'with MoveIt' in checked['reason']
+    assert checked['evidence']['target'] == target
 
 
 
 
 def test_the_kmr_path_is_resolved_as_its_planner_resolves_it_and_refused_only_when_it_cannot_be_followed():
-    from cais_spade_llm.recovery_framework.kmr_recovery import check_kmr_primitive_capability
+    from cais_spade_llm.recovery_framework.kmr_recovery import _cartesian_path, pose_matrix, with_root
     from cais_spade_llm.recovery_framework.recovery_observations import read_observations
 
     observations = read_observations(str(ROOT / 'cais_spade_llm/monitor/environment_runs/recovery/'
@@ -283,18 +320,23 @@ def test_the_kmr_path_is_resolved_as_its_planner_resolves_it_and_refused_only_wh
     jid = observations['jids']['KMR']
     evidence = deepcopy(observations['prepared_recovery_request']['recovery_resources'][jid]['resource_evidence'])
     dock = [-4.7, 2.2, 0., 0., 0., .7071068, .7071068]
+    names = evidence['inputs']['scene']['KMR']['arm_joint_names']
+    config = with_root(evidence['continuous_motion_configuration'], pose_matrix(dock))
+    limits = {row['name']: dict(zip(('lower', 'upper'), row['position_bounds'], strict=True))
+              for row in config['joints'] if 'position_bounds' in row}
+    state = {'joint_positions': evidence['snapshot']['joint_positions'], 'base_pose': dock}
 
-    def check(params):
-        return check_kmr_primitive_capability(primitive='move_cartesian', params=params, task={'resource_jid': jid},
-            recovery_snapshot={'held_part': None, 'base_pose': dock}, resource_evidence=evidence)
+    def path(waypoints):
+        return _cartesian_path(evidence['inputs']['scene'], config, names, limits, state,
+                               [-4.13, 1.82, 1.155, 1., 0., 0., 0.], waypoints)
 
-    reached = check({'target': [-4.13, 1.82, 1.155, 1., 0., 0., 0.]})
-    path = reached['evidence']['path']
-    assert reached['feasibility_status'] == 'FEASIBLE' and 'Cartesian path resolves' in reached['reason']
-    assert path['ik_samples'] > 1 and path['simulated_duration_s'] > 0 and len(path['final_joint_positions']) == 7
+    # The RA's transfer path check resolves a path as the KMR's planner does (transfer_path_refusal).
+    reached, failure = path(None)
+    assert failure is None
+    assert reached['ik_samples'] > 1 and reached['simulated_duration_s'] > 0 and len(reached['final_joint_positions']) == 7
     # A waypoint no arm configuration reaches cannot be followed, though the end pose itself can be reached.
-    refused = check({'target': [-4.13, 1.82, 1.155, 1., 0., 0., 0.], 'waypoints': [[-4.13, 3.5, 1.155, 1., 0., 0., 0.]]})
-    assert refused['feasibility_status'] == 'INFEASIBLE' and 'cannot follow the Cartesian path' in refused['reason']
+    _, refused = path([[-4.13, 3.5, 1.155, 1., 0., 0., 0.]])
+    assert 'cannot follow the Cartesian path' in refused
 def test_a_kmr_transfer_counts_only_where_its_own_path_reaches_it_in_the_orientation_it_takes():
     from cais_spade_llm.recovery_framework.kmr_recovery import (
         release_heights, tool_height, transfer_orientation, transfer_path_refusal,
@@ -352,6 +394,18 @@ def test_a_kmr_drive_counts_only_where_a_route_keeps_its_arm_clear_of_the_record
     # machine enclosure, as the live controller's sweep check found at (-3.275, 2.440) and (-3.242, 2.115).
     refused = refusal([-2.7, 2.2, north], [-3.25, 1.45, north])
     assert refused.startswith('no route at heading 1.571') and 'M1::enclosure' in refused
+    assert 'its arm, in its transport pose, clear' in refused
+    # Composition searches with the joints its program has left the arm at and the part it holds, which go with the
+    # base the same way; the RA's own calls keep the transport pose.
+    joints = cell.scene['KMR']['parked_arm_configuration']
+    held = {'part_name': 'KET4_Square_4mm', 'grasp_transform': [0., 0., .025, 1., 0., 0., 0.],
+            'local_bounds': cell.part_geometry['KET4_Square_4mm']['local_bounds']}
+    assert drive_route_refusal(cell.scene, config, cell.floor, cell.bodies, [-4.7, 2.2, north], [-2.7, 2.2, north],
+                               joints=joints, held=held) is None
+    carried = drive_route_refusal(cell.scene, config, cell.floor, cell.bodies, [-2.7, 2.2, north],
+                                  [-3.25, 1.45, north], joints=joints, held=held)
+    assert carried.startswith('no route at heading 1.571')
+    assert 'its arm, at its composed joints, holding KET4_Square_4mm, clear' in carried
 
 
 def test_an_empty_belt_keeps_its_movement_and_each_resource_keeps_the_shared_events_it_takes_part_in(owner_context):
@@ -418,10 +472,11 @@ def test_composition_defers_owner_programs_without_primitive_effect_contracts(ow
     task = {"outline_id": "declared_owner", "resource_jid": owner.jid, "event_name": "declared_owner",
             "part_name": None, "expected_start_state": {}, "expected_end_state": {
                 "belt_stopped": True} if rid == "Conveyor" else {"resource_state": "idle"}}
+    # Every number in a program is a reference into the served context, so each step binds its parameters by one.
     result = saved.validate_recovery_primitive_composition(task=task,
-        primitive_steps=[{"primitive": primitive, "params": params}],
+        primitive_steps=[{"primitive": primitive, "params": {name: {"context_ref": f"/given/{name}"} for name in params}}],
         prepared={"recovery_resources": {owner.jid: entry}}, recovery_snapshot=snapshot,
-        part_context={}, grounding_context={})
+        part_context={}, grounding_context={"given": params})
     assert result["feasibility_status"] == "NEEDS_CONTEXT", result
     assert not result["execution_authorized"] and not result["derived_end_state"]
     if rid in {"M1", "Conveyor"}:
@@ -771,10 +826,9 @@ def test_additional_pickup_never_fills_missing_or_conflicting_location_records(o
         pick_targets(scene, 'KET4_Square_4mm', observed, current, base, location='M1')
 
 
-@pytest.mark.parametrize('defect', ['', 'unsupported_target', 'unverified_solver_output'])
-def test_kmr_calculated_endpoint_requires_independent_fk_and_preserves_joint_limits(owner_context, monkeypatch, defect):
+@pytest.mark.parametrize('defect', ['', 'unsupported_target', 'non_unit_target', 'seed_out_of_bounds'])
+def test_kmr_cartesian_capability_calculates_no_endpoint_and_leaves_the_path_to_moveit(owner_context, monkeypatch, defect):
     from cais_spade_llm.recovery_framework import kmr_recovery
-    from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms, representative_pose
 
     names = [f'joint_a{i}' for i in range(1, 8)]
     config = {'root': 'KMR_base_link', 'reference_link': 'tool', 'root_xyz': [0., 0., 0.],
@@ -787,29 +841,34 @@ def test_kmr_calculated_endpoint_requires_independent_fk_and_preserves_joint_lim
     state = {'joint_names': names, 'joint_positions': [0.] * 7, 'held_part': None,
              'current_pose': [0., 0., .7, 0., 0., 0., 1.]}
     target = [0., 0., .7, 0., 0., math.sin(.4), math.cos(.4)]
+    params = {'target': target}
     if defect == 'unsupported_target':
+        # Out of the arm's reach: MoveIt finds that at the step, from the joints the program has reached.
         target[0] = 10.
-    elif defect == 'unverified_solver_output':
-        monkeypatch.setattr(kmr_recovery, '_calculate_cartesian_joints',
-                            lambda *args: {'joint_positions': [0.] * 7, 'solver_status': 1})
+    elif defect == 'non_unit_target':
+        target[6] = 2.
+    elif defect == 'seed_out_of_bounds':
+        params['seed'] = [4.] * 7
+
+    def searched(*args):
+        raise AssertionError('the capability searches no joints')
+
+    monkeypatch.setattr(kmr_recovery, '_calculate_cartesian_joints', searched)
+    monkeypatch.setattr(kmr_recovery, '_cartesian_path', searched)
     evidence = {'inputs': deepcopy(owner_context.inputs), 'snapshot': state,
                 'continuous_motion_configuration': config}
     before = deepcopy(evidence)
-    result = kmr_recovery.check_kmr_primitive_capability(primitive='move_cartesian', params={'target': target},
+    result = kmr_recovery.check_kmr_primitive_capability(primitive='move_cartesian', params=params,
         task={'resource_jid': 'KMR@localhost'}, recovery_snapshot=state, resource_evidence=evidence)
     assert evidence == before
-    if defect:
-        assert result['feasibility_status'] == 'NEEDS_CONTEXT', result
-        return
-    assert result['feasibility_status'] == 'FEASIBLE', result
-    record = result['evidence']['endpoint_calculation']
-    assert record['execution_authorized'] is False and record['collision_or_path_validated'] is False
-    joints = result['evidence']['joint_positions']
-    assert all(-3. <= joint <= 3. for joint in joints)
-    checked = representative_pose(kinematic_transforms(config, {
-        name: interval(value) for name, value in zip(state['joint_names'], joints, strict=True)})['tool'])
-    assert math.dist(checked[:3], target[:3]) < 1e-5
-    assert abs(sum(a*b for a, b in zip(checked[3:], target[3:], strict=True))) > 1 - 1e-10
+    if defect == 'non_unit_target':
+        assert result['feasibility_status'] == 'INFEASIBLE' and 'unit orientation' in result['reason'], result
+    elif defect == 'seed_out_of_bounds':
+        assert result['feasibility_status'] == 'INFEASIBLE' and 'seed' in result['reason'], result
+    else:
+        assert result['feasibility_status'] == 'FEASIBLE', result
+        assert 'composition checks the motion\'s path with MoveIt' in result['reason']
+        assert result['evidence']['target'] == target and 'joint_positions' not in result['evidence']
 
 
 def test_kmr_preparation_records_optional_transform_omission_per_contributor(owner_context):

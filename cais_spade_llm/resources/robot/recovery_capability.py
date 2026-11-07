@@ -868,20 +868,6 @@ def _cartesian_joint_witness(*, pose: dict, resource_jid: str, recovery_snapshot
             "endpoint_calculation": calculated}}
 
 
-def _nearest_base_axis(start: dict, end: dict, axis: list) -> dict | None:
-    """Return the point of a straight move nearest a vertical axis, or None when that is one of the move's ends."""
-    if not all(_number(pose.get(key)) for pose in (start, end) for key in ("x", "y", "z")):
-        return None
-    along = [end["x"] - start["x"], end["y"] - start["y"]]
-    length = along[0] ** 2 + along[1] ** 2
-    if length == 0:
-        return None
-    share = ((axis[0] - start["x"]) * along[0] + (axis[1] - start["y"]) * along[1]) / length
-    if not 0 < share < 1:
-        return None
-    return {key: start[key] + share * (end[key] - start[key]) for key in ("x", "y", "z")}
-
-
 def check_robot_primitive_capability(
     *, primitive: str, params: dict, task: dict, recovery_snapshot: dict,
     resource_evidence: dict, static_capabilities: dict, primitive_catalog: list, resource_jid: str,
@@ -915,8 +901,11 @@ def check_robot_primitive_capability(
             return result("INFEASIBLE", "Recorded controller_ready is false", controller_ready=False)
         if recovery_snapshot.get("controller_ready") is not True:
             return result("NEEDS_CONTEXT", "Recorded controller readiness is unavailable", refs=[root + "/snapshot/controller_ready"])
-        return result("FEASIBLE" if params.get("pose_name") in declarations[0] else "INFEASIBLE",
-                      "Checked pose_name against recorded owner declarations", named_poses=declarations[0])
+        if params.get("pose_name") not in declarations[0]:
+            return result("INFEASIBLE", f"pose_name {params.get('pose_name')!r} is not among the recorded named poses "
+                                        f"{sorted(declarations[0])}", named_poses=declarations[0])
+        return result("FEASIBLE", f"pose_name {params.get('pose_name')!r} is a recorded named pose",
+                      named_poses=declarations[0])
     if primitive in {"grasp_part", "open_gripper", "close_gripper"}:
         if recovery_snapshot.get("controller_ready") is False:
             return result("INFEASIBLE", "Recorded controller_ready is false", controller_ready=False)
@@ -960,7 +949,7 @@ def check_robot_primitive_capability(
             return result("INFEASIBLE", "grasp_part position exceeds recorded gripper limits", gripper=gripper)
         return result("FEASIBLE", "Recorded tool, part and attachment declarations support independent grasp capability",
                       width=width, gripper=gripper, attach=attach,
-                      composition_obligations=["pick_target_grounded", "motion_landed_on_target"])
+                      composition_obligations=["the controller's payload check at the tool pose the program reaches"])
     if primitive in {"compute_pick_targets", "compute_place_targets"}:
         calculated_task = deepcopy(task)
         if "part_name" in params:
@@ -1034,7 +1023,8 @@ def check_robot_primitive_capability(
             if resource_evidence.get("execution_mode") != "simulation":
                 return result("NEEDS_CONTEXT", "assembly_slot requires recorded simulation execution_mode", refs=[root + "/execution_mode"])
         return result("FEASIBLE", "Recorded held part and attachment support independent release capability",
-                      held_part=held, attachment=attachment, composition_obligations=["release_target_grounded", "motion_landed_on_target"])
+                      held_part=held, attachment=attachment,
+                      composition_obligations=["where the released part comes to rest"])
     if primitive not in {"move_cartesian", "move_pose", "move_relative"}:
         return None
     entry = next((row for row in primitive_catalog if row.get("name") == primitive), {})
@@ -1056,29 +1046,10 @@ def check_robot_primitive_capability(
         pose = {axis: current[axis] + params["d" + axis] for axis in ("x", "y", "z")}
     if not all(_number(value) for value in pose.values()):
         return result("NEEDS_CONTEXT", "Cartesian capability requires explicit finite x, y, z")
-    # Reach is the owner's own kinematics, not a declared envelope: some joint configuration within the
-    # recorded bounds puts the tool there. Without a stated orientation the controller keeps its current one.
-    quaternion = ("qx", "qy", "qz", "qw")
-    orientation = params if all(axis in params for axis in quaternion) else _pose_mapping(recovery_snapshot.get("current_pose"))
-    pose.update({axis: orientation[axis] for axis in quaternion if axis in orientation})
-    checked = _cartesian_joint_witness(pose=pose, resource_jid=resource_jid,
-        recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
-        physical_evidence=physical_evidence or {})
-    # The end of a move can have joints while its straight line has none: an arm cannot pass close to its own base axis.
-    rid = next((name for name, jid in (physical_evidence or {}).get("jids", {}).items() if jid == resource_jid), None)
-    base = ((physical_evidence or {}).get("resource_models", {}).get(rid, {}).get("configuration") or {}).get("root_xyz")
-    if checked["feasibility_status"] == "FEASIBLE" and isinstance(base, list):
-        start = _pose_mapping(recovery_snapshot.get("current_pose"))
-        nearest = _nearest_base_axis(start, pose, base)
-        if nearest is not None:
-            passing = _cartesian_joint_witness(pose={**pose, **nearest}, resource_jid=resource_jid,
-                recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
-                physical_evidence=physical_evidence or {})
-            if passing["feasibility_status"] != "FEASIBLE":
-                return result("INFEASIBLE", f"The straight line to ({pose['x']:.3f}, {pose['y']:.3f}, {pose['z']:.3f}) passes "
-                              f"{math.dist((nearest['x'], nearest['y']), base[:2]):.3f} m from this arm's base axis at "
-                              f"({nearest['x']:.3f}, {nearest['y']:.3f}, {nearest['z']:.3f}), where no joint solution was found")
-    return {**checked, "evidence": {**evidence, **checked["evidence"]}}
+    # Where the arm can go is MoveIt's Cartesian path on the capture's recorded model and scene, which composition
+    # checks at this step from the joints the program has reached (composed_motion_check).
+    return result("FEASIBLE", "The recorded planning frame and the motion's coordinates are explicit; composition "
+                              "checks the motion's path with MoveIt on the recorded model and scene", target=pose)
 
 
 def check_outline_motion_capabilities(*, motion_requests: list, static_capabilities: dict,

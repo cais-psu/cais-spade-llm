@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Bind primitive composition validation to resource-owned evidence and evaluators."""
 
+from collections.abc import Callable
 from copy import deepcopy
 from typing import Any
 
@@ -54,11 +55,9 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
             recovery_snapshot=recovery_snapshot, physical_input=physical_input)
         evidence = deepcopy(preparation.get("calculated_resource_evidence", evidence))
 
-    hold, advance, access, picks = None, None, None, {}
+    advance, access, physical_check, picks = None, None, None, {}
 
     def capability(**values) -> dict:
-        if hold is not None and values["primitive"] == "compute_place_targets":
-            hold(values["recovery_snapshot"])
         if access is not None and values["primitive"] in {"start_job", "resume_job"}:
             refusal = access(values["params"])
             if refusal:
@@ -72,6 +71,10 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
         record = (checked.get("evidence") or {}).get("projected_processing_observations")
         if checked.get("feasibility_status") == "FEASIBLE" and isinstance(record, dict):
             evidence["processing_observations"] = deepcopy(record)
+        if physical_check is not None and checked.get("feasibility_status") == "FEASIBLE":
+            checked = physical_check(checked=checked, **values)
+            if checked.get("feasibility_status") != "FEASIBLE":
+                return checked
         if advance is not None and checked.get("feasibility_status") == "FEASIBLE":
             refusal = advance(primitive=values["primitive"], params=values["params"],
                               recovery_snapshot=values["recovery_snapshot"], checked=checked)
@@ -80,23 +83,36 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
         return checked
 
     preview, completion = None, None
+    if entry.get("resource_type") in ("robot", "kmr"):
+        from cais_spade_llm.resources.robot.recovery_composition import RobotEventScene
+
+        scene = RobotEventScene(task=task, program=primitive_steps, grounding_context=grounding_context,
+            resource_id=next((rid for rid, value in physical.get("jids", {}).items() if value == jid), jid),
+            physical_evidence=physical, recovery_des_model=model, motion_model=_capture_motion_model(owner))
+        # Every robot and KMR primitive is commanded, so the n-th checked step is step n of the program.
+        steps = iter(range(len(primitive_steps)))
     if entry.get("resource_type") == "robot":
         from cais_spade_llm.resources.robot.recovery_composition import (
-            hold_picked_part, preview_composition_output, project_composition_completion,
+            advance_robot_program,
+            check_robot_step,
+            preview_composition_output,
+            project_composition_completion,
         )
 
-        def hold(snapshot: dict) -> None:
-            # A place calculated after the event's own grasp reads the part as that grasp holds it.
-            hold_picked_part(evidence, task=task, recovery_des_model=model, recovery_snapshot=snapshot,
-                             pick_target=picks.get(task.get("part_name")))
+        def physical_check(*, checked: dict, primitive: str, params: dict, recovery_snapshot: dict,
+                           **_unused) -> dict:
+            return check_robot_step(evidence, picks, scene, index=next(steps), primitive=primitive, params=params,
+                                    recovery_snapshot=recovery_snapshot, checked=checked)
+
+        def advance(**values) -> str | None:
+            return advance_robot_program(evidence, picks, task=task, **values)
 
         def preview(**values) -> dict:
-            if values["primitive"] == "compute_place_targets":
-                hold(values["recovery_snapshot"])
             output = preview_composition_output(**values, task=task, resource_evidence=evidence,
                                                 physical_evidence=physical)
-            if values["primitive"] == "compute_pick_targets" and output.get("status") == "calculated":
-                picks[task.get("part_name")] = deepcopy(output["output"])
+            if values["primitive"] in {"compute_pick_targets", "compute_place_targets"} \
+                    and output.get("status") == "calculated":
+                picks.setdefault(values["primitive"], {})[task.get("part_name")] = deepcopy(output["output"])
             return output
 
         def completion(**values) -> dict:
@@ -105,8 +121,17 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
                 locate_pose=lambda pose, stated=None: _locate(pose, prepared, jid, stated))
     elif entry.get("resource_type") == "kmr":
         from cais_spade_llm.recovery_framework.kmr_composition import (
-            advance_kmr_program, preview_kmr_output, project_kmr_completion,
+            advance_kmr_program, check_kmr_step, preview_kmr_output, project_kmr_completion,
         )
+
+        # The floor the KMR's drives are checked on is the map script's, frozen into the request (not a recorded fact).
+        geometry = prepared.get("diagnostic_scene_geometry") or {}
+        floor = {key: geometry[key] for key in ("floor_extent_xy", "floor_obstacles_xy") if key in geometry}
+
+        def physical_check(*, checked: dict, primitive: str, params: dict, recovery_snapshot: dict,
+                           **_unused) -> dict:
+            return check_kmr_step(evidence, scene, floor, index=next(steps), primitive=primitive, params=params,
+                                  recovery_snapshot=recovery_snapshot, checked=checked)
 
         def advance(**values) -> str | None:
             return advance_kmr_program(evidence, picks, task=task, **values)
@@ -115,7 +140,7 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
             return preview_kmr_output(picks, task=task, **values)
 
         def completion(**values) -> dict:
-            return project_kmr_completion(**values, targets=picks, resource_evidence=evidence, physical_evidence=physical)
+            return project_kmr_completion(**values, resource_evidence=evidence, physical_evidence=physical)
     elif isinstance(((evidence.get("inputs") or {}).get("scene") or {}).get(evidence.get("resource_id"), {}).get(
             "simulation_transport"), dict):
         from cais_spade_llm.recovery_framework.transport_composition import (
@@ -170,6 +195,34 @@ def validate_owner_composition(owner: Any, *, task: dict, primitive_steps: list,
         grounding_context=grounding_context, primitive_catalog=catalog,
         validate_primitive=capability, preview_primitive=preview, project_completion=completion,
         captured_snapshot=entry.get("recovery_snapshot"), recorded_facts=recorded_facts)
+
+
+def _capture_motion_model(owner: Any) -> Callable[[], Any]:
+    """Return a loader of the MoveIt model of the capture the owner's evidence was recorded in.
+
+    The model loads on a program's first motion and stays cached per process (``load_captured_motion_model``).
+    An owner without a saved capture, such as a live resource, has no recorded model to check motions on.
+    """
+    from cais_spade_llm.recovery_framework import composed_motion_check as motion
+
+    recorded = getattr(owner, "recorded_observation_path", None)
+    path = recorded() if callable(recorded) else None
+
+    def load() -> Any:
+        if not path:
+            raise motion.MissingMotionContext(
+                "the composition's MoveIt check needs the capture's recorded model and scene, and this owner has "
+                "no saved capture")
+        try:
+            return motion.load_captured_motion_model(path)
+        except ImportError as exc:
+            raise motion.MotionCheckError("The composition's MoveIt check needs ROS 2 sourced (rclpy, moveit_msgs, "
+                                          f"cais_lab_robotics): {exc}") from exc
+        except (OSError, KeyError, ValueError) as exc:
+            raise motion.MissingMotionContext(f"the capture's recorded MoveIt model and scene cannot be loaded: "
+                                              f"{exc}") from exc
+
+    return load
 
 
 def _gripper_point(pose: dict, prepared: dict, jid: str) -> dict | None:

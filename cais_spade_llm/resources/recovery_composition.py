@@ -52,6 +52,46 @@ def resolve_composition_value(value: Any, context: dict) -> Any:
     return deepcopy(value)
 
 
+def typed_number_refusal(primitive_steps: list) -> dict | None:
+    """Return the one finding that lists every number a program writes into its params, or None when it writes none.
+
+    Every number in a step's params is a ``{"context_ref": "/path"}`` reference into the served context (user decision,
+    2026-11-06); strings and booleans stay literal. The check reads only the form of each parameter, before any
+    reference is resolved: a reference says where a number comes from, not what it means.
+
+    Args:
+        primitive_steps: The authored program, in order.
+
+    Returns:
+        ``{"reason", "typed_numbers"}``: the refusal text and each number's ``step_index``, ``primitive``, ``path`` and
+        ``value``, in program order; or None.
+    """
+    typed: list[dict] = []
+
+    def walk(value: Any, path: str, index: int, primitive: Any) -> None:
+        if isinstance(value, dict):
+            if "context_ref" in value:
+                return
+            for name, item in value.items():
+                walk(item, f"{path}.{name}", index, primitive)
+        elif isinstance(value, list):
+            for position, item in enumerate(value):
+                walk(item, f"{path}[{position}]", index, primitive)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            typed.append({"step_index": index, "primitive": primitive, "path": path, "value": value})
+
+    for index, step in enumerate(primitive_steps or []):
+        if isinstance(step, dict):
+            walk(step.get("params"), "params", index, step.get("primitive"))
+    if not typed:
+        return None
+    listed = "; ".join(f"step {row['step_index']} {row['primitive']} {row['path']} {row['value']!r}" for row in typed)
+    count = f"{len(typed)} number" + ("s" if len(typed) > 1 else "")
+    return {"reason": f"The program writes {count} in params, where every number is a "
+                      f"{{\"context_ref\": \"/path\"}} into the served context: {listed}",
+            "typed_numbers": typed}
+
+
 def composition_start_views(*, session: dict, prepared: dict, task: dict) -> tuple[dict, dict]:
     """Restore the checkpoint plus accepted composition effects in outline order."""
     jid, part = task["resource_jid"], task.get("part_name")
@@ -261,12 +301,12 @@ def validate_recovery_primitive_composition(
     }
     recovery_snapshot = {**recovery_snapshot, **deepcopy(recorded_facts or {})}
 
-    def finish(status: str, reason: str, *, index: int | None = None) -> dict:
+    def finish(status: str, reason: str, *, index: int | None = None, **facts: Any) -> dict:
         result.update(feasibility_status=status, allowed=status == "FEASIBLE", reason=reason)
         if status != "FEASIBLE":
             result["findings"].append({"constraint_owner": "resource", "step_index": index,
                 "constraint_code": "composition_missing_context" if status == "NEEDS_CONTEXT" else "composition_infeasible",
-                "reason": reason})
+                "reason": reason, **deepcopy(facts)})
         result["evidence_fingerprint"] = recovery_validation_fingerprint(result)
         return deepcopy(result)
 
@@ -319,6 +359,11 @@ def validate_recovery_primitive_composition(
             if captured is not contracts._MISSING and contracts._equal(captured, stated) and not contracts._equal(captured, actual):
                 continue
             return finish("INFEASIBLE", f"Starting fact {field!r} conflicts with the validated composition prefix")
+    # Every number in params is a reference; the whole program is read before any step resolves, so the one finding
+    # lists every number it writes.
+    typed = typed_number_refusal(primitive_steps)
+    if typed:
+        return finish("INFEASIBLE", typed["reason"], typed_numbers=typed["typed_numbers"])
 
     context = deepcopy(grounding_context)
     context["event_facts"] = {}

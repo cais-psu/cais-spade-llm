@@ -90,34 +90,8 @@ ROBOT_PRIMITIVE_TRACE_FACT_MAP = {
             {"fact": "release_target_grounded", "part_param": "part_name"},
         ],
     },
-    "grasp_part": {
-        "requires": [
-            {
-                "fact": "pick_target_grounded",
-                "part_param": "part_name",
-                "when": "acquisition",
-            },
-            {
-                "fact": "motion_landed_on_target",
-                "part_param": "part_name",
-                "when": "acquisition",
-            },
-        ],
-    },
-    "release_part": {
-        "requires": [
-            {
-                "fact": "release_target_grounded",
-                "part_param": "part_name",
-                "when": "release_to_target",
-            },
-            {
-                "fact": "motion_landed_on_target",
-                "part_param": "part_name",
-                "when": "release_to_target",
-            },
-        ],
-    },
+    # A grasp and a release require no trace fact: composition checks the grasp at the tool pose the program
+    # reaches and the release where the part comes to rest (robot.recovery_composition.check_robot_step).
 }
 
 
@@ -272,14 +246,9 @@ ROBOT_EVENT_FACT_CONTRACT_MAP = {
 }
 
 
-ROBOT_PRIMITIVE_EVENT_TARGET_CONTRACT_MAP = {
-    "compute_place_targets": {
-        "param_fields": ["destination_location"],
-        "event_families": ["stage", "place", "assemble", "pick_place"],
-        "conditions": ["release_to_target"],
-        "constraint_code": "release_destination_mismatch",
-    },
-}
+# compute_place_targets' destination is compared with the place the event states by the owner's calculation
+# (robot.recovery_composition._parameter_facts), so no primitive carries an event-target contract here.
+ROBOT_PRIMITIVE_EVENT_TARGET_CONTRACT_MAP: dict[str, dict[str, Any]] = {}
 
 
 def _robot_empty(value: Any) -> bool:
@@ -809,7 +778,6 @@ def robot_primitive_sequence_validator(
     start_held_token = _robot_token(start_held)
     end_held_token = _robot_token(end_held)
     target_location = _robot_target_location_for_event(outline_event)
-    event_family = _robot_event_family(outline_event)
     gripper_location = _robot_gripper_location(resource_jid)
 
     acquisition_required = bool(
@@ -840,80 +808,11 @@ def robot_primitive_sequence_validator(
         grounding_context=grounding_context,
     )
 
-    target_alias_to_part: dict[str, str] = {}
-    target_alias_primitive: dict[str, str] = {}
-
     for step_result in trace_metadata.get("step_results") or []:
         if not isinstance(step_result, dict):
             continue
         primitive = _robot_token(step_result.get("primitive"))
         params = dict(step_result.get("resolved_params") or {})
-        authored_params = dict(step_result.get("params") or {})
-        context_refs = [
-            str(ref or "").strip()
-            for ref in (step_result.get("context_refs") or [])
-            if str(ref or "").strip()
-        ]
-        event_fact_path = str(step_result.get("event_fact_path") or "").strip()
-
-        if (
-            primitive in {"compute_pick_targets", "compute_place_targets", "detect_parts"}
-            and event_fact_path
-        ):
-            part_token = _robot_token(params.get("part_name") or authored_params.get("part_name"))
-            if part_token:
-                normalized_fact = event_fact_path.replace("/", ".").strip(".")
-                fact_parts = [seg for seg in normalized_fact.split(".") if seg]
-                if len(fact_parts) >= 3 and fact_parts[0] == "event_facts":
-                    alias = ".".join(fact_parts[1:3])
-                    target_alias_to_part[alias] = part_token
-                    target_alias_primitive[alias] = primitive
-
-        if primitive in {
-            "move_cartesian", "move_pose", "move_relative", "move_to_named_pose",
-            "move_joints", "rotate_joint", "move_insert", "compute_pick_targets", "compute_place_targets",
-        }:
-            # A previously reached pose is not evidence after moving away or
-            # replacing the target. Re-establish it from this step's bindings.
-            trace_facts = {
-                key: sources for key, sources in trace_facts.items()
-                if key[0] != "motion_landed_on_target"
-            }
-        if primitive in {"move_cartesian", "move_pose"}:
-            coordinate_refs = {}
-            for axis in ("x", "y", "z"):
-                binding = authored_params.get(axis)
-                ref = binding.get("context_ref") if isinstance(binding, dict) else binding
-                coordinate_refs[axis] = str(ref or "").replace("/", ".").strip(".")
-            for ref in context_refs:
-                normalized = ref.replace("/", ".").strip(".")
-                parts = [seg for seg in normalized.split(".") if seg]
-                if len(parts) < 4 or parts[0] != "event_facts":
-                    continue
-                alias = ".".join(parts[1:3])
-                if "target_pose" not in parts[3:]:
-                    continue
-                part_token = target_alias_to_part.get(alias)
-                if release_to_target_required and target_alias_primitive.get(alias) != "compute_place_targets":
-                    continue
-                if acquisition_required and target_alias_primitive.get(alias) != "compute_pick_targets":
-                    continue
-                if not part_token or not all(
-                    coordinate_refs[axis] == f"event_facts.{alias}.target_pose.{axis}"
-                    for axis in ("x", "y", "z")
-                ):
-                    continue
-                _robot_add_trace_fact(
-                    trace_facts,
-                    fact="motion_landed_on_target",
-                    part_name=part_token,
-                    source={
-                        "source": "motion_witness",
-                        "primitive": primitive,
-                        "step_index": step_result.get("step_index"),
-                        "alias": alias,
-                    },
-                )
 
         if primitive == "move_to_named_pose":
             pose_name = _robot_token(params.get("pose_name"))
@@ -927,60 +826,6 @@ def robot_primitive_sequence_validator(
                         evidence={
                             "named_pose": pose_name,
                             "available_named_poses": sorted(named_poses),
-                        },
-                    )
-                )
-
-        event_target_contract = dict(ROBOT_PRIMITIVE_EVENT_TARGET_CONTRACT_MAP.get(primitive) or {})
-        contract_param_fields = list(event_target_contract.get("param_fields") or [])
-        contract_event_families = {
-            str(family).strip().lower()
-            for family in (event_target_contract.get("event_families") or [])
-            if str(family).strip()
-        }
-        contract_conditions = {
-            str(token).strip().lower()
-            for token in (event_target_contract.get("conditions") or [])
-            if str(token).strip()
-        }
-        target_contract_applies = bool(
-            target_location
-            and contract_param_fields
-            and (
-                ("release_to_target" in contract_conditions and release_to_target_required)
-                or (contract_event_families and event_family in contract_event_families)
-            )
-        )
-        if target_contract_applies:
-            authored_destination = ""
-            authored_field_name = ""
-            for field_name in contract_param_fields:
-                authored_destination = _robot_token(params.get(field_name)) or _robot_token(
-                    authored_params.get(field_name)
-                )
-                if authored_destination:
-                    authored_field_name = field_name
-                    break
-            if authored_destination and _robot_lower(authored_destination) != _robot_lower(
-                target_location,
-            ):
-                findings.append(
-                    _robot_sequence_finding(
-                        outline_event=outline_event,
-                        constraint_code=str(
-                            event_target_contract.get("constraint_code")
-                            or "primitive_event_target_mismatch"
-                        ),
-                        reason=(
-                            f"authored {primitive}.{authored_field_name}="
-                            f"{authored_destination!r} does not match active event target "
-                            f"{target_location!r}"
-                        ),
-                        step_result=step_result,
-                        evidence={
-                            "authored_target_field": authored_field_name,
-                            "authored_target_value": authored_destination,
-                            "active_event_target": target_location,
                         },
                     )
                 )

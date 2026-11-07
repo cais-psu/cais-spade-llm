@@ -12,13 +12,24 @@ from cais_spade_llm.recovery_framework.geometry import compose, quaternion, rota
 from cais_spade_llm.resources.kinematic_reach import (  # noqa: F401
     JOINT_SEARCH_CACHE as _cartesian_joint_calculation_cache,
 )
-from cais_spade_llm.resources.kinematic_reach import (
+from cais_spade_llm.resources.kinematic_reach import (  # noqa: F401
     bounded_joint_search as _calculate_cartesian_joints,
 )
 from cais_spade_llm.resources.kinematic_reach import pose_matrix, reach, with_root
 
 # How far a release's approach and retreat may move toward the arm, in order, when straight above is out of reach.
 RELEASE_SHIFTS_M = (.02, .04, .06, .08, .1)
+
+# Limits the kmr_gazebo worker refuses at. They are literals in its code (kmr_gazebo.py), not recorded facts, and
+# composition states them so: grasp_part needs the TCP within GRASP_REACH_M of the observed part origin ("KMR grasp
+# requires the part at the gripper") and a given ``initial`` pose within GRASP_INITIAL_TOLERANCE_M of the observed
+# part ("Part moved before grasp"); confirm_carrying, before a loaded drive, needs the TCP within
+# CARRYING_TCP_TOLERANCE_M of the transport pose; compute_place_targets refuses a part_pose with another part within
+# PART_POSE_CLEARANCE_M of it ("The requested part pose is occupied by another part").
+GRASP_REACH_M = .06
+GRASP_INITIAL_TOLERANCE_M = .01
+CARRYING_TCP_TOLERANCE_M = .015
+PART_POSE_CLEARANCE_M = .08
 
 
 def _vector(value, length: int) -> bool:
@@ -432,6 +443,36 @@ def _release_pose(params: dict, task: dict, state: dict, transform: list, resour
                                physical_evidence=physical_evidence)['part_pose']
 
 
+def _part_pose_refusal(evidence: dict, part: str, destination: list,
+                       physical_evidence: dict | None) -> tuple[str, str] | None:
+    """Refuse a requested part pose as the worker's compute_place_targets does, or return None.
+
+    The worker refuses a pose with any other part of the assembly board's slots within PART_POSE_CLEARANCE_M of it,
+    at the part's observed pose; here that pose is the one ``observed_parts`` records or an accepted program
+    projected, else the capture's recorded one.
+
+    Returns:
+        ``(status, reason)``: INFEASIBLE with the worker's text, the part and its distance, or NEEDS_CONTEXT when a
+        part's pose is not recorded.
+    """
+    slots = (((evidence.get('inputs') or {}).get('geometry') or {}).get('assembly_board') or {}).get('slots') or {}
+    recorded = ((physical_evidence or {}).get('snapshot') or {}).get('parts') or {}
+    for other in slots:
+        if other == part:
+            continue
+        row = (evidence.get('observed_parts') or {}).get(other) or recorded.get(other) or {}
+        pose = _pose_list(row.get('observed_pose', row.get('current_pose')))
+        if not isinstance(pose, list) or len(pose) < 3 or not _vector(pose[:3], 3):
+            return 'NEEDS_CONTEXT', f'The part_pose check needs the observed pose of {other}'
+        distance = math.dist(pose[:3], destination[:3])
+        if distance < PART_POSE_CLEARANCE_M:
+            return 'INFEASIBLE', (f'The requested part pose is occupied by another part: {other} at '
+                                  f'{[round(value, 4) for value in pose[:3]]} is {distance:.4f} m from '
+                                  f'{[round(value, 4) for value in destination[:3]]}, and the KMR worker refuses a '
+                                  f'part within {PART_POSE_CLEARANCE_M} m (its code constant, not a recorded fact)')
+    return None
+
+
 def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
                                    recovery_snapshot: dict, resource_evidence: dict,
                                    physical_evidence: dict | None = None) -> dict:
@@ -493,6 +534,10 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
             destination = _release_pose(params, task, state, transform, evidence, physical_evidence)
         except (KeyError, ValueError, TypeError, IndexError) as exc:
             return missing('KMR placement calculation lacks recorded input: ' + str(exc), 'inputs/scene', 'snapshot')
+        if params.get('part_pose') is not None:
+            occupied = _part_pose_refusal(evidence, part, destination, physical_evidence)
+            if occupied is not None:
+                return answer(*occupied)
         try:
             if destination is not None:
                 source = task.get('expected_end_state', {}).get('part_location', 'part_pose')
@@ -595,53 +640,11 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
             return answer('INFEASIBLE', 'KMR Cartesian target requires xyz/xyzw with unit orientation')
         if params.get('seed') is not None and (not _vector(params['seed'], 7) or not bounded_joints(names, params['seed'], limits)):
             return answer('INFEASIBLE', 'KMR Cartesian seed violates the seven-joint declaration')
-        from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms, representative_pose
-        from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
-
-        # The recorded chain stands where the base was captured; an accepted move_base has left it since.
-        base = state.get('base_pose')
-        if _pose(base) and 'root_xyz' in config and (list(base[:3]) != list(config['root_xyz'])
-                                                     or list(base[3:]) != list(config.get('root_quaternion', []))):
-            config = with_root(config, pose_matrix(base))
-        candidates = [joints]
-        if params.get('seed') is not None:
-            candidates.append(params['seed'])
-        for recorded in evidence.get('primitive_capability_evidence', {}).get(primitive, []):
-            if (recorded.get('configuration_fingerprint') == recovery_validation_fingerprint(config)
-                    and recorded.get('source') and recorded.get('params') == params
-                    and _vector(recorded.get('joint_positions'), 7)):
-                candidates.append(recorded['joint_positions'])
-        calculated = None
-        for index in range(2):
-            if index == 1:
-                calculated = _calculate_cartesian_joints(config, names, target,
-                    [*candidates, kmr.get('task_execution', {}).get('carrying_arm_configuration'),
-                     *kmr.get('task_execution', {}).get('ik_seed_configurations', [])], limits)
-                if calculated is None:
-                    break
-                candidates = [calculated['joint_positions']]
-            for candidate in candidates:
-                if not bounded_joints(names, candidate, limits):
-                    continue
-                transforms = kinematic_transforms(config, {name: interval(value)
-                    for name, value in zip(names, candidate, strict=True)})
-                pose = representative_pose(transforms[config['reference_link']])
-                # Independently check a calculated witness with the same owner
-                # FK used for recorded witnesses; a solver status is not proof.
-                if (math.dist(pose[:3], target[:3]) <= 1e-5
-                        and abs(sum(a*b for a, b in zip(pose[3:], target[3:], strict=True))) >= 1 - 1e-10):
-                    path, failure = _cartesian_path(scene, config, names, limits, state, target, params.get('waypoints'))
-                    if failure:
-                        return answer('INFEASIBLE', failure, joint_positions=deepcopy(candidate))
-                    return answer('FEASIBLE',
-                        ('Calculated' if calculated else 'Recorded') + ' KMR joint witness reproduces the requested TCP by owner FK'
-                        + ('; the Cartesian path resolves as the KMR plans it' if path else '; motion interval remains separate'),
-                        joint_positions=deepcopy(candidate), calculated_pose=pose,
-                        configuration_fingerprint=recovery_validation_fingerprint(config),
-                        **({'path': path} if path else {}),
-                        **({'endpoint_calculation': calculated} if calculated else {}))
-        return missing('Bounded KMR endpoint search found no independently verified joint witness; reachability is unresolved',
-                       'primitive_capability_evidence/' + primitive)
+        # Where the arm can go is MoveIt's Cartesian path on the capture's recorded model and scene, which composition
+        # checks at this step from the joints and the base the program has reached (composed_motion_check), with the
+        # worker's own route and limits.
+        return answer('FEASIBLE', "The KMR's target is an explicit unit pose; composition checks the motion's path "
+                                  'with MoveIt on the recorded model and scene', target=deepcopy(target))
     return missing('KMR owner calculation requires additional recorded parameters', 'state', 'primitive_capability_evidence/' + primitive)
 
 
@@ -772,15 +775,17 @@ def transfer_path_refusal(scene: dict, config: dict, base_pose: list, approach: 
 ARM_SWEEP_RADIUS_M = 0.08
 
 
-def drive_route_refusal(scene: dict, config: dict, floor: dict, bodies: dict, start: list, target: list) -> str | None:
+def drive_route_refusal(scene: dict, config: dict, floor: dict, bodies: dict, start: list, target: list, *,
+                        joints: list | None = None, held: dict | None = None) -> str | None:
     """Return why the KMR cannot drive from ``start`` to ``target`` with its arm clear, or None when it can.
 
     The KMR drives with its arm in its declared transport pose (``parked_arm_configuration``), which turns with the
-    base. Its base controller can always translate at the target heading. This looks for such a route: grid poses
-    anchored at the start, each with the footprint and its margin on free floor (``footprint_obstacles``) and with
-    the arm, the line through its link frames widened by ``ARM_SWEEP_RADIUS_M``, clear of every recorded static body;
-    the start and the target keep the base checks of their own (a declared dock, a stated pose's fit) and need only
-    the arm clear. The base first turns in place at the start. It finds whether a route exists and writes none.
+    base, unless ``joints`` give the arm a composed program has left it at. Its base controller can always translate
+    at the target heading. This looks for such a route: grid poses anchored at the start, each with the footprint and
+    its margin on free floor (``footprint_obstacles``) and with the arm, the line through its link frames widened by
+    ``ARM_SWEEP_RADIUS_M``, clear of every recorded static body; the start and the target keep the base checks of
+    their own (a declared dock, a stated pose's fit) and need only the arm clear. The base first turns in place at
+    the start. It finds whether a route exists and writes none.
 
     Args:
         scene: The captured owner configuration.
@@ -789,6 +794,9 @@ def drive_route_refusal(scene: dict, config: dict, floor: dict, bodies: dict, st
         bodies: The recorded Gazebo models with their collision bounds.
         start: The base pose ``[x, y, yaw]`` the drive starts from.
         target: The base pose ``[x, y, yaw]`` it ends at.
+        joints: The arm joints to drive with; by default the declared transport pose, as the RA reads every drive.
+        held: A part the arm holds, ``part_name`` with its ``grasp_transform`` at the reference link and its recorded
+            ``local_bounds``: the corners and centre of that box go with the arm, read with the arm's sweep radius.
     """
     import heapq
 
@@ -798,7 +806,10 @@ def drive_route_refusal(scene: dict, config: dict, floor: dict, bodies: dict, st
     from cais_spade_llm.resources.kinematic_reach import footprint_obstacles
 
     names = scene['KMR']['arm_joint_names']
-    joints = [float(value) for value in scene['KMR']['parked_arm_configuration']]
+    posture = 'in its transport pose' if joints is None else 'at its composed joints'
+    if held is not None:
+        posture += f", holding {held['part_name']}"
+    joints = [float(value) for value in (scene['KMR']['parked_arm_configuration'] if joints is None else joints)]
     footprint = scene['KMR']['platform_overall_dimensions_m']
     boxes, labels = [], []
     for model, body in bodies.items():
@@ -819,6 +830,13 @@ def drive_route_refusal(scene: dict, config: dict, floor: dict, bodies: dict, st
         for before, after in zip(frames, frames[1:]):
             steps = max(1, int(np.linalg.norm(after - before) / 0.02))
             points += [before + (after - before) * index / steps for index in range(1, steps + 1)]
+        if held is not None:
+            tool = [float(value) for value in representative_pose(transforms[config['reference_link']])]
+            part = compose(tool, [float(value) for value in held['grasp_transform']])
+            (x0, x1), (y0, y1), (z0, z1) = held['local_bounds']
+            corners = [[x, y, z] for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)]
+            points += [np.array(compose(part, [*corner, 0., 0., 0., 1.])[:3], dtype=float)
+                       for corner in [*corners, [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2]]]
         return np.array(points)
 
     def arm_meets(x: float, y: float, local: np.ndarray) -> str | None:
@@ -835,8 +853,8 @@ def drive_route_refusal(scene: dict, config: dict, floor: dict, bodies: dict, st
         heading = start[2] + turn * index / max(1, int(abs(turn) / math.radians(5)))
         meets = arm_meets(start[0], start[1], arm_points(heading))
         if meets:
-            return (f"turning at ({start[0]:.3f}, {start[1]:.3f}) toward heading {yaw:.3f}, the KMR's arm, in its "
-                    f"transport pose, meets {meets}")
+            return (f"turning at ({start[0]:.3f}, {start[1]:.3f}) toward heading {yaw:.3f}, the KMR's arm, {posture}, "
+                    f"meets {meets}")
     local, step = arm_points(yaw), 0.05
     met: dict[str, int] = {}
     known: dict[tuple[int, int], bool] = {}
@@ -858,7 +876,7 @@ def drive_route_refusal(scene: dict, config: dict, floor: dict, bodies: dict, st
         return known[cell]
 
     if not free(end):
-        return (f"at ({target[0]:.3f}, {target[1]:.3f}, yaw {yaw:.3f}) the KMR's arm, in its transport pose, meets "
+        return (f"at ({target[0]:.3f}, {target[1]:.3f}, yaw {yaw:.3f}) the KMR's arm, {posture}, meets "
                 f"{arm_meets(*centre(end), local)}")
     bounds = (min(0, end[0]) - 30, max(0, end[0]) + 30, min(0, end[1]) - 30, max(0, end[1]) + 30)
     queue, spent = [(0., (0, 0))], {(0, 0): 0.}
@@ -879,7 +897,7 @@ def drive_route_refusal(scene: dict, config: dict, floor: dict, bodies: dict, st
                     heapq.heappush(queue, (total + math.dist(near, end), near))
     blocking = ', '.join(name for name, _ in sorted(met.items(), key=lambda item: -item[1])[:3]) or 'nothing recorded'
     return (f"no route at heading {yaw:.3f} from ({start[0]:.3f}, {start[1]:.3f}) to ({target[0]:.3f}, {target[1]:.3f}) "
-            f"keeps the KMR's footprint on free floor and its arm, in its transport pose, clear; on the way the arm meets "
+            f"keeps the KMR's footprint on free floor and its arm, {posture}, clear; on the way the arm meets "
             f"{blocking}")
 
 
