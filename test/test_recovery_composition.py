@@ -2720,3 +2720,49 @@ def test_an_arms_contracts_list_what_the_catalog_does_not():
     assert "retreat_pose" in _composition_contract({"name": "compute_pick_targets"}, "robot")["publishes"]
     assert "insert_pose" in _composition_contract({"name": "compute_place_targets"}, "robot")["publishes"]
     assert "publishes" not in _composition_contract({"name": "compute_pick_targets"}, "kmr")
+
+
+def test_every_aligned_motion_on_the_way_to_a_slot_release_carries_the_insertion_corridor(monkeypatch):
+    """A program may reach its slot release through more than one motion (Part slippage v8, 2026-11-07).
+
+    The flown program descended from the approach to the seated pose and released; the model's program added a move
+    to the seated pose (a zero-length motion) or split the descent at a pre-insert pose. Only the last motion carried
+    the recorded corridor, so the same insertion path was refused at the gear's contact with its shaft. Each earlier
+    motion the corridor fits now carries it; one it does not fit gets no allowance.
+    """
+    from cais_spade_llm.recovery_framework import composed_motion_check as motion
+    from cais_spade_llm.resources.robot import recovery_composition as robot
+
+    slot = {"primitive": "release_part", "params": {"part_name": "gear_small", "assembly_slot": {"slot_x": 0.03}}}
+    move = {"primitive": "move_cartesian", "params": {}}
+    program = [{"primitive": "compute_place_targets", "params": {}}, move, move, move, slot, move]
+    assert [robot._next_slot_release(program, index) is slot for index in (1, 2, 3)] == [True, True, True]
+    assert robot._next_slot_release(program, 4) is None
+    assert robot._next_slot_release([move, {"primitive": "move_base", "params": {}}, move, slot], 0) is None
+    assert robot._next_slot_release([move, move, {"primitive": "release_part", "params": {}}], 0) is None
+
+    recorded = []
+    monkeypatch.setattr(motion, "motion_end_pose", lambda model, state, rid, step: [0.03, 0.14, 1.267, 0., 0., 0., 1.])
+    monkeypatch.setattr(robot, "_slot_origin", lambda evidence, part: {"x": 0.03, "y": 0.14, "z": 1.039})
+
+    def corridor(model, state, rid, evidence, *, part_name, target_origin_pose, target_tool_pose):
+        recorded.append((part_name, target_tool_pose[2]))
+        return {"status": "prepared", "part_name": part_name}
+
+    monkeypatch.setattr(motion, "mating_contact_record", corridor)
+    scene = SimpleNamespace(program=program, resource_id="ur5e-3")
+    for index in (1, 2, 3):
+        contacts, mating = robot._release_contacts(None, {}, scene, {}, {"step_index": index}, held="gear_small")
+        assert contacts == [] and mating == {"status": "prepared", "part_name": "gear_small"}
+    assert recorded == [("gear_small", 1.267)] * 3
+
+    def not_fitting(*args, **kwargs):
+        raise motion.MissingMotionContext("Mating evidence requires the owner's aligned vertical insertion stage")
+
+    monkeypatch.setattr(motion, "mating_contact_record", not_fitting)
+    # An earlier motion the corridor does not fit is checked with no contact allowed ...
+    assert robot._release_contacts(None, {}, scene, {}, {"step_index": 2}, held="gear_small") == ([], None)
+    # ... while the insertion itself still needs its corridor, as before.
+    with pytest.raises(motion.MissingMotionContext):
+        robot._release_contacts(None, {}, scene, {}, {"step_index": 3}, held="gear_small")
+    assert robot._release_contacts(None, {}, scene, {}, {"step_index": 2}, held=None) == ([], None)

@@ -341,6 +341,21 @@ def _next_transfer(program: list, index: int) -> dict | None:
     return None
 
 
+def _next_slot_release(program: list, index: int) -> dict | None:
+    """The release into an assembly slot the program reaches after step ``index`` through motions alone.
+
+    Returns None when a grasp, a base move or an unmodelled motion comes first, or when the next release is not
+    into an assembly slot.
+    """
+    for step in program[index + 1:]:
+        name = (step or {}).get("primitive")
+        if name == "release_part":
+            return step if "assembly_slot" in (step.get("params") or {}) else None
+        if name == "grasp_part" or name in _UNMODELLED_MOTIONS or name == "move_base":
+            return None
+    return None
+
+
 def _slot_origin(evidence: dict, part: str) -> dict:
     """Where a part's origin sits in its assembly slot, as the recorded board geometry declares it."""
     from cais_spade_llm.recovery_framework.composed_motion_check import MissingMotionContext
@@ -355,16 +370,19 @@ def _slot_origin(evidence: dict, part: str) -> dict:
 
 def _release_contacts(model: Any, state: dict, scene: RobotEventScene, evidence: dict, move: dict, *,
                       held: str | None) -> tuple[list, dict | None]:
-    """Contacts the motion right before a release makes by design: its arrival on the support, or its insertion.
+    """Contacts a motion before a release makes by design: its arrival on the support, or its insertion.
 
     The descent before a release onto a support may end with the part on the support that holds it there
     (``projected_part_support`` at the descent's end): that one pair is allowed for this one motion. The motion
-    before a release into an assembly slot is the insertion, checked within the part's recorded corridor.
+    before a release into an assembly slot is the insertion, checked within the part's recorded corridor, and so is
+    each earlier motion on the way to that release that the corridor fits (``_insertion_stage``).
     """
     from cais_spade_llm.recovery_framework import composed_motion_check as motion
     from cais_spade_llm.recovery_framework.geometry import compose
 
     release = _next_transfer(scene.program, move["step_index"])
+    if held is not None and release is None and _next_slot_release(scene.program, move["step_index"]) is not None:
+        return [], _insertion_stage(model, state, scene, evidence, move, held)
     if held is None or release is None or release.get("primitive") != "release_part":
         return [], None
     end = motion.motion_end_pose(model, state, scene.resource_id, move)
@@ -378,6 +396,28 @@ def _release_contacts(model: Any, state: dict, scene: RobotEventScene, evidence:
     if support.get("status") != "supported":
         return [], None
     return [motion.place_arrival_contact(model, held, support["support_collisions"])], None
+
+
+def _insertion_stage(model: Any, state: dict, scene: RobotEventScene, evidence: dict, move: dict,
+                     held: str) -> dict | None:
+    """The recorded insertion corridor for an earlier motion of an insertion, when the corridor fits it.
+
+    A program may reach its slot release through more than one motion: a descent split at a waypoint, or one
+    followed by a move that stays seated. Each such motion that is an aligned vertical stage inside the part's
+    recorded corridor (``prepare_mating_contact``) carries the corridor, which bounds its contact with the slot as
+    it bounds the last motion's. A motion the corridor does not fit (it moves sideways, rises, or leaves the
+    corridor) gets no allowance and is checked like any other motion, so its contact with the slot is refused.
+    """
+    from cais_spade_llm.recovery_framework import composed_motion_check as motion
+
+    end = motion.motion_end_pose(model, state, scene.resource_id, move)
+    if end is None:
+        return None
+    try:
+        return motion.mating_contact_record(model, state, scene.resource_id, evidence, part_name=held,
+                                            target_origin_pose=_slot_origin(evidence, held), target_tool_pose=end)
+    except motion.MissingMotionContext:
+        return None
 
 
 def _motion_check(evidence: dict, scene: RobotEventScene, *, index: int, primitive: str, params: dict,
