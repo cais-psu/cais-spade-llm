@@ -130,15 +130,16 @@ def _draft_details(row: dict) -> dict:
     return {"proposals": proposals, "references": references}
 
 
-def attempts_from_batches(batch_ids: list[str] | None) -> tuple[list[dict], list[dict]]:
+def attempts_from_batches(batch_ids: list[str] | None, live: set[str] = frozenset()) -> tuple[list[dict], list[dict]]:
     """Return the started attempts of the selected batches and one source line per batch.
 
-    Batches are selected by id, or else every batch of a study model at the study effort and turn budget.
+    Batches are selected by id, or else every batch of a study model at the study effort and turn budget. A batch
+    named in ``live`` is still being run, so its running attempts are left out instead of read as interrupted.
     """
     models = {model["model"]: model["id"] for model in MODELS}
     attempts, sources = [], []
     for path in sorted(EXPERIMENTS.glob(f"*/{BATCH_NAME}")):
-        batch = read_batch(path)
+        batch = read_batch(path, live=path.parent.name if path.parent.name in live else None)
         settings = batch.get("settings") or {}
         if batch_ids and batch["batch_id"] not in batch_ids:
             continue
@@ -353,13 +354,13 @@ def conditions() -> dict:
     return {"settings": setting_rows(), "scenarios": scenario_rows(), "effort": EFFORT}
 
 
-def page_data(placeholder: bool, batch_ids: list[str] | None) -> dict:
+def page_data(placeholder: bool, batch_ids: list[str] | None, live: set[str] = frozenset()) -> dict:
     """Return the data block the page template renders."""
     if placeholder:
         attempts, sources, cells = [], [], placeholder_cells()
         composition = _PLACEHOLDER_COMPOSITION
     else:
-        attempts, sources = attempts_from_batches(batch_ids)
+        attempts, sources = attempts_from_batches(batch_ids, live)
         cells, composition = cells_from_attempts(attempts), None
     return {
         "mode": "placeholder" if placeholder else "records",
@@ -377,9 +378,11 @@ def main() -> None:
     parser.add_argument("--placeholder", action="store_true", help="fill the page with layout numbers")
     parser.add_argument("--batch", action="append", help="batch id to include (default: every study batch)")
     parser.add_argument("--out", type=Path, default=OUTPUT, help="page to write")
+    parser.add_argument("--live", action="append", default=[],
+                        help="batch id still being run: its running attempts are left out, not read as interrupted")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    data = page_data(args.placeholder, args.batch)
+    data = page_data(args.placeholder, args.batch, set(args.live))
     marker = "/*RESULTS_DATA*/null"
     template = TEMPLATE.read_text(encoding="utf-8")
     if template.count(marker) != 1:

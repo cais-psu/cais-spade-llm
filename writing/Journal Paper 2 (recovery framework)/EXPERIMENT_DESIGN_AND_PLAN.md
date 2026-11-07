@@ -723,6 +723,22 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   5 cm east (x 0.50 to 0.55) and the drop point went back to (0.25, 0.45) (commit `0d9b484`), so Part slippage
   was captured again. The other three captures recorded the Exit tray at x 0.50; their prompts show the scene
   each capture recorded, and no recovery places a part on the Exit tray, so they stay.
+- 2026-11-07, Study 1 restarted. The first run (commit `571da65`, 453 of 720 attempts) was stopped at 17:31 when
+  the baselines were found to fail on conventions the prompt never stated and the framework learned only from
+  refusals: an event names a place and also gives a pose (the checks read a pose as the controlled link's, the
+  fingertips 0.218 m further), robots' actions and what each sets, the values the checks find and the event must
+  state (resource_location null at an unnamed position, a placement's assembly entry), each part's assembly
+  target, a machine's effect on the part's job record and the Conveyor's part_order. The prompt now states these
+  as facts, the same for every setting (commit `9f1faee`); the checks and the audit are unchanged. The stopped
+  run's batches are excluded from every result and kept in
+  `/home/jongh/recovery_archives/20261107_study1_before_prompt_fix/`. Offline re-audits of its 301 baseline
+  outlines with the refused poses removed passed none, and a small test on the fixed prompt (Opus 5.5 and
+  GPT-6.1 Terra, one attempt per setting and scenario, records in
+  `/home/jongh/recovery_review_1030/prompt_fix_test_20261107/`, not pooled) showed informed baselines passing
+  and the remaining failures being safety, physical or nominal-continuation errors.
+- 2026-11-07, attempt order. At the user's request each process runs its informed-baseline settings first, then
+  the framework, then the baseline, as three batches from the same commit, instead of one batch with the settings
+  shuffled within each scenario. Within each batch the order stays shuffled with a recorded seed.
 
 ### Tables and exports required for the paper
 
