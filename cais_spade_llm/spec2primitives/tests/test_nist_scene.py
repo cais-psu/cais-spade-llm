@@ -277,7 +277,7 @@ def test_printers_gears_and_camera_configuration(world_path: Path) -> None:
             assert _required_text(includes[name], "uri") == f"model://{name}"
             assert _required_text(includes[name], "pose") == pose
         assert {"prusa_mk3", "prusa_mk4_1"}.isdisjoint(models)
-        assert _required_text(models["Exit"], "pose") == "0.50 0.58 1.04 0 0 0"
+        assert _required_text(models["Exit"], "pose") == "0.55 0.58 1.04 0 0 0"
 
     cameras = {"cam_mk3", "cam_mk4_1", "cam_mk4_2", "cam_assembly"}
     if world_path == RECOVERY_WORLD_PATH:

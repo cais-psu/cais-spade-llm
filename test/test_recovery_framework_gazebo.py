@@ -640,12 +640,12 @@ def test_single_printing_station_starts_with_three_gears_and_empty_exit() -> Non
     assert exit_contract['handling_robot'] == 'ur5e-3'
     assert exit_contract['completed_product'] == 'assembly_board-v1'
     assert list(map(float, models['Exit'].findtext('pose').split())) == exit_contract['world_pose']
-    assert exit_contract['completed_product_pose'] == [0.50, 0.58, 1.075, 0.0, 0.0, 0.0]
+    assert exit_contract['completed_product_pose'] == [0.55, 0.58, 1.075, 0.0, 0.0, 0.0]
     robots = {robot['resource_id']: robot for robot in payload['robots']}
     assert robots['ur5e-3']['base_rpy'] == [0.0, 0.0, 3.142]
     assert robots['ur5e-4']['base_rpy'] == [0.0, 0.0, 0.0]
     assert math.dist(printer['world_pose'][:2], robots['ur5e-4']['base_xyz'][:2]) == pytest.approx(0.50)
-    assert math.dist(exit_contract['world_pose'][:2], robots['ur5e-3']['base_xyz'][:2]) == pytest.approx(0.51, abs=0.01)
+    assert math.dist(exit_contract['world_pose'][:2], robots['ur5e-3']['base_xyz'][:2]) == pytest.approx(0.556, abs=0.01)
     assert exit_contract['world_pose'][1] - 0.20 > printer['world_pose'][1] + 0.20
     assert printer['world_pose'][0] + 0.20 < 0.75
     assert printer['world_pose'][1] - 0.20 > -0.80

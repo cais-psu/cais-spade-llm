@@ -58,6 +58,11 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   trimmed Machining outline and four compositions; once the v7 captures
   loaded, the four v6 captures and their run folder followed. The list is in
   `cais_spade_llm/monitor/environment_runs/recapture_v2_20261015/results_before_uniform_model_20261105_deletion_list.json`.
+  On 2026-11-06 the user did not want any results in the Experiments tab yet,
+  so the four batches of the v7 reference outlines were moved, not deleted, to
+  `/home/jongh/recovery_archives/20261106_v7_reference_outline_batches/`. Their
+  attempt folders are byte-identical to the `outline_drafts` copies that the
+  Recovery UI and the appendix read.
 - Protect active work and the current partial attempt still needed for debugging,
   including work owned by another chat or process. Remove abandoned attempts once
   their useful findings are recorded and their required dependencies are retained.
