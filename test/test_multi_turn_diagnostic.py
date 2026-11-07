@@ -1369,6 +1369,23 @@ def test_a_resource_that_takes_a_part_holds_it_whatever_location_it_states(share
             assert session["symbolic_resources"][holder_before]["held_part"] == part
 
 
+def test_a_location_stated_as_an_object_stands_and_the_next_prompt_shows_it_as_stated(shared_cell, tmp_path):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
+
+    # Model screen 2026-11-06: with no check on, the LLM stated part_location as an object and the next prompt
+    # crashed ("unhashable type: 'dict'"), so the attempt ended as a harness error instead of an outcome.
+    prepared, session = _draft(shared_cell, tmp_path)
+    stated = {"peg": "buffer"}
+    set_down = event("set_down", "arm_a", "peg", resource_state="placed", held_part=None, part_location=stated)
+    decision, _ = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
+        session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
+        response={"plan": "t", "candidate_events": [set_down]}))
+    assert decision == "need_next_task" and session["symbolic_parts"]["peg"]["part_location"] == stated
+    names = facts.resource_names(prepared)
+    assert facts._part_text("peg", prepared, session, names) == 'at {"peg": "buffer"}'
+    assert 'peg  at {"peg": "buffer"}' in facts.outline_template(prepared, session)["parts"]
+
+
 def _belt_cell(tmp_path, *, belt_state="failed"):
     """arm_a must load the peg onto a belt reported broken; the buffer and arm_b resume from the buffer."""
     belt = {"resource_jid": "belt", "resource_type": "resource",

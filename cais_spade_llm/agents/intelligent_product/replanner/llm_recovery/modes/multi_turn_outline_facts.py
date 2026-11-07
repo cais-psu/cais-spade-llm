@@ -7,6 +7,7 @@ tasks, declared fields and events) with the same rules for every resource type,
 so no scenario or resource type needs its own wording.
 """
 
+import json
 import re
 from copy import deepcopy
 from typing import Any
@@ -905,12 +906,23 @@ def _finished_by_part_record(job: dict, session: dict) -> bool:
     return job.get("status") != "completed" and bool(done) and done in completed
 
 
+def _stated_name(value: Any, names: dict[str, str]) -> Any:
+    """Name a JID; a stated value that is not a string is shown as the LLM stated it.
+
+    With no check on, an accepted event's values stand as stated, so a holder or location may not be a name
+    (screen 2026-11-06: part_location ``{"KET4_Square_4mm": "loading_position_2"}``).
+    """
+    if isinstance(value, str):
+        return names.get(value, value)
+    return json.dumps(value, ensure_ascii=False) if value else value
+
+
 def _part_text(name: str, prepared: dict, session: dict, names: dict[str, str]) -> str:
     row = session.get("symbolic_parts", {}).get(name, {})
-    holder = row.get("part_holder_resource_jid") or row.get("current_holder_resource_jid")
-    location = row.get("part_location")
+    holder = _stated_name(row.get("part_holder_resource_jid") or row.get("current_holder_resource_jid"), names)
+    location = _stated_name(row.get("part_location"), names)
     pose = row.get("observed_pose") if row.get("observed_pose_current") is not False else None
-    details = [f"held by {names.get(holder, holder)}" if holder else f"at {names.get(location, location)}" if location
+    details = [f"held by {holder}" if holder else f"at {location}" if location
                else "not held, not at any station",
                f"measured at {_pose(pose)}" if _pose(pose) else "", _area_text(pose, prepared)]
     text = ", ".join(item for item in details if item)
