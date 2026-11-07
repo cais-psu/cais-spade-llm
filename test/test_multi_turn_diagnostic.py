@@ -2112,3 +2112,50 @@ def test_a_transport_states_the_order_its_own_events_advance_parts_through():
     assert facts._advance_order(zones, "Buffer") == ["zone_1_part", "zone_2_part", "zone_3_part"]
     assert facts._advance_order(loaded, "Mill") == [] and facts._advance_order(grasp, "Mover") == []
 
+
+
+def test_each_declared_action_is_shown_with_what_it_needs_and_sets_in_declared_variable_names():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
+
+    contracts = {
+        "compute_pick_targets": [{"preconditions": {"availability": {"equals": "available"}}, "effects": {}}],
+        "grasp_part": [{"preconditions": {"availability": {"equals": "available"}, "held_part": {"equals": None},
+                                          "gripper_state": {"not_equals": "failed"}},
+                        "effects": {"current_state": {"set": "picked"}, "gripper_state": {"set": "closed"},
+                                    "held_part": {"set_from_param_any_of": ["part_name", "model_name"]}}}],
+        "move_to_named_pose": [
+            {"preconditions": {"held_part": {"equals": None}},
+             "effects": {"current_state": {"set": "idle"}, "current_pose": {"set_unknown": True},
+                         "occupancy.location": {"set_from_param": "pose_name"}}},
+            {"preconditions": {"held_part": {"not_equals": None}}, "effects": {"current_state": {"set": "carrying"}}}],
+        "complete_job": [{"controllable": False, "preconditions": {"resource_state": {"equals": "running"}},
+                          "effects": {"resource_state": {"set": "completed"}}}],
+    }
+    variables = {"resource_state", "held_part", "resource_location", "pose"}
+
+    assert facts.declared_actions(contracts, variables) == [
+        "compute_pick_targets",
+        "grasp_part (needs held_part null) sets resource_state picked, held_part <part_name>",
+        "move_to_named_pose (needs held_part null) sets resource_state idle, resource_location <pose_name>, "
+        "or (needs held_part not null) sets resource_state carrying",
+        "complete_job uncontrollable (needs resource_state running) sets resource_state completed",
+    ]
+
+
+def test_the_outline_prompt_shows_each_arm_its_actions_and_its_recorded_fingertip_offset():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_prompts
+
+    rule = " ".join(multi_turn_prompts._FAILURE_OUTLINE_EVENT_RULES)
+    assert "Give `pose` only for a position nothing else gives" in rule
+    assert "its fingertips lie the listed distance further along the tool" in rule
+    prepared = {"recovery_resources": {"arm@localhost": {"resource_type": "robot"}},
+                "declared_primitive_contracts": {"arm@localhost": {"release_part": [
+                    {"preconditions": {"held_part": {"not_equals": None}},
+                     "effects": {"current_state": {"set": "placed"}, "held_part": {"set": None}}}]}},
+                "recorded_tcp_offsets": {"arm@localhost": 0.218}}
+    session = {"recovery_des_models": {"arm@localhost": {"state_variables": {"resource_state": {}, "held_part": {}}}}}
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
+
+    assert facts._capabilities("arm@localhost", prepared, session) == (
+        "capabilities: actions: release_part (needs held_part not null) sets resource_state placed, held_part null; "
+        "fingertips 0.218 m beyond its pose along the tool")

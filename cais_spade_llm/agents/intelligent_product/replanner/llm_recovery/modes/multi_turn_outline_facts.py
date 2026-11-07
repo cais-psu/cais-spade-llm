@@ -12,6 +12,8 @@ import re
 from copy import deepcopy
 from typing import Any
 
+from cais_spade_llm.resources.kinematic_reach import BASE_PADDING_M
+
 # Matches the grounding settings' location parameters (execution_monitoring).
 _LOCATION_PARAMS = ("destination_location", "origin_resource_location", "target_resource", "source_resource")
 # Owner bookkeeping, as already treated in multi_turn_diagnostic.
@@ -755,6 +757,10 @@ def _capabilities(jid: str, prepared: dict, session: dict) -> str:
         items.append(f"moves to any position ({', '.join(coordinates)})")
     if positions := _advance_order(model, resource_names(prepared).get(jid, jid)):
         items.append("moves parts in one direction: " + " → ".join(positions))
+    if any(name.startswith("part_order.") for name in model.get("state_variables") or {}):
+        # The belt's runtime model numbers its parts on a placement (nominal_conveyor.conveyor_place_parameters).
+        items.append("part_order numbers the parts on it from 0, the one furthest along first; a part put on it is "
+                     "numbered after the parts ahead of it, and the parts behind it move up by one")
     processes: dict[str, set[str]] = {}
     for event in model.get("events", []):
         bindings = event.get("parameter_bindings", {})
@@ -765,7 +771,122 @@ def _capabilities(jid: str, prepared: dict, session: dict) -> str:
               for process, results in sorted(processes.items())]
     if text := job_control_text((entry.get("static_capabilities") or {}).get("job_control")):
         items.append(f"job control: {text}")
+    if actions := declared_actions(prepared.get("declared_primitive_contracts", {}).get(jid, {}),
+                                   set(model.get("state_variables") or {})):
+        items.append("actions: " + "; ".join(actions))
+    for place, entries in prepared.get("declared_place_completions", {}).get(jid, {}).items():
+        added = [{name: "<its assembly target>" if value == {"set_from_param": "target"} else value
+                  for name, value in entry.items()} for entry in entries]
+        items.append(f"a part it places at {place} gains processCompleted {', '.join(_value_text(entry) for entry in added)}")
+    if isinstance(offset := prepared.get("recorded_tcp_offsets", {}).get(jid), float):
+        items.append(f"fingertips {_value_text(offset)} m beyond its pose along the tool")
     return "capabilities: " + "; ".join(items) if items else ""
+
+
+# A primitive may declare a variable under the name the checks also read it by, such as a robot's resource_state
+# as current_state; its pose is its current_pose, or a mobile base's base_pose.
+_DECLARED_AS = {"current_state": "resource_state", "current_location": "resource_location",
+                "occupancy.location": "resource_location", "current_pose": "pose", "base_pose": "pose"}
+
+
+def _effect_text(rule: Any) -> str | None:
+    """Return the value a declared effect sets, or None for one no stated value shows."""
+    if not isinstance(rule, dict):
+        return None
+    if "set" in rule:
+        return _value_text(rule["set"])
+    if "set_from_param" in rule:
+        return f"<{rule['set_from_param']}>"
+    if rule.get("set_from_param_any_of"):
+        return f"<{rule['set_from_param_any_of'][0]}>"
+    for key in ("pose_absolute_from_params", "pose_absolute_from_target_pose"):
+        if rule.get(key):
+            return "(" + ", ".join(rule[key]) + ")"
+    if rule.get("pose_relative_from_params"):
+        return "moved by (" + ", ".join(rule["pose_relative_from_params"]) + ")"
+    return None
+
+
+def _template_text(value: Any) -> str:
+    """Write a declared value, a parameter it takes from the event as <parameter>."""
+    if isinstance(value, dict) and set(value) == {"set_from_param"}:
+        return f"<{value['set_from_param']}>"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{key}: {_template_text(item)}" for key, item in value.items()) + "}"
+    if isinstance(value, list):
+        return ", ".join(_template_text(item) for item in value)
+    return _value_text(value)
+
+
+def _part_effect_text(rule: Any) -> str | None:
+    """Return what a declared product effect does to the part's variable, or None for one no stated value shows."""
+    if isinstance(rule, list):
+        return "gains " + _template_text(rule)
+    if isinstance(rule, dict) and "set" in rule:
+        return _template_text(rule["set"])
+    if isinstance(rule, dict) and "set_status" in rule:
+        return f"status {rule['set_status']}"
+    return None
+
+
+def _part_guard_text(rule: Any) -> str | None:
+    """Return what a declared product guard needs of the part's variable."""
+    if isinstance(rule, dict) and "matches" in rule:
+        return "matching " + _template_text(rule["matches"])
+    if isinstance(rule, dict) and "not_matches" in rule:
+        return "not matching " + _template_text(rule["not_matches"])
+    return None
+
+
+def _need_text(rule: Any) -> str | None:
+    """Return what a declared precondition needs, or None for one no stated value shows."""
+    if not isinstance(rule, dict):
+        return None
+    if "equals" in rule:
+        return _value_text(rule["equals"])
+    if "not_equals" in rule:
+        return "not " + _value_text(rule["not_equals"])
+    if rule.get("in"):
+        return " or ".join(_value_text(value) for value in rule["in"])
+    if "equals_from_param" in rule:
+        return f"<{rule['equals_from_param']}>"
+    if rule.get("exists"):
+        return "recorded"
+    return None
+
+
+def declared_actions(contracts: dict, variables: set[str]) -> list[str]:
+    """State each declared primitive of a resource with what it needs and sets, in its declared variable names.
+
+    These are the declared effects and preconditions the checks hold a stated value to. Only variables the
+    resource's model declares are shown, since an event states only those; availability is its listed state.
+
+    Args:
+        contracts: Per primitive name, its declared alternative contracts.
+        variables: The resource's declared condition variables.
+
+    Returns:
+        One entry per primitive, its alternatives joined by "or".
+    """
+    actions = []
+    for name, alternatives in contracts.items():
+        texts = []
+        for contract in alternatives or [{}]:
+            needs = [f"{_DECLARED_AS.get(field, field)} {text}" for field, rule in (contract.get("preconditions") or {}).items()
+                     if _DECLARED_AS.get(field, field) in variables and (text := _need_text(rule)) is not None]
+            needs += [f"the part's {field} {text}" for field, rule in (contract.get("product_guards") or {}).items()
+                      if (text := _part_guard_text(rule)) is not None]
+            sets = [f"{_DECLARED_AS.get(field, field)} {text}" for field, rule in (contract.get("effects") or {}).items()
+                    if _DECLARED_AS.get(field, field) in variables and (text := _effect_text(rule)) is not None]
+            sets += [f"the part's {field} {text}" for field, rule in (contract.get("product_effects") or {}).items()
+                     if (text := _part_effect_text(rule)) is not None]
+            text = (f"(needs {', '.join(needs)}) " if needs else "") + (f"sets {', '.join(sets)}" if sets else "")
+            if contract.get("controllable") is False:
+                text = "uncontrollable " + text
+            if text.strip() and text.strip() not in texts:
+                texts.append(text.strip())
+        actions.append(name + (" " + ", or ".join(texts) if texts else ""))
+    return actions
 
 
 def _displayed_fields(jid: str, session: dict) -> dict:
@@ -922,9 +1043,11 @@ def _part_text(name: str, prepared: dict, session: dict, names: dict[str, str]) 
     holder = _stated_name(row.get("part_holder_resource_jid") or row.get("current_holder_resource_jid"), names)
     location = _stated_name(row.get("part_location"), names)
     pose = row.get("observed_pose") if row.get("observed_pose_current") is not False else None
+    target = prepared.get("assembly_targets", {}).get(name)
     details = [f"held by {holder}" if holder else f"at {location}" if location
                else "not held, not at any station",
-               f"measured at {_pose(pose)}" if _pose(pose) else "", _area_text(pose, prepared)]
+               f"measured at {_pose(pose)}" if _pose(pose) else "", _area_text(pose, prepared),
+               f"assembly target {target}" if isinstance(target, str) else ""]
     text = ", ".join(item for item in details if item)
     processes = _processes_text(row.get("current_process"), row.get("processCompleted"), names)
     return text + (f"; {processes}" if processes else "")
@@ -956,7 +1079,9 @@ def _ref_lines(prepared: dict, session: dict) -> list[str]:
             ("/parts/<name>/target", "where the part belongs in the finished product (its assembly location and slot pose)"),
             *([("/parts/<name>/pose_relations", relation)] if "/parts/<name>/pose_relations" in recorded else []),
             *([("/regions", "area bounds in world coordinates")] if "/regions/<name>" in recorded else []),
-            *([("/geometry", "station poses and sizes, robot bases and floor extent")] if "/geometry/<key>" in recorded else []),
+            *([("/geometry", "station poses and sizes, robot and mobile bases, floor extent and floor obstacles (a mobile "
+                             f"base's footprint keeps a {BASE_PADDING_M} m margin from them)")]
+              if "/geometry/<key>" in recorded else []),
             *([("/safety_rules", "the safety rules your events, and normal production after them, must keep")]
               if session.get("safety_rules_to_llm") == "knowledge_base" else [])]
     return [f"- {ref}: {text}" for ref, text in rows]

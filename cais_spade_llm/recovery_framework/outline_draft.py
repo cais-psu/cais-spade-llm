@@ -175,6 +175,31 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
         jid: _slim_primitive_catalog_for_prompt(filter_recovery_primitive_catalog(
             entry.get("execution_primitive_catalog") or [], resource_type=entry.get("resource_type", "")))
         for jid, entry in original["recovery_resources"].items() if entry.get("execution_primitive_catalog")}
+    # The actions the checks read (paper assumption A.2), so the prompt states what each needs and sets.
+    from cais_spade_llm.resources.resource_primitives import current_primitive_declarations
+
+    jids = observations.get("jids", {})
+    scene = (observations.get("inputs") or {}).get("scene") or {}
+    declared = current_primitive_declarations(scene) if scene.get("resource_programs") else {}
+    prepared["declared_primitive_contracts"] = {jids[rid]: deepcopy(contracts) for rid, contracts in declared.items()
+                                                if rid in jids}
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    # A place a resource's runtime model declares a completion for adds that entry to the part's record.
+    completions: dict[str, dict[str, list]] = {}
+    for rid, model in (build_environment_models(scene) if scene.get("resource_programs") else {}).items():
+        for event in model.get("events") or []:
+            added = (event.get("product_effects") or {}).get("processCompleted")
+            place = ((event.get("parameter_bindings") or {}).get("destination_location") or {}).get("equals")
+            if added and isinstance(place, str) and rid in jids:
+                completions.setdefault(jids[rid], {}).setdefault(place, deepcopy(added))
+    prepared["declared_place_completions"] = completions
+    prepared["assembly_targets"] = deepcopy(
+        (observations.get("inputs") or {}).get("geometry", {}).get("parts", {}).get("assembly_target_map", {}))
+    measured = (observations.get("physical_evidence") or {}).get("resources") or {}
+    prepared["recorded_tcp_offsets"] = {jids[rid]: abs(float(row["tcp_offset_z"])) for rid, row in measured.items()
+                                        if rid in jids and isinstance(row, dict)
+                                        and isinstance(row.get("tcp_offset_z"), (int, float))}
     prepared["validation_contract_version"] = 2
     prepared["public_safety_context_version"] = 1
     prepared["recovery_session"] = {

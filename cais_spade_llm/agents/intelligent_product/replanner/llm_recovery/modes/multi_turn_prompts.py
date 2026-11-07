@@ -4597,8 +4597,18 @@ _FAILURE_OUTLINE_EVENT_RULES = (
     "position it moves to) and for what it handles (parts it holds, processes it runs). Working at one place says "
     "nothing about another.",
     "- `expected_end_state`: the new value of each declared variable the event changes, for its resource and its "
-    "part only. Values may be new, but places, parts and positions must be known; give an unnamed position as "
-    "`pose`.",
+    "part only. Values may be new, but places, parts and positions must be known. Give `pose` only for a position "
+    "nothing else gives: an arm's pick or place target comes from the part or the place when it declares "
+    "compute_pick_targets or compute_place_targets, a named pose gives its own position, and a mobile base's "
+    "reachable location gives its pose. An arm's `pose` is its controlled link's; its fingertips lie the listed "
+    "distance further along the tool. Write `pose` as {x, y, z}, a mobile base's as {x, y, yaw}.",
+    "- A value holds after an event only when it already held, a declared action of the acting resource sets it, or "
+    "the event's checks find it; state each value they find. A pick empties what recorded the part where it was and "
+    "leaves the part with the acting resource; a place puts it where the event names, and a part put into or taken "
+    "from a place leaves that place's resource what its model declares; a move, navigation, pick or place leaves the "
+    "acting resource at that declared location, or at resource_location null where no declared place holds it, as a "
+    "stated `pose` does; a part placed where its resource lists a completion gains that processCompleted entry; a "
+    "stated completed process entry ends that process (current_process null).",
 )
 _NEIGHBOR_END_STATE_RULE = (
     "- `neighbor_end_state`: when moving the part changes another resource (it arrives at or leaves it), that "
@@ -4741,7 +4751,7 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
     sections += [
         "", "Resources", f"{recorded} Every resource is listed the same way: its state, then the capabilities it "
         "declares (reachable locations, where it places parts, workspace bounds, positions it moves to, processes it "
-        "runs, job control). A resource's "
+        "runs, job control, its actions with what each needs and sets). A resource's "
         "condition is the variables its model declares; request `/resources/<name>/state_variables` for them and "
         "their allowed values. A value your events changed without stating it reads \"not stated\".",
         *template["resources"],
