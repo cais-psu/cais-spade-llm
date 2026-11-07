@@ -47,8 +47,9 @@ across failure types in this cell, not across cells or plants.
   screened models), while the framework passed 12 of 12 (Opus 5.5 4/4 in its v7 reference runs, Sol 4/4, Terra 4/4).
   Ten runs per cell is enough to show a difference that large.
 - **Screen caveats:** the screen ran event-level settings only, one run per scenario, on commit `b816b1d` and the v7
-  captures. Part slippage has since been re-captured with the drop point moved to (0.15, 0.72) (commit `cc2f4ac`), so
-  Study 1 uses the new Part slippage capture `capture_f97ce5528f8c4a19a54211c74beec8c0`; the other three scenarios
+  captures. Part slippage has since been re-captured with the Exit tray moved 5 cm east and the drop point at
+  (0.25, 0.45) (commit `0d9b484`), so Study 1 uses the new Part slippage capture
+  `capture_6a4195fe2aaa4a72839cdecf895a75ee`; the other three scenarios
   keep their v7 captures.
 - **Check the test names** against the analysis plan in `EXPERIMENT_DESIGN_AND_PLAN.md` once it is written, so the
   paper and the plan say the same thing.

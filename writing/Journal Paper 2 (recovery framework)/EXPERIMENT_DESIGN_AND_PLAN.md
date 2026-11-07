@@ -661,8 +661,8 @@ later change is listed under Deviations with its reason. It governs where older 
 - Settings: Baseline, Informed baseline and Neuro-symbolic framework, each outline-level and event-level (code
   labels `LLM`, `LLM + rules`, `Framework` × `single-pass`, `incremental`). Safety rules are given only to the
   Informed baseline, in the prompt.
-- Captures: Part slippage `capture_f97ce5528f8c4a19a54211c74beec8c0` (drop point (0.15, 0.72), commit
-  `cc2f4ac`); Machining breakdown during part processing `capture_6cd8cd6940fa4691b67fa68a0099ed34`; Conveyor
+- Captures: Part slippage `capture_6a4195fe2aaa4a72839cdecf895a75ee` (drop point (0.25, 0.45), Exit tray at
+  x 0.55, commit `0d9b484`); Machining breakdown during part processing `capture_6cd8cd6940fa4691b67fa68a0099ed34`; Conveyor
   breakdown `capture_460d78e95f8e48bdaa3517076ebc51ee`; ur5e-1 breakdown `capture_4f9097aa46bf450ca0717840262806a4`.
 - Repetitions: 10 per model, setting and scenario, the same for every cell: 3 × 6 × 4 × 10 = 720 attempts.
 - Budget: 40 provider requests per attempt. One frozen commit for every batch; a batch stops if a frozen file
@@ -716,7 +716,13 @@ Two or three failed baseline outlines are shown with the concrete error their ch
 with the fewest events is composed into primitive programs and executed in Gazebo; when two tie, the one that ran
 first. The paper states that Study 2 executes the shortest passed outline per scenario.
 
-**Deviations.** None yet.
+**Deviations.**
+
+- 2026-11-07, before any Study 1 attempt ran: the Part slippage capture changed from
+  `capture_f97ce5528f8c4a19a54211c74beec8c0` to `capture_6a4195fe2aaa4a72839cdecf895a75ee`. The Exit tray moved
+  5 cm east (x 0.50 to 0.55) and the drop point went back to (0.25, 0.45) (commit `0d9b484`), so Part slippage
+  was captured again. The other three captures recorded the Exit tray at x 0.50; their prompts show the scene
+  each capture recorded, and no recovery places a part on the Exit tray, so they stay.
 
 ### Tables and exports required for the paper
 
