@@ -29,10 +29,33 @@ load_dotenv()
 
 _client = OpenAI()  # Single shared client so we reuse HTTP sessions and rate-limit buckets.
 
-# Tries for a call whose connection failed, so it got no answer, also where one attempt is the rule.
+# Tries for a call that got no answer (a dropped connection, a rate limit or a server error), also where one
+# attempt is the rule.
 _NO_ANSWER_TRIES = 3
+# Longest wait honoured from a provider's Retry-After before the next try.
+_RETRY_AFTER_CAP_SECONDS = 60.0
 # Room for Claude's adaptive thinking plus the JSON reply; the request is streamed, so a long one does not time out.
 _CLAUDE_MAX_TOKENS = 32000
+
+
+def _got_no_answer(error: Exception, dropped: tuple[type[BaseException], ...]) -> bool:
+    """Return whether a provider call ended with no reply to read.
+
+    That is a dropped connection, or a provider answer of rate limit (429) or server error (5xx, Anthropic's 529
+    overload included). A reply the model sent, however bad, is never asked for again.
+    """
+    status = getattr(error, "status_code", None)
+    return isinstance(error, dropped) or (isinstance(status, int) and (status == 429 or status >= 500))
+
+
+def _retry_wait(error: Exception, back: float) -> float:
+    """Wait the backoff, or longer when a rate-limited or overloaded provider states Retry-After in seconds."""
+    headers = getattr(getattr(error, "response", None), "headers", None) or {}
+    try:
+        asked = float(headers.get("retry-after") or 0)
+    except (TypeError, ValueError):
+        asked = 0.0
+    return max(back, min(asked, _RETRY_AFTER_CAP_SECONDS))
 
 
 def _is_claude(model_name: str) -> bool:
@@ -471,8 +494,8 @@ class LlmAgent(Agent):
         include_agent_instructions:
             Whether to prepend this agent's configured system instructions.
         max_attempts:
-            Application-level attempts per request; one also disables SDK retries. A call whose
-            connection failed gets at least ``_NO_ANSWER_TRIES`` tries.
+            Application-level attempts per request; one also disables SDK retries. A call that got no
+            answer (dropped connection, rate limit or server error) gets at least ``_NO_ANSWER_TRIES`` tries.
 
         Returns
         -------
@@ -540,9 +563,9 @@ class LlmAgent(Agent):
                             f"LLM call failed: {_structured_call_error_summary(exc)}"
                         ) from exc
                     except Exception as e:  # noqa: BLE001
-                        if attempt >= max_attempts and not isinstance(e, (APIConnectionError, httpx.TransportError)):
+                        if attempt >= max_attempts and not _got_no_answer(e, (APIConnectionError, httpx.TransportError)):
                             raise RuntimeError(f"LLM call failed after retries: {_structured_call_error_summary(e)}") from e
-                        time.sleep(back)
+                        time.sleep(_retry_wait(e, back))
                         back = min(back * 2, 8.0)
                         last_err = e
                 else:
@@ -625,8 +648,8 @@ class LlmAgent(Agent):
             response_format: The OpenAI ``json_schema`` entry; its ``schema`` is stated to Claude.
             tools: Must be empty; tool calls are not supported on this path.
             include_agent_instructions: Whether to send this agent's configured instructions first.
-            max_attempts: Application-level attempts; one also disables SDK retries. A call whose connection
-                failed gets at least ``_NO_ANSWER_TRIES`` tries.
+            max_attempts: Application-level attempts; one also disables SDK retries. A call that got no answer
+                (dropped connection, rate limit or server error) gets at least ``_NO_ANSWER_TRIES`` tries.
 
         Returns:
             The parsed structured response.
@@ -668,9 +691,9 @@ class LlmAgent(Agent):
                     raise RuntimeError(f"LLM call failed: {_structured_call_error_summary(exc)}") from exc
                 except Exception as e:  # noqa: BLE001
                     # The Anthropic SDK's transport is httpx2: a reply cut off mid-stream raises its errors unwrapped.
-                    if attempt >= max_attempts and not isinstance(e, (anthropic.APIConnectionError, httpx2.TransportError)):
+                    if attempt >= max_attempts and not _got_no_answer(e, (anthropic.APIConnectionError, httpx2.TransportError)):
                         raise RuntimeError(f"LLM call failed after retries: {_structured_call_error_summary(e)}") from e
-                    time.sleep(back)
+                    time.sleep(_retry_wait(e, back))
                     back = min(back * 2, 8.0)
                     last_err = e
             else:

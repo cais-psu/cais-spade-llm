@@ -63,9 +63,13 @@ def test_a_reply_after_text_with_a_number_range_is_read_as_its_object():
 
 
 _REQUEST = httpx.Request("POST", "https://api.example")
+_REQUEST2 = httpx2.Request("POST", "https://api.example")
 
 
-@pytest.mark.parametrize("failure", [openai.APIConnectionError(request=_REQUEST), httpx.ConnectError("no route")])
+# A rate limit (429) or a server error (5xx) is no reply either: nothing the model sent is asked for again.
+@pytest.mark.parametrize("failure", [openai.APIConnectionError(request=_REQUEST), httpx.ConnectError("no route"),
+    openai.RateLimitError("rate limited", response=httpx.Response(429, request=_REQUEST), body=None),
+    openai.InternalServerError("server error", response=httpx.Response(503, request=_REQUEST), body=None)])
 @pytest.mark.parametrize("drops, sent, answered", [(1, 2, True), (2, 3, True), (3, 3, False)])
 def test_a_gpt_call_that_got_no_answer_is_tried_again_with_one_attempt(tmp_path, monkeypatch, failure, drops, sent, answered):
     create = Mock(side_effect=[failure] * drops + [_response('{"plan": "t"}')])
@@ -85,6 +89,34 @@ def test_a_gpt_call_that_got_no_answer_is_tried_again_with_one_attempt(tmp_path,
             asyncio.run(ask())
     assert create.call_count == sent
     assert len(list(tmp_path.glob("requests/*/*_request.json"))) == sent
+
+
+def test_a_retry_waits_as_long_as_the_provider_asks_and_other_client_errors_stay_one_attempt(tmp_path, monkeypatch):
+    limited = openai.RateLimitError("rate limited", body=None,
+        response=httpx.Response(429, request=_REQUEST, headers={"retry-after": "20"}))
+    overloaded = openai.InternalServerError("server error", body=None,
+        response=httpx.Response(503, request=_REQUEST, headers={"retry-after": "600"}))
+    create = Mock(side_effect=[limited, overloaded, _response('{"plan": "t"}')])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(llm_agent, "_client", SimpleNamespace(with_options=Mock(return_value=client)))
+    waits = []
+    monkeypatch.setattr(llm_agent.time, "sleep", waits.append)
+
+    async def ask():
+        with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
+            return await _agent().ask_llm_structured("draft", response_format={"name": "draft", "schema": {}},
+                include_agent_instructions=False, max_tool_rounds=0, max_attempts=1)
+
+    assert asyncio.run(ask()) == {"plan": "t"}
+    # Retry-After is honoured up to the cap; each failed try is recorded with its error.
+    assert waits == [20.0, llm_agent._RETRY_AFTER_CAP_SECONDS]
+    assert len(list(tmp_path.glob("requests/*/*_error.json"))) == 2
+    refused = openai.AuthenticationError("bad key", response=httpx.Response(401, request=_REQUEST), body=None)
+    create = Mock(side_effect=[refused, _response('{"plan": "t"}')])
+    client.chat.completions.create = create
+    with pytest.raises(RuntimeError, match="AuthenticationError"):
+        asyncio.run(ask())
+    assert create.call_count == 1
 
 
 def test_primitive_subturn_preserves_records_without_copying_the_saved_scene(tmp_path):
@@ -510,7 +542,9 @@ def _dropping_claude_client(calls, failure, failures):
 
 # The Anthropic SDK's transport is httpx2, and a reply cut off mid-stream raises its errors unwrapped.
 @pytest.mark.parametrize("failure", [httpx2.RemoteProtocolError("peer closed connection"), httpx2.ReadTimeout("read timed out"),
-                                     anthropic.APIConnectionError(request=_REQUEST)])
+                                     anthropic.APIConnectionError(request=_REQUEST),
+    anthropic.RateLimitError("rate limited", response=httpx2.Response(429, request=_REQUEST2), body=None),
+    anthropic.OverloadedError("overloaded", response=httpx2.Response(529, request=_REQUEST2), body=None)])
 @pytest.mark.parametrize("drops, sent, answered", [(1, 2, True), (2, 3, True), (3, 3, False)])
 def test_a_claude_call_that_got_no_answer_is_tried_again_with_one_attempt(tmp_path, monkeypatch, failure, drops, sent, answered):
     calls = []
