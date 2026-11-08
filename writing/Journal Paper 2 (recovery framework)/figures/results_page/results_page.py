@@ -130,6 +130,13 @@ def _draft_details(row: dict) -> dict:
     return {"proposals": proposals, "references": references}
 
 
+# Batches left out of every result, with the reason the analysis plan records (Deviations).
+EXCLUDED_BATCHES = {
+    "batch_20261108T043222Z_79f045": "harness fault in the handoff check (fixed in 4ffcc2c); re-run in full",
+    "batch_20261108T052056Z_195a39": "baseline batch started on the faulty commit, stopped; re-run in full on 4ffcc2c",
+}
+
+
 def attempts_from_batches(batch_ids: list[str] | None, live: set[str] = frozenset()) -> tuple[list[dict], list[dict]]:
     """Return the started attempts of the selected batches and one source line per batch.
 
@@ -139,6 +146,9 @@ def attempts_from_batches(batch_ids: list[str] | None, live: set[str] = frozense
     models = {model["model"]: model["id"] for model in MODELS}
     attempts, sources = [], []
     for path in sorted(EXPERIMENTS.glob(f"*/{BATCH_NAME}")):
+        if path.parent.name in EXCLUDED_BATCHES:
+            logger.info("Left out %s: %s", path.parent.name, EXCLUDED_BATCHES[path.parent.name])
+            continue
         batch = read_batch(path, live=path.parent.name if path.parent.name in live else None)
         settings = batch.get("settings") or {}
         if batch_ids and batch["batch_id"] not in batch_ids:

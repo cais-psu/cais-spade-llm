@@ -739,6 +739,15 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
 - 2026-11-07, attempt order. At the user's request each process runs its informed-baseline settings first, then
   the framework, then the baseline, as three batches from the same commit, instead of one batch with the settings
   shuffled within each scenario. Within each batch the order stays shuffled with a recorded seed.
+- 2026-11-08, harness fault. Three Opus 5.5 baseline (event-level, ur5e-1) attempts in
+  `batch_20261108T043222Z_79f045` ended in a harness error: with no check on, the baseline stated a part's
+  location as an object, and the handoff check put it in a set and crashed. As this plan states, the fault was
+  fixed in a new commit (`4ffcc2c`: a location that is not a name is at no named place) and the affected batch
+  is re-run in full (`batch_20261108T055213Z_50845b`). The one other baseline batch already running on the faulty
+  commit (`batch_20261108T052056Z_195a39`, GPT-6.1 Sol, 24 attempts finished) was stopped and is re-run in full
+  (`batch_20261108T055213Z_656467`), so every baseline batch comes from `4ffcc2c`; the informed-baseline and
+  framework batches stay on `9776af2`, whose checks refuse such a value before it is accepted. Both stopped
+  batches are kept and left out of every result.
 
 ### Tables and exports required for the paper
 
