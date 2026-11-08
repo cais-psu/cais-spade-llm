@@ -749,8 +749,8 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   framework batches stay on `9776af2`, whose checks refuse such a value before it is accepted. Both stopped
   batches are kept and left out of every result.
 - 2026-11-08, reporting (after collection; no test or count changes). At the user's request every figure and
-  table pools the three models instead of showing Claude Opus 5.5 alone, and Fig. 11 marks each model's share
-  passed on the pooled bars; the separate model-comparison figure (Fig. 13) is dropped. The confirmatory tests
+  table pools the three models instead of showing Claude Opus 5.5 alone (Figs. 11–12, Tables 6–7), and Fig. 13
+  compares the models, with no main model. The confirmatory tests
   were already stratified by scenario × model over all three models, so they are unchanged. The Study 2 selection
   rule (Opus 5.5) is unchanged. At the user's request Fig. 11 also shows `unresolved` and `did_not_finish` as one segment under
   both names, explained in its caption; the audit records and the attempt list keep each attempt's own outcome.

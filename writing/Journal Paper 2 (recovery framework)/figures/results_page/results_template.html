@@ -308,6 +308,18 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     <figcaption id="tab7-caption"></figcaption>
   </figure>
 
+  <h2 class="group">6.3.2 · Model comparison</h2>
+
+  <figure class="plate" id="fig13">
+    <div class="plate-head">
+      <h3>Fig. 13 · Model comparison</h3>
+      <div class="tags" data-tags="model comparison"></div>
+    </div>
+    <div class="legend" id="fig13-legend" aria-hidden="true"></div>
+    <div class="wide-svg narrow" id="fig13-chart"></div>
+    <figcaption id="fig13-caption"></figcaption>
+  </figure>
+
   <h2 class="group">Every attempt</h2>
 
   <figure class="plate" id="attempts">
@@ -338,7 +350,7 @@ const SETTINGS = DATA.settings;
 const ORDER = DATA.scenarios;
 const SHORT = DATA.scenario_short;
 const MODELS = DATA.models;
-// Every figure and table pools the three models' attempts (user decision, 2026-11-08); Fig. 11 marks each model.
+// Figs. 11–12 and Tables 6–7 pool the three models' attempts (user decision, 2026-11-08); Fig. 13 compares them.
 const POOLED = { id: "all", planned: MODELS.reduce((t, m) => t + m.planned, 0) };
 const MODEL_NAMES = `${MODELS.slice(0, -1).map((m) => esc(m.name)).join(", ")} and ${esc(MODELS[MODELS.length - 1].name)}`;
 const FW_SINGLE = 4, FW_INCREMENTAL = 5;
@@ -385,18 +397,6 @@ function modelMark(m, x, y, r, { stroke = 2, t } = {}) {
   }
   if (shape === "diamond") {
     const d = r * 1.2;
-    return `<path d="M${x},${y - d} L${x + d},${y} L${x},${y + d} L${x - d},${y} Z" style="${style}"${data}/>`;
-  }
-  return `<circle cx="${x}" cy="${y}" r="${r}" style="${style}"${data}/>`;
-}
-// A model's share passed on a Fig. 11 bar: its shape in ink with a halo, readable on every outcome color.
-function passMark(m, x, y, t) {
-  const shape = m.mark || (m.vendor === "Claude" ? "square" : "circle"), r = 3.4;
-  const style = "fill:var(--ink);stroke:var(--plate);stroke-width:1.2";
-  const data = t === undefined ? "" : ` class="hit" data-t="${t}"`;
-  if (shape === "square") return `<rect x="${x - r}" y="${y - r}" width="${r * 2}" height="${r * 2}" style="${style}"${data}/>`;
-  if (shape === "diamond") {
-    const d = r * 1.3;
     return `<path d="M${x},${y - d} L${x + d},${y} L${x},${y + d} L${x - d},${y} Z" style="${style}"${data}/>`;
   }
   return `<circle cx="${x}" cy="${y}" r="${r}" style="${style}"${data}/>`;
@@ -483,7 +483,7 @@ function renderCoverage() {
     : "Started attempts only; attempts a batch never started are left out of every count.";
 }
 
-/* ---------- Fig. 11: audited outcome by setting, all models pooled, each model marked ---------- */
+/* ---------- Fig. 11: audited outcome by setting, all models pooled ---------- */
 function renderOutcome() {
   const anyNotAudited = SETTINGS.some((_, s) => sumOver(POOLED, s, (c) => c.classes[NOT_AUDITED]) > 0);
   document.getElementById("fig11-legend").innerHTML = CLASSES
@@ -528,12 +528,6 @@ function renderOutcome() {
           x += w;
         });
         p.push("</g>");
-        MODELS.forEach((m, i) => {
-          const cm = cell(m, s, scn);
-          if (!cm.n) return;
-          const t = tip(`<b>${esc(scn)}</b> · ${esc(settingLabel(s))}<br>${esc(m.name)}: passed <b>${cm.classes[0]}/${cm.n}</b>`);
-          p.push(passMark(m, X0 + (cm.classes[0] / cm.n) * BW, y + 4 + bh / 2 + markOffset(i, 6), t));
-        });
         const effort = c.tokens_k === null ? dash : `${c.tokens_k}k`;
         p.push(`<text x="${EX}" y="${y + 13}" class="val">${effort} <tspan class="lbl2">· ${c.minutes === null ? dash : c.minutes} min</tspan></text>`);
         p.push(`<text x="${EX}" y="${y + 26}" class="lbl2">${c.lookups === null ? dash : c.lookups} lookups</text>`);
@@ -542,7 +536,7 @@ function renderOutcome() {
     });
     return `<div class="panel"><h4>${esc(scn)}</h4><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Audited outcomes by setting for ${esc(scn)}, all models pooled">${p.join("")}</svg></div>`;
   }).join("");
-  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, pooled over the three models (${MODEL_NAMES}, all at reasoning effort ${esc(DATA.conditions.effort)}; ${MODELS[0].planned} attempts per model, ${POOLED.planned} per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts; each model's mark sits at its own share passed (${MODELS.map((m) => `${({ square: "■", circle: "●", diamond: "◆" })[m.mark] || "●"} ${esc(m.name)}`).join(", ")}). The models differ in vendor, size and release date, so the marks show whether the effect holds across models, not which model is better. Each attempt has the audit's outcome, set by the first failing check of its first failing event. The segment unresolved / did_not_finish joins the two outcomes that leave no established outline: unresolved, a finished outline the audit could not establish (an event leaves out a value it changes, or the search for a nominal continuation ran out), and did_not_finish, an attempt that ended without an outline (the ${DATA.max_turns}-request budget or the stall stop); its tooltip and the attempt list give each attempt's own outcome. It differs from no_nominal_continuation, where every event passed and the audit proved that normal production cannot resume. Numbers at the right are the median tokens, generation time and fact lookups per attempt over all models. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
+  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, pooled over the three models (${MODEL_NAMES}, all at reasoning effort ${esc(DATA.conditions.effort)}; ${MODELS[0].planned} attempts per model, ${POOLED.planned} per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts; Fig. 13 compares the models. Each attempt has the audit's outcome, set by the first failing check of its first failing event. The segment unresolved / did_not_finish joins the two outcomes that leave no established outline: unresolved, a finished outline the audit could not establish (an event leaves out a value it changes, or the search for a nominal continuation ran out), and did_not_finish, an attempt that ended without an outline (the ${DATA.max_turns}-request budget or the stall stop); its tooltip and the attempt list give each attempt's own outcome. It differs from no_nominal_continuation, where every event passed and the audit proved that normal production cannot resume. Numbers at the right are the median tokens, generation time and fact lookups per attempt over all models. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
 }
 
 /* ---------- Table 6: what validation rejected, framework settings, all models pooled ---------- */
@@ -633,6 +627,101 @@ function renderTable7() {
   document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> ${esc(SETTINGS[FW_INCREMENTAL].n)} carried through primitive composition, pooled over the three models (${MODEL_NAMES}; one capture per scenario, offline planning). Composition completion is conditional on an accepted outline. Overall completion counts both stages in the same attempt over all started attempts, with a 95% Wilson interval. New events are recovery events absent from the nominal models; nominal events are the connection to the remaining plan. Targeted is the share of the outline's resource and part lookups that were about a resource or part in the accepted outline.`;
 }
 
+/* ---------- Fig. 13: every model ---------- */
+const CHECKS = [
+  { label: "RA feasibility (symbolic)", key: "ra", color: "var(--s2)" },
+  { label: "RA physical evidence", key: "physical", color: "var(--s2)" },
+  { label: "CCA safety", key: "cca", color: "var(--s4)" },
+];
+function renderComparison() {
+  document.getElementById("fig13-legend").innerHTML = MODELS.map((m) => `<span><svg width="14" height="14">${modelMark(m, 7, 7, 5)}</svg>${esc(m.name)} (${esc(m.role)})</span>`).join("");
+  const X0 = 280, X1 = 490, cols = MODELS.map((_, i) => 506 + i * 48), W = 506 + MODELS.length * 48;
+  const xs = (q) => X0 + q * (X1 - X0);
+  const TOP = 22, GH = 22, RH = 26, RR = 24;
+  const bottom = TOP + SETTING_GROUPS.length * GH + SETTINGS.length * RH;
+  // Share of checked candidate events rejected in setting 6, per model and check.
+  const shares = MODELS.map((m) => {
+    const cs = ORDER.map((scn) => cell(m, FW_INCREMENTAL, scn)).filter((c) => c.n && c.rejections && c.proposals);
+    const checked = cs.reduce((t, c) => t + c.proposals, 0);
+    return { checked, values: CHECKS.map((k) => (checked ? cs.reduce((t, c) => t + c.rejections[k.key], 0) / checked : null)) };
+  });
+  // Rejection scale in 10% steps, so the gridlines fall on round shares.
+  const MAX = Math.max(0.1, Math.ceil(Math.max(0, ...shares.flatMap((s) => s.values.filter((v) => v !== null))) / 0.1) * 0.1);
+  const xr = (v) => X0 + (v / MAX) * (X1 - X0);
+  const rTop = bottom + 46, rBottom = rTop + CHECKS.length * RR, H = rBottom + 40;
+  const p = [];
+  const columnMarks = (y) => MODELS.forEach((m, i) => p.push(modelMark(m, cols[i] + 8, y, 4.5)));
+
+  p.push(`<text x="0" y="12" class="hdr">OUTLINES PASSED · ALL FOUR SCENARIOS POOLED</text>`);
+  columnMarks(8);
+  [0, 0.25, 0.5, 0.75, 1].forEach((q) => {
+    p.push(`<line x1="${xs(q)}" y1="${TOP}" x2="${xs(q)}" y2="${bottom}" class="${q === 0 ? "base-line" : "grid-line"}"/>`);
+    p.push(`<text x="${xs(q)}" y="${bottom + 14}" class="ax" text-anchor="middle">${pct(q)}</text>`);
+  });
+  let y = TOP;
+  SETTING_GROUPS.forEach((g) => {
+    p.push(`<text x="0" y="${y + 15}" class="hdr">${g.label}</text>`);
+    y += GH;
+    g.rows.forEach((s) => {
+      const cy = y + RH / 2;
+      p.push(`<text x="0" y="${cy + 4}" class="lbl">${esc(settingLabel(s))}</text>`);
+      // Grey bar: every model's attempts in this setting pooled.
+      const all = MODELS.reduce((t, m) => ({ k: t.k + pooled(m, s).k, n: t.n + pooled(m, s).n }), { k: 0, n: 0 });
+      if (all.n) {
+        const [alo, ahi] = wilson(all.k, all.n);
+        const at = tip(`<b>All models pooled</b> · ${esc(settingLabel(s))}<br>passed <b>${all.k}/${all.n}</b> (${pct(all.k / all.n)})<br><span class="tw">95% CI ${pct(alo)}–${pct(ahi)}</span>`);
+        p.push(`<rect x="${xs(0)}" y="${cy - RH / 2 + 3}" width="${Math.max(0, xs(all.k / all.n) - xs(0))}" height="${RH - 6}" style="fill:var(--ink-2);opacity:0.12" data-t="${at}"/>`);
+      }
+      MODELS.forEach((m, mi) => {
+        const { k, n } = pooled(m, s), my = cy + markOffset(mi, 7);
+        if (!n) {
+          p.push(`<text x="${cols[mi]}" y="${cy + 4}" class="lbl2">${dash}</text>`);
+          return;
+        }
+        const q = k / n, [lo, hi] = wilson(k, n);
+        const t = tip(`<b>${esc(m.name)}</b> (${esc(m.role)}) · ${esc(settingLabel(s))}<br>passed <b>${k}/${n}</b> (${pct(q)})<br><span class="tw">95% CI ${pct(lo)}–${pct(hi)}</span>`);
+        p.push(`<path d="M${xs(lo)},${my - 3} V${my + 3} M${xs(lo)},${my} H${xs(hi)} M${xs(hi)},${my - 3} V${my + 3}" style="stroke:${m.color};stroke-width:1.4;fill:none;opacity:0.55"/>`);
+        p.push(modelMark(m, xs(q), my, 4.5, { t }));
+        p.push(`<text x="${cols[mi]}" y="${cy + 4}" class="val">${pct(q)}</text>`);
+      });
+      y += RH;
+    });
+  });
+
+  p.push(`<text x="0" y="${rTop - 12}" class="hdr">CHECKED EVENTS REJECTED · ${esc(SETTINGS[FW_INCREMENTAL].n.toUpperCase())}</text>`);
+  columnMarks(rTop - 16);
+  [0, MAX / 2, MAX].forEach((v, k) => {
+    p.push(`<line x1="${xr(v)}" y1="${rTop}" x2="${xr(v)}" y2="${rBottom}" class="${k === 0 ? "base-line" : "grid-line"}"/>`);
+    p.push(`<text x="${xr(v)}" y="${rBottom + 14}" class="ax" text-anchor="middle">${pct(v)}</text>`);
+  });
+  y = rTop;
+  CHECKS.forEach((check, j) => {
+    const cy = y + RR / 2;
+    p.push(`<rect x="0" y="${cy - 5}" width="3" height="10" style="fill:${check.color}"/><text x="8" y="${cy + 4}" style="font:400 11px var(--font-ui);fill:var(--ink-2)">${esc(check.label)}</text>`);
+    p.push(`<line x1="${X0}" y1="${cy}" x2="${X1}" y2="${cy}" class="grid-line"/>`);
+    MODELS.forEach((m, i) => {
+      const v = shares[i].values[j];
+      if (v === null) {
+        p.push(`<text x="${cols[i]}" y="${cy + 4}" class="lbl2">${dash}</text>`);
+        return;
+      }
+      const t = tip(`<b>${esc(m.name)}</b> · ${esc(check.label)}<br><b>${pct(v)}</b> of ${shares[i].checked} checked events rejected`);
+      p.push(modelMark(m, xr(v), cy + markOffset(i, 6), 4.5, { t }));
+      p.push(`<text x="${cols[i]}" y="${cy + 4}" class="val">${pct(v)}</text>`);
+    });
+    y += RR;
+  });
+  p.push(`<text x="0" y="${rBottom + 30}" class="lbl" style="font-weight:600">any check</text>`);
+  MODELS.forEach((m, i) => {
+    const vs = shares[i].values;
+    p.push(`<text x="${cols[i]}" y="${rBottom + 30}" class="val" style="font-weight:600">${vs.some((v) => v === null) ? dash : pct(vs.reduce((a, c) => a + c, 0))}</text>`);
+  });
+  document.getElementById("fig13-chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Share of attempts passed per setting and ${esc(SETTINGS[FW_INCREMENTAL].n)} rejections by check, per model">${p.join("")}</svg>`;
+  const shapes = { square: "squares", circle: "circles", diamond: "diamonds" };
+  const named = MODELS.map((m) => `${esc(m.name)} (${shapes[m.mark || (m.vendor === "Claude" ? "square" : "circle")]})`);
+  document.getElementById("fig13-caption").innerHTML = `<b>Fig. 13.</b> ${["No", "One", "Two", "Three", "Four", "Five"][MODELS.length] || MODELS.length} models: ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}, all at reasoning effort ${esc(DATA.conditions.effort)} and ${MODELS[0].planned} attempts per model, setting and scenario. The figure shows whether the framework's effect holds across models, not which model is better: the models differ in vendor, size and release date. The prompt was first developed on gpt-5.4 (frozen on 21 Oct 2026), and later code fixes were tried on Claude Opus 5.5. Top: share of started attempts passed in each setting, pooled over the four scenarios, with 95% Wilson intervals per model; the grey bar pools every model's attempts, as Fig. 11 does. Bottom: share of each model's checked candidate events that each check rejected in ${esc(SETTINGS[FW_INCREMENTAL].n)}. A provider refusal counts as a failed attempt; no automatic fallback to another model is used.`;
+}
+
 /* ---------- Every attempt ---------- */
 function renderAttempts() {
   const el = document.getElementById("attempts-body");
@@ -679,6 +768,7 @@ renderOutcome();
 renderTable6();
 renderRetrieval();
 renderTable7();
+renderComparison();
 renderAttempts();
 </script>
 </body></html>
