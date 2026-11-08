@@ -254,9 +254,9 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
       <p class="paper-cap" id="tab5-caption"></p>
       <p class="paper-panel">(a) Compared methods</p>
       <div class="table-wrap"><table class="paper" id="tab5a"></table></div>
-      <p class="paper-panel">(b) Outline generation (Study 1)</p>
+      <p class="paper-panel">(b) Outline generation</p>
       <div class="table-wrap"><table class="paper kv" id="tab5b"></table></div>
-      <p class="paper-panel">(c) Primitive composition and execution (Study 2)</p>
+      <p class="paper-panel">(c) Primitive composition</p>
       <div class="table-wrap"><table class="paper kv" id="tab5c"></table></div>
       <div class="paper-notes" id="tab5-notes"></div>
     </div>
@@ -296,7 +296,7 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
   <figure class="plate" id="tab7">
     <div class="plate-head">
       <h3 id="tab7-title">Table 7 · Primitive composition</h3>
-      <div class="tags" data-tags="RC1 + RC2 · Study 2"></div>
+      <div class="tags" data-tags="RC1 + RC2"></div>
     </div>
     <div class="table-wrap"><table class="results wide" id="tab7-table"></table></div>
     <figcaption id="tab7-caption"></figcaption>
@@ -328,7 +328,7 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
   <figure class="plate" id="tab8">
     <div class="plate-head">
       <h3>Table 8 · Execution in Gazebo</h3>
-      <div class="tags" data-tags="Study 2 · optional"></div>
+      <div class="tags" data-tags="optional"></div>
     </div>
     <div class="table-wrap"><table class="results wide" id="tab8-table"></table></div>
     <figcaption id="tab8-caption"></figcaption>
@@ -423,7 +423,7 @@ function renderHeader() {
   const started = DATA.attempts.length;
   document.getElementById("lede").textContent = PLACEHOLDER
     ? `Placeholder numbers in the layout of Section 6.3, so the page can be reviewed before collection. Nothing here has been measured. Generated ${DATA.generated_at}.`
-    : `Study 1 results from the Experiments batch records: ${started} started attempts, generated ${DATA.generated_at}. Every count is out of the attempts started; cells with no attempts say so.`;
+    : `Results from the Experiments batch records: ${started} started attempts, generated ${DATA.generated_at}. Every count is out of the attempts started; cells with no attempts say so.`;
   const chips = [
     PLACEHOLDER ? `<span class="chip"><i class="fake"></i>Placeholder numbers: nothing collected yet</span>`
       : `<span class="chip"><i class="real"></i>Real data: ${DATA.sources.length} batches, ${started} attempts</span>`,
@@ -467,15 +467,14 @@ function renderConditions() {
   document.getElementById("tab5b").innerHTML = `<thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>${setup.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</tbody>`;
 
   const study2 = [
-    ["Outlines composed", `${esc(SETTINGS[FW_INCREMENTAL].n)} outlines that passed the audit: for each LLM and scenario, the first three in run order (for ${modelName(MODELS[0])} also the outline executed)`],
+    ["Outlines composed", "Passed event-level framework outlines, the first 3 per LLM and scenario"],
     ["Composing LLM", `The LLM that wrote the outline (${esc(C.effort)} effort)`],
     ["Composition checks", "Declared primitive effects, MoveIt on the captured cell model, RA and CCA"],
     ["Maximum turns", `${C.composition_turns} per composition`],
-    ["Execution", `For each scenario, the passed ${modelName(MODELS[0])} outline with the fewest events (ties: the earliest), executed once in Gazebo from its failure capture, with video`],
   ];
   document.getElementById("tab5c").innerHTML = `<thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>${study2.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</tbody>`;
 
-  document.getElementById("tab5-caption").innerHTML = `<b>Table 4.</b> Experimental setup: (a) compared methods; (b) outline generation (Study 1); (c) primitive composition and execution (Study 2).`;
+  document.getElementById("tab5-caption").innerHTML = `<b>Table 4.</b> Experimental setup: (a) compared methods; (b) outline generation; (c) primitive composition.`;
   document.getElementById("tab5-notes").innerHTML = "";
   document.getElementById("tab5-source").innerHTML = `Read from <code>outline_experiments.CONFIGURATIONS</code>, <code>recovery_case_safety</code> and <code>primitive_composition</code>.`;
 }
@@ -622,7 +621,7 @@ function renderRetrieval() {
   document.getElementById("fig12-caption").innerHTML = `<b>Fig. O1.</b> Context retrieved while building the recovery outline, by failure scenario: mean lookups per attempt of each reference in the knowledge base 𝒦, pooled over the three models, in ${esc(SETTINGS[FW_INCREMENTAL].n)}. Each row is a reference as the outline prompt lists it, with the resource, part, region or key left out. Shading is scaled to the largest mean; a dot means no lookups and a dash means no attempts. The composition-stage rows follow once composition runs.`;
 }
 
-/* ---------- Table 7: primitive composition (Study 2), all models pooled ---------- */
+/* ---------- Table 7: primitive composition, all models pooled ---------- */
 function renderTable7() {
   const head = `<thead><tr>
     <th>Failure scenario</th><th>Outlines composed<small>3 per model</small></th><th>Composition passed<small>k/n [95% CI]</small></th>
@@ -635,7 +634,7 @@ function renderTable7() {
   };
   let body;
   if (!DATA.composition) {
-    body = `<tr><td colspan="9" class="todo">Primitive composition has not been collected yet (Study 2).</td></tr>`;
+    body = `<tr><td colspan="9" class="todo">Primitive composition has not been collected yet.</td></tr>`;
   } else {
     let composed = 0, passed = 0;
     body = ORDER.map((scn) => {
@@ -649,7 +648,7 @@ function renderTable7() {
     }).join("") + `<tr class="total"><td>All four scenarios</td><td>${composed}</td><td>${passed}/${composed} ${composed ? ci(passed, composed) : ""}</td><td colspan="6"></td></tr>`;
   }
   document.getElementById("tab7-table").innerHTML = head + `<tbody>${body}</tbody>`;
-  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition (Study 2) of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines, pooled over the three models (${MODEL_NAMES}). For each model and scenario, the first three passed outlines in run order (for Claude Opus 5.5 also the outline executed in Gazebo, Table 8) are each composed once, by the model that wrote the outline, at reasoning effort ${esc(DATA.conditions.effort)}. Composition passed counts the outlines whose every event received a primitive program that passed the composition checks (the program's declared effects, MoveIt on the captured cell model, RA and CCA), with a 95% Wilson interval. Programs refused counts the proposed programs the checks refused before the composition ended. Medians are over the composed outlines; tokens and time are the composition stage only. The outline stage is in Fig. 11 and Table 6.`;
+  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines, pooled over the three models (${MODEL_NAMES}). For each model and scenario, the first three passed outlines in run order (for Claude Opus 5.5 also the outline executed in Gazebo, Table 8) are each composed once, by the model that wrote the outline, at reasoning effort ${esc(DATA.conditions.effort)}. Composition passed counts the outlines whose every event received a primitive program that passed the composition checks (the program's declared effects, MoveIt on the captured cell model, RA and CCA), with a 95% Wilson interval. Programs refused counts the proposed programs the checks refused before the composition ended. Medians are over the composed outlines; tokens and time are the composition stage only. The outline stage is in Fig. 11 and Table 6.`;
 }
 
 /* ---------- Table 8 (optional): the selected outline per scenario executed in Gazebo ---------- */
@@ -659,7 +658,7 @@ function renderTable8() {
     <th>Steps executed<small>completed / composed</small></th><th>Simulated time</th><th>Result</th><th>Video</th></tr></thead>`;
   let body;
   if (!DATA.execution) {
-    body = `<tr><td colspan="7" class="todo">Gazebo execution has not been run yet (Study 2).</td></tr>`;
+    body = `<tr><td colspan="7" class="todo">Gazebo execution has not been run yet.</td></tr>`;
   } else {
     body = ORDER.map((scn) => {
       const r = DATA.execution[scn];
