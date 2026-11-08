@@ -1629,8 +1629,16 @@ _COMPOSITION_PLACE_DESTINATION = ("The place the event states (its part_location
 
 
 def _composition_contract(entry: dict[str, Any], resource_type: str) -> dict[str, Any]:
-    """Add to an arm's served contract what its catalog does not list; the catalog itself stays as recorded."""
+    """Add to a served contract what its catalog does not list; the catalog itself stays as recorded."""
     served = deepcopy(entry)
+    params = served.get("params") or {}
+    # A contract's part_name is the event's part unless the program binds it (recovery_composition), so a
+    # condition on a part_name the command does not take reads the event's part_name.
+    if "part_name" not in params and any(
+            rule == {"equals_from_param": "part_name"}
+            for group in ("preconditions", "product_guards") for rule in (served.get(group) or {}).values()):
+        served["description"] = (f"{served.get('description', '')} Its part_name condition reads the event's "
+                                 "part_name; part_name is not a parameter of this command.").strip()
     if resource_type != "robot":
         return served
     if served.get("name") in _PUBLISHED_TARGET_FIELDS:

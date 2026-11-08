@@ -2802,3 +2802,23 @@ def test_composition_serves_the_recorded_regions_and_scene_geometry_as_the_outli
     missing, error = _resolve_context_ref(ref="/regions/Exit tray", session_state={}, prepared_recovery_request=prepared,
                                           outline_event={})
     assert missing is None and "is not recorded" in error
+
+
+
+def test_a_machine_command_says_its_part_name_condition_reads_the_events_part():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _composition_contract,
+    )
+
+    pause = {"name": "pause_job", "description": "Recovery primitive (pre: availability, part_name, resource_state; "
+                                                  "effects: resource_state)",
+             "params": {"job_id": {"type": "string"}}, "required_params": ["job_id"],
+             "preconditions": {"resource_state": {"equals": "running"}, "part_name": {"equals_from_param": "part_name"}}}
+    served = _composition_contract(pause, "resource")
+
+    assert served["description"].endswith("Its part_name condition reads the event's part_name; part_name is not a "
+                                          "parameter of this command.")
+    assert served["preconditions"] == pause["preconditions"] and served["params"] == pause["params"]
+    start = {"name": "start_job", "params": {"part_name": {"type": "string"}},
+             "preconditions": {"part_name": {"equals_from_param": "part_name"}}}
+    assert "description" not in _composition_contract(start, "resource")
