@@ -754,6 +754,17 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   were already stratified by scenario × model over all three models, so they are unchanged. The Study 2 selection
   rule (Opus 5.5) is unchanged. At the user's request Fig. 11 also shows `unresolved` and `did_not_finish` as one segment under
   both names, explained in its caption; the audit records and the attempt list keep each attempt's own outcome.
+- 2026-11-08, Study 2 (stated before any composition ran; user go "yes for all"). Composition: for each model and
+  scenario, the first 3 passed event-level Framework outlines in run order, each composed once, with no re-run, by
+  the model that wrote it (medium effort, 80-turn budget), from commit `4ffcc2c`: 36 compositions, instead of
+  continuing all 10 attempts per cell (cost and time). Table 7 reports these 36, pooled over the models. Gazebo
+  execution is a demonstration with video, not a statistic, so its selection rule changes from Claude Opus 5.5
+  alone to: per scenario, the passed event-level Framework outline with the fewest events from any model (ties:
+  the earliest run; if it does not compose, the next shortest). It picks Part slippage `draft_fa0c3793…` (Opus,
+  4 events), Machining `draft_91d5a2aa…` (Sol, 14), Conveyor `draft_71aa4a94…` (Opus, 7) and ur5e-1
+  `draft_6f500c9f…` (Sol, 4); the two not among the 36 are composed as well (38 in all) and reported with Table 8.
+  Each pick runs once in Gazebo with the run script's KMR start-bounds fix (0.1 rad) and the live CCA gate off.
+  The planned fairness spot check is dropped. Selection: `/home/jongh/recovery_review_1030/study2_20261108/selection.json`.
 
 ### Tables and exports required for the paper
 
