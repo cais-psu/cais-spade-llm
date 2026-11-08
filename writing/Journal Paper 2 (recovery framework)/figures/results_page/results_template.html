@@ -290,14 +290,6 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     <figcaption id="tab6-caption"></figcaption>
   </figure>
 
-  <figure class="plate" id="fig12">
-    <div class="plate-head">
-      <h3>Fig. 12 · Context retrieval in the outline stage</h3>
-      <div class="tags" data-tags="Sec. 5 · 𝒦 · optional"></div>
-    </div>
-    <div class="wide-svg" id="fig12-svg"></div>
-    <figcaption id="fig12-caption"></figcaption>
-  </figure>
 
   <figure class="plate" id="tab7">
     <div class="plate-head">
@@ -312,12 +304,23 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
 
   <figure class="plate" id="fig13">
     <div class="plate-head">
-      <h3>Fig. 13 · Model comparison</h3>
+      <h3>Fig. 12 · Model comparison</h3>
       <div class="tags" data-tags="model comparison"></div>
     </div>
     <div class="legend" id="fig13-legend" aria-hidden="true"></div>
     <div class="wide-svg narrow" id="fig13-chart"></div>
     <figcaption id="fig13-caption"></figcaption>
+  </figure>
+
+  <h2 class="group">Optional</h2>
+
+  <figure class="plate" id="fig12">
+    <div class="plate-head">
+      <h3>Fig. O1 · Context retrieval in the outline stage</h3>
+      <div class="tags" data-tags="Sec. 5 · 𝒦 · optional"></div>
+    </div>
+    <div class="wide-svg" id="fig12-svg"></div>
+    <figcaption id="fig12-caption"></figcaption>
   </figure>
 
   <h2 class="group">Every attempt</h2>
@@ -350,7 +353,7 @@ const SETTINGS = DATA.settings;
 const ORDER = DATA.scenarios;
 const SHORT = DATA.scenario_short;
 const MODELS = DATA.models;
-// Figs. 11–12 and Tables 6–7 pool the three models' attempts (user decision, 2026-11-08); Fig. 13 compares them.
+// Fig. 11, Tables 6–7 and Fig. O1 pool the three models' attempts (user decision, 2026-11-08); Fig. 12 compares them.
 const POOLED = { id: "all", planned: MODELS.reduce((t, m) => t + m.planned, 0) };
 const MODEL_NAMES = `${MODELS.slice(0, -1).map((m) => esc(m.name)).join(", ")} and ${esc(MODELS[MODELS.length - 1].name)}`;
 const FW_SINGLE = 4, FW_INCREMENTAL = 5;
@@ -536,7 +539,7 @@ function renderOutcome() {
     });
     return `<div class="panel"><h4>${esc(scn)}</h4><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Audited outcomes by setting for ${esc(scn)}, all models pooled">${p.join("")}</svg></div>`;
   }).join("");
-  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, pooled over the three models (${MODEL_NAMES}, all at reasoning effort ${esc(DATA.conditions.effort)}; ${MODELS[0].planned} attempts per model, ${POOLED.planned} per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts; Fig. 13 compares the models. Each attempt has the audit's outcome, set by the first failing check of its first failing event. The segment unresolved / did_not_finish joins the two outcomes that leave no established outline: unresolved, a finished outline the audit could not establish (an event leaves out a value it changes, or the search for a nominal continuation ran out), and did_not_finish, an attempt that ended without an outline (the ${DATA.max_turns}-request budget or the stall stop); its tooltip and the attempt list give each attempt's own outcome. It differs from no_nominal_continuation, where every event passed and the audit proved that normal production cannot resume. Numbers at the right are the median tokens, generation time and fact lookups per attempt over all models. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
+  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, pooled over the three models (${MODEL_NAMES}, all at reasoning effort ${esc(DATA.conditions.effort)}; ${MODELS[0].planned} attempts per model, ${POOLED.planned} per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts; Fig. 12 compares the models. Each attempt has the audit's outcome, set by the first failing check of its first failing event. The segment unresolved / did_not_finish joins the two outcomes that leave no established outline: unresolved, a finished outline the audit could not establish (an event leaves out a value it changes, or the search for a nominal continuation ran out), and did_not_finish, an attempt that ended without an outline (the ${DATA.max_turns}-request budget or the stall stop); its tooltip and the attempt list give each attempt's own outcome. It differs from no_nominal_continuation, where every event passed and the audit proved that normal production cannot resume. Numbers at the right are the median tokens, generation time and fact lookups per attempt over all models. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
 }
 
 /* ---------- Table 6: what validation rejected, framework settings, all models pooled ---------- */
@@ -563,7 +566,7 @@ function renderTable6() {
   document.getElementById("tab6-caption").innerHTML = `<b>Table 6.</b> Rejections in the two framework settings, pooled over the three models (${MODEL_NAMES}) and summed over the started attempts per scenario. In ${esc(SETTINGS[FW_SINGLE].n)} a rejection stops a whole outline at its first failing event, and the LLM rewrites the outline; in ${esc(SETTINGS[FW_INCREMENTAL].n)} a rejection applies to one proposed event, which the LLM revises. RA (symbolic and physical evidence) runs before CCA safety in both, so every CCA safety rejection is a proposal that passed RA: a feasible but unsafe event (H2). The last column of each group counts CCA completion refusals (Eq. 6). Completed counts the attempts that finished an outline within ${DATA.max_turns} turns.`;
 }
 
-/* ---------- Fig. 12: outline lookups by reference, all models pooled, setting 6 ---------- */
+/* ---------- Fig. O1 (optional): outline lookups by reference, all models pooled, setting 6 ---------- */
 function renderRetrieval() {
   const rows = DATA.references;
   const W = 720, X0 = 270, CW = (W - X0) / ORDER.length, RH = 28, TOP = 26;
@@ -596,7 +599,7 @@ function renderRetrieval() {
   p.push(`<text x="0" y="${y + RH / 2 + 5}" class="lbl">total</text>`);
   values.forEach((row, j) => p.push(`<text x="${X0 + j * CW + CW / 2}" y="${y + RH / 2 + 5}" class="val" text-anchor="middle">${row ? Math.round(row.reduce((a, c) => a + c, 0) * 10) / 10 : dash}</text>`));
   document.getElementById("fig12-svg").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Outline lookups per attempt by reference and failure scenario, all models pooled">${p.join("")}</svg>`;
-  document.getElementById("fig12-caption").innerHTML = `<b>Fig. 12.</b> Context retrieved while building the recovery outline, by failure scenario: mean lookups per attempt of each reference in the knowledge base 𝒦, pooled over the three models, in ${esc(SETTINGS[FW_INCREMENTAL].n)}. Each row is a reference as the outline prompt lists it, with the resource, part, region or key left out. Shading is scaled to the largest mean; a dot means no lookups and a dash means no attempts. The composition-stage rows follow once composition runs.`;
+  document.getElementById("fig12-caption").innerHTML = `<b>Fig. O1.</b> Context retrieved while building the recovery outline, by failure scenario: mean lookups per attempt of each reference in the knowledge base 𝒦, pooled over the three models, in ${esc(SETTINGS[FW_INCREMENTAL].n)}. Each row is a reference as the outline prompt lists it, with the resource, part, region or key left out. Shading is scaled to the largest mean; a dot means no lookups and a dash means no attempts. The composition-stage rows follow once composition runs.`;
 }
 
 /* ---------- Table 7: setting 6 through primitive composition, all models pooled ---------- */
@@ -627,7 +630,7 @@ function renderTable7() {
   document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> ${esc(SETTINGS[FW_INCREMENTAL].n)} carried through primitive composition, pooled over the three models (${MODEL_NAMES}; one capture per scenario, offline planning). Composition completion is conditional on an accepted outline. Overall completion counts both stages in the same attempt over all started attempts, with a 95% Wilson interval. New events are recovery events absent from the nominal models; nominal events are the connection to the remaining plan. Targeted is the share of the outline's resource and part lookups that were about a resource or part in the accepted outline.`;
 }
 
-/* ---------- Fig. 13: every model ---------- */
+/* ---------- Fig. 12: every model ---------- */
 const CHECKS = [
   { label: "RA feasibility (symbolic)", key: "ra", color: "var(--s2)" },
   { label: "RA physical evidence", key: "physical", color: "var(--s2)" },
@@ -719,7 +722,7 @@ function renderComparison() {
   document.getElementById("fig13-chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Share of attempts passed per setting and ${esc(SETTINGS[FW_INCREMENTAL].n)} rejections by check, per model">${p.join("")}</svg>`;
   const shapes = { square: "squares", circle: "circles", diamond: "diamonds" };
   const named = MODELS.map((m) => `${esc(m.name)} (${shapes[m.mark || (m.vendor === "Claude" ? "square" : "circle")]})`);
-  document.getElementById("fig13-caption").innerHTML = `<b>Fig. 13.</b> ${["No", "One", "Two", "Three", "Four", "Five"][MODELS.length] || MODELS.length} models: ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}, all at reasoning effort ${esc(DATA.conditions.effort)} and ${MODELS[0].planned} attempts per model, setting and scenario. The figure shows whether the framework's effect holds across models, not which model is better: the models differ in vendor, size and release date. The prompt was first developed on gpt-5.4 (frozen on 21 Oct 2026), and later code fixes were tried on Claude Opus 5.5. Top: share of started attempts passed in each setting, pooled over the four scenarios, with 95% Wilson intervals per model; the grey bar pools every model's attempts, as Fig. 11 does. Bottom: share of each model's checked candidate events that each check rejected in ${esc(SETTINGS[FW_INCREMENTAL].n)}. A provider refusal counts as a failed attempt; no automatic fallback to another model is used.`;
+  document.getElementById("fig13-caption").innerHTML = `<b>Fig. 12.</b> ${["No", "One", "Two", "Three", "Four", "Five"][MODELS.length] || MODELS.length} models: ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}, all at reasoning effort ${esc(DATA.conditions.effort)} and ${MODELS[0].planned} attempts per model, setting and scenario. The figure shows whether the framework's effect holds across models, not which model is better: the models differ in vendor, size and release date. The prompt was first developed on gpt-5.4 (frozen on 21 Oct 2026), and later code fixes were tried on Claude Opus 5.5. Top: share of started attempts passed in each setting, pooled over the four scenarios, with 95% Wilson intervals per model; the grey bar pools every model's attempts, as Fig. 11 does. Bottom: share of each model's checked candidate events that each check rejected in ${esc(SETTINGS[FW_INCREMENTAL].n)}. A provider refusal counts as a failed attempt; no automatic fallback to another model is used.`;
 }
 
 /* ---------- Every attempt ---------- */

@@ -1,7 +1,7 @@
 """Write the RCIM results page (Section 6.3 figures and tables) from the Study 1 batch records.
 
-The page has the layout of the figure mock-ups: Fig. 11, Table 6, Fig. 12 (outline rows) and Table 7, all pooled
-over the models, Fig. 13 comparing the models, and every attempt. With ``--placeholder`` it is filled with layout numbers
+The page has the layout of the figure mock-ups: Fig. 11, Table 6 and Table 7, all pooled over the models, Fig. 12
+comparing the models, the optional Fig. O1 (outline lookups, pooled), and every attempt. With ``--placeholder`` it is filled with layout numbers
 instead, so the page can be reviewed before any batch has run.
 
 Usage, from the repository root:
@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 
 TEMPLATE = HERE / "results_template.html"
 OUTPUT = HERE / "results.html"
-# Figs. 11–12 and Tables 6–7 pool these models; Fig. 13 compares them.
-# planned: attempts per setting and scenario (user decision 2026-11-06: 10 for every model). mark: Fig. 13 shape.
+# Fig. 11, Tables 6–7 and Fig. O1 pool these models; Fig. 12 compares them.
+# planned: attempts per setting and scenario (user decision 2026-11-06: 10 for every model). mark: Fig. 12 shape.
 MODELS = [
     {"id": "opus55", "model": "claude-opus-5-5", "name": "Claude Opus 5.5 medium", "role": "Anthropic flagship",
      "vendor": "Claude", "color": "var(--s3)", "mark": "square", "planned": 10},
@@ -48,7 +48,7 @@ MODELS = [
     {"id": "terra", "model": "gpt-6.1-terra", "name": "GPT-6.1 Terra medium", "role": "OpenAI lower-priced",
      "vendor": "OpenAI", "color": "var(--s5)", "mark": "diamond", "planned": 10},
 ]
-# Figs. 11–12 and Tables 6–7 pool the models' attempts (user decision, 2026-11-08); Fig. 13 compares them.
+# Fig. 11, Tables 6–7 and Fig. O1 pool the models' attempts (user decision, 2026-11-08); Fig. 12 compares them.
 POOLED = "all"
 EFFORT = "medium"
 MAX_TURNS = 40
