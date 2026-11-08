@@ -777,6 +777,12 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   36 compositions, which always include the four Gazebo picks. Table 7 therefore reports composition of each
   model's shortest outlines, not a sample of all of them. Every composition from the earlier rounds and tests is
   kept and left out of the results. Selection: `study2_20261108/selection_shortest.json`.
+- 2026-11-08, Study 2 composition restarted again, on `ab021aa`, after 2 of the 36 had finished on `d472696`. A
+  machine's job commands (pause, resume, stop, complete) take `job_id` only, yet their served contracts compare
+  `part_name` with a `part_name` parameter; composition binds it to the event's part. GPT-6.1 Terra read the
+  contract as contradictory and stalled on every Machining pause. The served contract's description now says
+  where `part_name` comes from (a lookup fix; conditions, parameters and the prompt unchanged). The 36 are
+  composed on `ab021aa`; the `d472696` round is kept and left out.
 
 ### Tables and exports required for the paper
 
