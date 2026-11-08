@@ -467,7 +467,7 @@ function renderConditions() {
   document.getElementById("tab5b").innerHTML = `<thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>${setup.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</tbody>`;
 
   const study2 = [
-    ["Outlines composed", "Passed event-level framework outlines, the first 3 per LLM and scenario"],
+    ["Outlines composed", "Passed event-level framework outlines, the 3 shortest per LLM and scenario"],
     ["Composing LLM", `${MODELS.map(modelName).join(", ")} (${esc(C.effort)} effort), each composing only the outlines it generated`],
     ["Composition checks", "Declared primitive effects and motion planning, by each event's RA"],
     ["Maximum turns", `${C.composition_turns} per composition`],
@@ -648,7 +648,7 @@ function renderTable7() {
     }).join("") + `<tr class="total"><td>All four scenarios</td><td>${composed}</td><td>${passed}/${composed} ${composed ? ci(passed, composed) : ""}</td><td colspan="6"></td></tr>`;
   }
   document.getElementById("tab7-table").innerHTML = head + `<tbody>${body}</tbody>`;
-  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines, pooled over the three models (${MODEL_NAMES}). For each model and scenario, the first three passed outlines in run order (for Claude Opus 5.5 also the outline executed in Gazebo, Table 8) are each composed once, by the model that wrote the outline, at reasoning effort ${esc(DATA.conditions.effort)}. Composition passed counts the outlines whose every event received a primitive program that passed the composition checks, which each event's RA runs on its own program: the primitives' declared effects, and motion planning in the cell recorded at the failure. The interval is a 95% Wilson interval. Every composed outline had already passed RA and CCA; the CCA does not check the programs again. Programs refused counts the proposed programs the checks refused before the composition ended. Medians are over the composed outlines; tokens and time are the composition stage only. The outline stage is in Fig. 11 and Table 6.`;
+  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines, pooled over the three models (${MODEL_NAMES}). For each model and scenario, the three passed outlines with the fewest events (ties: the earliest run; they include the outlines executed in Gazebo, Table 8) are each composed once, by the model that wrote the outline, at reasoning effort ${esc(DATA.conditions.effort)}. Composition passed counts the outlines whose every event received a primitive program that passed the composition checks, which each event's RA runs on its own program: the primitives' declared effects, and motion planning in the cell recorded at the failure. The interval is a 95% Wilson interval. Every composed outline had already passed RA and CCA; the CCA does not check the programs again. Programs refused counts the proposed programs the checks refused before the composition ended. Medians are over the composed outlines; tokens and time are the composition stage only. The outline stage is in Fig. 11 and Table 6.`;
 }
 
 /* ---------- Table 8 (optional): the selected outline per scenario executed in Gazebo ---------- */

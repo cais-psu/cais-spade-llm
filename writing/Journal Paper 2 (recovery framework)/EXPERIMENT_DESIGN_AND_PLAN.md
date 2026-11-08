@@ -765,6 +765,18 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   `draft_6f500c9f…` (Sol, 4); the two not among the 36 are composed as well (38 in all) and reported with Table 8.
   Each pick runs once in Gazebo with the run script's KMR start-bounds fix (0.1 rad) and the live CCA gate off.
   The planned fairness spot check is dropped. Selection: `/home/jongh/recovery_review_1030/study2_20261108/selection.json`.
+- 2026-11-08, Study 2 composition restarted. The first composition round (commit `4ffcc2c`) stopped after 17 of 38:
+  every GPT-6.1 composition declared itself blocked within minutes because the served `compute_place_targets`
+  contract carried the live controller's description of `destination_location` ("a registered controller
+  destination token; a descriptive ontology label does not establish a resolvable token"), which is false for
+  composition, and composition served no place geometry. Two fixes, both in lookups, none in the prompt: the
+  composition view of that contract states what its calculation reads (`a3728b2`), and composition serves the
+  outline stage's `/regions` and `/geometry` (`d472696`); a GPT-6.1 Sol test then composed past the tray
+  placement. At the user's request the sample also changes, before any composition on `d472696`: for each model
+  and scenario, the 3 passed event-level Framework outlines with the fewest events (ties: the earliest run),
+  36 compositions, which always include the four Gazebo picks. Table 7 therefore reports composition of each
+  model's shortest outlines, not a sample of all of them. Every composition from the earlier rounds and tests is
+  kept and left out of the results. Selection: `study2_20261108/selection_shortest.json`.
 
 ### Tables and exports required for the paper
 
