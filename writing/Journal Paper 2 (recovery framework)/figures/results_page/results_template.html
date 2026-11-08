@@ -352,6 +352,20 @@ const SETTING_GROUPS = [
 const CLASS_COLORS = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)", "var(--s5)", "var(--muted)", "var(--dnf)", "var(--band)"];
 const CLASSES = DATA.classes.map((label, i) => ({ label, c: CLASS_COLORS[i] }));
 const NOT_AUDITED = CLASSES.length - 1;
+// Fig. 11 shows unresolved and did_not_finish as one segment under both names, and its caption explains them
+// (user decision, 2026-11-08); the records and the attempt list keep each attempt's own outcome.
+const JOINED = ["unresolved", "did_not_finish"].map((name) => DATA.classes.indexOf(name));
+const JOINED_LABEL = "unresolved / did_not_finish";
+// Fig. 11's segments: each class in the audit's order, the joined pair at the first of the two.
+function fig11Segments(classes) {
+  return classes.flatMap((k, ci) => {
+    if (ci === JOINED[1]) return [];
+    if (ci !== JOINED[0]) return [{ k, label: CLASSES[ci].label, color: CLASSES[ci].c, detail: "" }];
+    const [a, b] = JOINED.map((i) => classes[i]);
+    return [{ k: a + b, label: JOINED_LABEL, color: CLASSES[ci].c,
+              detail: `<br>unresolved ${a} · did_not_finish ${b}` }];
+  });
+}
 // Sequential blue ramp in tenths; cell text turns white from 70% up.
 const PASS_RAMP = ["#eef4fc", "#dbe8fb", "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#3987e5", "#2a78d6", "#256abf", "#1c5cab"];
 const cell = (m, s, scn) => DATA.cells[m.id][s][scn];
@@ -472,7 +486,9 @@ function renderCoverage() {
 /* ---------- Fig. 11: audited outcome by setting, all models pooled, each model marked ---------- */
 function renderOutcome() {
   const anyNotAudited = SETTINGS.some((_, s) => sumOver(POOLED, s, (c) => c.classes[NOT_AUDITED]) > 0);
-  document.getElementById("fig11-legend").innerHTML = CLASSES.filter((_, i) => i < NOT_AUDITED || anyNotAudited)
+  document.getElementById("fig11-legend").innerHTML = CLASSES
+    .map((c, i) => ({ ...c, i, label: i === JOINED[0] ? JOINED_LABEL : c.label }))
+    .filter(({ i }) => i !== JOINED[1] && (i < NOT_AUDITED || anyNotAudited))
     .map((c) => `<span><i class="sw" style="background:${c.c};outline:1px solid var(--hair)"></i>${c.label}</span>`).join("");
   const W = 550, X0 = 246, BW = 200, RH = 34, GH = 18, TOP = 16, EX = X0 + BW + 10;
   const H = TOP + SETTING_GROUPS.length * GH + SETTINGS.length * RH + 20;
@@ -502,11 +518,12 @@ function renderOutcome() {
         const cid = `c11-${clipId++}`;
         p.push(`<clipPath id="${cid}"><rect x="${X0}" y="${y + 4}" width="${BW}" height="${bh}" rx="3"/></clipPath><g clip-path="url(#${cid})">`);
         let x = X0;
-        c.classes.forEach((k, ci) => {
+        const segments = fig11Segments(c.classes);
+        segments.forEach(({ k, label, color, detail }, si) => {
           if (!k) return;
-          const w = (k / c.n) * BW, last = c.classes.slice(ci + 1).every((v) => v === 0);
-          const t = tip(`<b>${esc(scn)}</b> · ${esc(settingLabel(s))}<br>${CLASSES[ci].label}: <b>${k}/${c.n}</b>`);
-          p.push(`<rect x="${x}" y="${y + 4}" width="${Math.max(0, w - (last ? 0 : 2))}" height="${bh}" style="fill:${CLASSES[ci].c}" class="hit" data-t="${t}"/>`);
+          const w = (k / c.n) * BW, last = segments.slice(si + 1).every((seg) => seg.k === 0);
+          const t = tip(`<b>${esc(scn)}</b> · ${esc(settingLabel(s))}<br>${label}: <b>${k}/${c.n}</b>${detail}`);
+          p.push(`<rect x="${x}" y="${y + 4}" width="${Math.max(0, w - (last ? 0 : 2))}" height="${bh}" style="fill:${color}" class="hit" data-t="${t}"/>`);
           if (w >= 18) p.push(`<text x="${x + w / 2 - (last ? 0 : 1)}" y="${y + 4 + bh / 2 + 4}" class="seg" text-anchor="middle" pointer-events="none">${k}</text>`);
           x += w;
         });
@@ -525,7 +542,7 @@ function renderOutcome() {
     });
     return `<div class="panel"><h4>${esc(scn)}</h4><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Audited outcomes by setting for ${esc(scn)}, all models pooled">${p.join("")}</svg></div>`;
   }).join("");
-  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, pooled over the three models (${MODEL_NAMES}, all at reasoning effort ${esc(DATA.conditions.effort)}; ${MODELS[0].planned} attempts per model, ${POOLED.planned} per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts; each model's mark sits at its own share passed (${MODELS.map((m) => `${({ square: "■", circle: "●", diamond: "◆" })[m.mark] || "●"} ${esc(m.name)}`).join(", ")}). The models differ in vendor, size and release date, so the marks show whether the effect holds across models, not which model is better. Each attempt has the audit's outcome, set by the first failing check of its first failing event. Numbers at the right are the median tokens, generation time and fact lookups per attempt over all models. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
+  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, pooled over the three models (${MODEL_NAMES}, all at reasoning effort ${esc(DATA.conditions.effort)}; ${MODELS[0].planned} attempts per model, ${POOLED.planned} per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts; each model's mark sits at its own share passed (${MODELS.map((m) => `${({ square: "■", circle: "●", diamond: "◆" })[m.mark] || "●"} ${esc(m.name)}`).join(", ")}). The models differ in vendor, size and release date, so the marks show whether the effect holds across models, not which model is better. Each attempt has the audit's outcome, set by the first failing check of its first failing event. The segment unresolved / did_not_finish joins the two outcomes that leave no established outline: unresolved, a finished outline the audit could not establish (an event leaves out a value it changes, or the search for a nominal continuation ran out), and did_not_finish, an attempt that ended without an outline (the ${DATA.max_turns}-request budget or the stall stop); its tooltip and the attempt list give each attempt's own outcome. It differs from no_nominal_continuation, where every event passed and the audit proved that normal production cannot resume. Numbers at the right are the median tokens, generation time and fact lookups per attempt over all models. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
 }
 
 /* ---------- Table 6: what validation rejected, framework settings, all models pooled ---------- */

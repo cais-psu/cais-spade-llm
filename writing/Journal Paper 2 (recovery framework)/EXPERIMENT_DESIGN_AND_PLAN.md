@@ -752,7 +752,8 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   table pools the three models instead of showing Claude Opus 5.5 alone, and Fig. 11 marks each model's share
   passed on the pooled bars; the separate model-comparison figure (Fig. 13) is dropped. The confirmatory tests
   were already stratified by scenario × model over all three models, so they are unchanged. The Study 2 selection
-  rule (Opus 5.5) is unchanged.
+  rule (Opus 5.5) is unchanged. At the user's request Fig. 11 also shows `unresolved` and `did_not_finish` as one segment under
+  both names, explained in its caption; the audit records and the attempt list keep each attempt's own outcome.
 
 ### Tables and exports required for the paper
 
