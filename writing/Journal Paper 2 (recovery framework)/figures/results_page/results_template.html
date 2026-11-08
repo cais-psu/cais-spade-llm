@@ -293,8 +293,8 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
 
   <figure class="plate" id="tab7">
     <div class="plate-head">
-      <h3 id="tab7-title">Table 7 · Framework, event-level, through primitive composition</h3>
-      <div class="tags" data-tags="RC1 + RC2"></div>
+      <h3 id="tab7-title">Table 7 · Primitive composition</h3>
+      <div class="tags" data-tags="RC1 + RC2 · Study 2"></div>
     </div>
     <div class="table-wrap"><table class="results wide" id="tab7-table"></table></div>
     <figcaption id="tab7-caption"></figcaption>
@@ -321,6 +321,15 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     </div>
     <div class="wide-svg" id="fig12-svg"></div>
     <figcaption id="fig12-caption"></figcaption>
+  </figure>
+
+  <figure class="plate" id="tab8">
+    <div class="plate-head">
+      <h3>Table 8 · Execution in Gazebo</h3>
+      <div class="tags" data-tags="Study 2 · optional"></div>
+    </div>
+    <div class="table-wrap"><table class="results wide" id="tab8-table"></table></div>
+    <figcaption id="tab8-caption"></figcaption>
   </figure>
 
   <h2 class="group">Every attempt</h2>
@@ -602,32 +611,55 @@ function renderRetrieval() {
   document.getElementById("fig12-caption").innerHTML = `<b>Fig. O1.</b> Context retrieved while building the recovery outline, by failure scenario: mean lookups per attempt of each reference in the knowledge base 𝒦, pooled over the three models, in ${esc(SETTINGS[FW_INCREMENTAL].n)}. Each row is a reference as the outline prompt lists it, with the resource, part, region or key left out. Shading is scaled to the largest mean; a dot means no lookups and a dash means no attempts. The composition-stage rows follow once composition runs.`;
 }
 
-/* ---------- Table 7: setting 6 through primitive composition, all models pooled ---------- */
+/* ---------- Table 7: primitive composition (Study 2), all models pooled ---------- */
 function renderTable7() {
-  document.getElementById("tab7-title").textContent = `Table 7 · ${SETTINGS[FW_INCREMENTAL].n}, through primitive composition`;
   const head = `<thead><tr>
-    <th>Failure scenario</th><th>Outline<small>passed / started</small></th><th>Composition<small>given an accepted outline</small></th>
-    <th>Overall<small>n/N [95% CI]</small></th><th>Events<small>new / nominal</small></th><th>Primitives<small>median per outline</small></th>
-    <th>Lookups<small>median, outline / composition</small></th><th>Targeted<small>outline lookups on resources used</small></th>
-    <th>Tokens<small>median, both stages</small></th><th>Time<small>median, both stages</small></th></tr></thead>`;
+    <th>Failure scenario</th><th>Outlines composed<small>3 per model</small></th><th>Composition passed<small>k/n [95% CI]</small></th>
+    <th>Events<small>median per outline</small></th><th>Primitives<small>median per program</small></th>
+    <th>Programs refused<small>median per composition</small></th><th>Model calls<small>median</small></th>
+    <th>Tokens<small>median</small></th><th>Time<small>median</small></th></tr></thead>`;
   const ci = (k, n) => {
     const [lo, hi] = wilson(k, n);
     return `<small>[${lo.toFixed(2)}, ${hi.toFixed(2)}]</small>`;
   };
   let body;
   if (!DATA.composition) {
-    body = `<tr><td colspan="10" class="todo">Composition has not been collected yet. The outline column will come from ${esc(SETTINGS[FW_INCREMENTAL].n)} in Fig. 11.</td></tr>`;
+    body = `<tr><td colspan="9" class="todo">Primitive composition has not been collected yet (Study 2).</td></tr>`;
   } else {
-    let outlines = 0, composed = 0, started = 0;
+    let composed = 0, passed = 0;
     body = ORDER.map((scn) => {
-      const c = cell(POOLED, FW_INCREMENTAL, scn), r = DATA.composition[scn], outline = c.classes[0];
-      outlines += outline; composed += r.comp; started += c.n;
-      return `<tr><td>${esc(scn)}</td><td>${outline}/${c.n}</td><td>${r.comp}/${outline}</td><td>${r.comp}/${c.n} ${ci(r.comp, c.n)}</td>
-        <td>${r.ev[0]} / ${r.ev[1]}</td><td>${r.prims}</td><td>${r.lookups[0]} / ${r.lookups[1]}</td><td>${r.targeted}%</td><td>${r.tokens_k}k</td><td>${r.minutes} min</td></tr>`;
-    }).join("") + `<tr class="total"><td>All four scenarios</td><td>${outlines}/${started}</td><td>${composed}/${outlines}</td><td>${composed}/${started} ${ci(composed, started)}</td><td colspan="6"></td></tr>`;
+      const r = DATA.composition[scn];
+      if (!r || !r.composed) return `<tr><td>${esc(scn)}</td><td colspan="8" class="todo">not composed yet</td></tr>`;
+      composed += r.composed; passed += r.passed;
+      const cell = (v, unit = "") => (v === null || v === undefined ? dash : `${v}${unit}`);
+      return `<tr><td>${esc(scn)}</td><td>${r.composed}</td><td>${r.passed}/${r.composed} ${ci(r.passed, r.composed)}</td>
+        <td>${cell(r.events)}</td><td>${cell(r.primitives)}</td><td>${cell(r.refused)}</td><td>${cell(r.calls)}</td>
+        <td>${cell(r.tokens_k, "k")}</td><td>${cell(r.minutes, " min")}</td></tr>`;
+    }).join("") + `<tr class="total"><td>All four scenarios</td><td>${composed}</td><td>${passed}/${composed} ${composed ? ci(passed, composed) : ""}</td><td colspan="6"></td></tr>`;
   }
   document.getElementById("tab7-table").innerHTML = head + `<tbody>${body}</tbody>`;
-  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> ${esc(SETTINGS[FW_INCREMENTAL].n)} carried through primitive composition, pooled over the three models (${MODEL_NAMES}; one capture per scenario, offline planning). Composition completion is conditional on an accepted outline. Overall completion counts both stages in the same attempt over all started attempts, with a 95% Wilson interval. New events are recovery events absent from the nominal models; nominal events are the connection to the remaining plan. Targeted is the share of the outline's resource and part lookups that were about a resource or part in the accepted outline.`;
+  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition (Study 2) of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines, pooled over the three models (${MODEL_NAMES}). For each model and scenario, the first three passed outlines in run order (for Claude Opus 5.5 also the outline executed in Gazebo, Table 8) are each composed once, by the model that wrote the outline, at reasoning effort ${esc(DATA.conditions.effort)}. Composition passed counts the outlines whose every event received a primitive program that passed the composition checks (the program's declared effects, MoveIt on the captured cell model, RA and CCA), with a 95% Wilson interval. Programs refused counts the proposed programs the checks refused before the composition ended. Medians are over the composed outlines; tokens and time are the composition stage only. The outline stage is in Fig. 11 and Table 6.`;
+}
+
+/* ---------- Table 8 (optional): the selected outline per scenario executed in Gazebo ---------- */
+function renderTable8() {
+  const head = `<thead><tr>
+    <th>Failure scenario</th><th>Outline<small>model · events</small></th><th>Primitives</th>
+    <th>Steps executed<small>completed / composed</small></th><th>Simulated time</th><th>Result</th><th>Video</th></tr></thead>`;
+  let body;
+  if (!DATA.execution) {
+    body = `<tr><td colspan="7" class="todo">Gazebo execution has not been run yet (Study 2).</td></tr>`;
+  } else {
+    body = ORDER.map((scn) => {
+      const r = DATA.execution[scn];
+      if (!r) return `<tr><td>${esc(scn)}</td><td colspan="6" class="todo">not run yet</td></tr>`;
+      return `<tr><td>${esc(scn)}</td><td>${esc(r.model)} · ${r.events}</td><td>${r.primitives}</td><td>${r.completed}/${r.steps}</td>
+        <td>${r.sim_seconds === null ? dash : `${Math.round(r.sim_seconds)} s`}</td><td>${esc(r.result)}</td>
+        <td>${r.video ? `<a href="${esc(r.video)}">video</a>` : dash}</td></tr>`;
+    }).join("");
+  }
+  document.getElementById("tab8-table").innerHTML = head + `<tbody>${body}</tbody>`;
+  document.getElementById("tab8-caption").innerHTML = `<b>Table 8.</b> Optional. For each scenario, the passed ${esc(SETTINGS[FW_INCREMENTAL].n)} outline of Claude Opus 5.5 with the fewest events (ties: the one that ran first), composed into primitive programs (Table 7) and executed once in the Gazebo cell from its failure capture, with video. Steps executed counts the primitive steps that completed out of those composed.`;
 }
 
 /* ---------- Fig. 12: every model ---------- */
@@ -771,6 +803,7 @@ renderOutcome();
 renderTable6();
 renderRetrieval();
 renderTable7();
+renderTable8();
 renderComparison();
 renderAttempts();
 </script>

@@ -296,12 +296,19 @@ _PLACEHOLDER_REFERENCES = {
                          "/resources/<name>/static_capabilities": 2.0, "/geometry": 1.0, "/regions": 1.0,
                          "/resources/<name>/pose_relations": 1.0, "/parts/<name>/target": 1.0},
 }
-# Main model, setting 6 through primitive composition.
+# Table 7 layout numbers: per scenario, the composed outlines pooled over the models (3 per model).
 _PLACEHOLDER_COMPOSITION = {
-    "Part slippage": {"comp": 15, "ev": [4, 3], "prims": 21, "lookups": [12, 23], "targeted": 90, "tokens_k": 410, "minutes": 19},
-    "Conveyor breakdown": {"comp": 17, "ev": [3, 0], "prims": 14, "lookups": [15, 17], "targeted": 84, "tokens_k": 450, "minutes": 22},
-    "Machining breakdown during part processing": {"comp": 7, "ev": [7, 2], "prims": 27, "lookups": [11, 35], "targeted": 89, "tokens_k": 780, "minutes": 41},
-    "ur5e-1 breakdown": {"comp": 11, "ev": [5, 1], "prims": 19, "lookups": [11, 29], "targeted": 93, "tokens_k": 620, "minutes": 33},
+    "Part slippage": {"composed": 10, "passed": 9, "events": 5, "primitives": 21, "refused": 2, "calls": 8, "tokens_k": 190, "minutes": 14},
+    "Conveyor breakdown": {"composed": 9, "passed": 8, "events": 9, "primitives": 30, "refused": 4, "calls": 12, "tokens_k": 240, "minutes": 18},
+    "Machining breakdown during part processing": {"composed": 9, "passed": 6, "events": 18, "primitives": 52, "refused": 7, "calls": 20, "tokens_k": 420, "minutes": 33},
+    "ur5e-1 breakdown": {"composed": 9, "passed": 8, "events": 7, "primitives": 26, "refused": 3, "calls": 11, "tokens_k": 230, "minutes": 17},
+}
+# Table 8 layout numbers: the selected Claude Opus 5.5 outline per scenario executed in Gazebo.
+_PLACEHOLDER_EXECUTION = {
+    "Part slippage": {"model": "Claude Opus 5.5", "events": 4, "primitives": 17, "steps": 17, "completed": 17, "sim_seconds": 95, "result": "completed", "video": ""},
+    "Conveyor breakdown": {"model": "Claude Opus 5.5", "events": 7, "primitives": 28, "steps": 28, "completed": 28, "sim_seconds": 240, "result": "completed", "video": ""},
+    "Machining breakdown during part processing": {"model": "Claude Opus 5.5", "events": 16, "primitives": 49, "steps": 49, "completed": 49, "sim_seconds": 610, "result": "completed", "video": ""},
+    "ur5e-1 breakdown": {"model": "Claude Opus 5.5", "events": 7, "primitives": 27, "steps": 27, "completed": 27, "sim_seconds": 260, "result": "completed", "video": ""},
 }
 
 
@@ -376,17 +383,17 @@ def page_data(placeholder: bool, batch_ids: list[str] | None, live: set[str] = f
     """Return the data block the page template renders."""
     if placeholder:
         attempts, sources, cells = [], [], placeholder_cells()
-        composition = _PLACEHOLDER_COMPOSITION
+        composition, execution = _PLACEHOLDER_COMPOSITION, _PLACEHOLDER_EXECUTION
     else:
         attempts, sources = attempts_from_batches(batch_ids, live)
-        cells, composition = cells_from_attempts(attempts), None
+        cells, composition, execution = cells_from_attempts(attempts), None, None
     return {
         "mode": "placeholder" if placeholder else "records",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "settings": [{"n": PAPER_NAMES.get(name, name), "d": note} for name, note in zip(CONFIGURATIONS, SETTING_NOTES)],
         "scenarios": SCENARIOS, "scenario_short": SCENARIO_SHORT, "models": MODELS, "classes": CLASSES,
         "references": reference_rows(cells),
-        "cells": cells, "composition": composition, "sources": sources, "attempts": attempt_lines(attempts),
+        "cells": cells, "composition": composition, "execution": execution, "sources": sources, "attempts": attempt_lines(attempts),
         "max_turns": MAX_TURNS, "conditions": conditions(),
     }
 
