@@ -954,7 +954,10 @@ def destination_outcome(jid: str | None, task: dict, prepared: dict, session: di
 def _at_destination(part: str, destination: str, session: dict, prepared: dict) -> bool:
     """Return whether a part rests at a destination, named or by JID, with no resource holding it."""
     place = {destination, prepared.get("observation_jids", {}).get(destination, destination)}
-    return (session.get("symbolic_parts", {}).get(part, {}).get("part_location") in place
+    # With no check on, a location stands as the LLM stated it; one that is not a name is at no named place
+    # (Study 1, 2026-11-08: part_location {"KET4_Square_4mm": "loading_position_2"} crashed the handoff check).
+    location = session.get("symbolic_parts", {}).get(part, {}).get("part_location")
+    return (isinstance(location, str) and location in place
             and not any(row.get("held_part") == part for row in session.get("symbolic_resources", {}).values()))
 
 

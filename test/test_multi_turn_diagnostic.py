@@ -2159,3 +2159,13 @@ def test_the_outline_prompt_shows_each_arm_its_actions_and_its_recorded_fingerti
     assert facts._capabilities("arm@localhost", prepared, session) == (
         "capabilities: actions: release_part (needs held_part not null) sets resource_state placed, held_part null; "
         "fingertips 0.218 m beyond its pose along the tool")
+
+
+def test_a_part_location_stated_as_an_object_is_at_no_destination_and_does_not_crash_the_handoff_check():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_diagnostic
+
+    session = {"symbolic_parts": {"peg": {"part_location": {"peg": "loading_position_2"}}}, "symbolic_resources": {}}
+
+    assert multi_turn_diagnostic._at_destination("peg", "Conveyor", session, {"observation_jids": {}}) is False
+    session["symbolic_parts"]["peg"]["part_location"] = "Conveyor"
+    assert multi_turn_diagnostic._at_destination("peg", "Conveyor", session, {"observation_jids": {}}) is True
