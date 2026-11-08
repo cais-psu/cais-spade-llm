@@ -54,6 +54,24 @@ def test_owner_fields_and_product_effects_without_robot_state(contract, resource
     assert contract == before
 
 
+def test_a_part_s_current_process_is_its_own_whichever_resource_acts(contract):
+    """Study 2, 2026-11-08: Sol's Part slippage outlines state gear_small's current_process in ur5e-3's insertion.
+
+    The outline stage accepted it (it already held); composition refused the event because the robot's model does
+    not list the field. The part's unfinished job is the part's own, as its process record is: it is compared, never
+    supplied.
+    """
+    contract["part_context"]["current_process"] = None
+    contract["task"]["expected_start_state"]["current_process"] = None
+    contract["task"]["expected_end_state"]["current_process"] = None
+    result = validate_recovery_primitive_composition(**contract)
+    assert result["feasibility_status"] == "FEASIBLE", result.get("reason")
+    assert result["derived_end_state"]["current_process"] is None
+
+    contract["task"]["expected_start_state"]["current_process"] = {"machine": "M2", "process": "trim"}
+    assert validate_recovery_primitive_composition(**contract)["feasibility_status"] != "FEASIBLE"
+
+
 @pytest.mark.parametrize("change, status, step", [
     ("order", "INFEASIBLE", 0), ("reference", "NEEDS_CONTEXT", 1),
     ("params", "INFEASIBLE", 1), ("extra_param", "INFEASIBLE", 1),

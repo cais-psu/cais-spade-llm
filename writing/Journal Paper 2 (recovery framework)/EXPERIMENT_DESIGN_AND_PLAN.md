@@ -804,6 +804,19 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   outline stage's rule (a value holds when it already held, a declared action sets it, or the event's checks find
   it); no other wording changes. At the user's request Terra's 12 compositions run first. The 36 are composed on
   the new commit; the `c1a45b0` round is kept and left out.
+- 2026-11-08, Study 2 composition restarted a fifth time, after the user asked for Part slippage from Opus and Sol
+  as a check of the framework before the rest. On `cf47652` Opus composed its three Part slippage outlines; Sol's
+  three could not be composed whatever Sol wrote. Each states gear_small's `current_process: null` in ur5e-3's
+  insertion event; the outline stage accepted it (it already held), but composition takes an event's fields from the
+  acting resource's model, which lists the part's process record (`processCompleted`) as an exception and not the
+  part's unfinished job, so it refused with "Starting field 'current_process' is not declared". `current_process`
+  is now read as the part's own too: a declaration of where the field lives, compared with the part's value, never
+  supplied. A scan of the 36 outlines found the field in a robot event only in Sol's three Part slippage outlines.
+  The user chose to recompose all 36 on the new commit rather than keep the 8 finished on `cf47652` (5 Terra and
+  Opus's 3 Part slippage); the `cf47652` round is kept and left out. At the user's request Part slippage for Sol
+  and Terra runs first, as a trial, before the other 30.
+  Each event has its own 24-turn limit (`max_turns`) besides the composition's 80; a run that reaches it stops with
+  "The event requires exactly one RA-validated program" (CONV_terra_2 on `cf47652`), and Table 4 states both limits.
 
 ### Tables and exports required for the paper
 

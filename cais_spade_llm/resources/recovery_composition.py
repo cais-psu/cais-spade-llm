@@ -286,8 +286,9 @@ def validate_recovery_primitive_composition(
     """
     declarations = recovery_des_model.get("state_variables")
     if declarations and isinstance(declarations, dict):
-        # A part's process record is the part's own, whichever resource acts; a robot's model does not list it.
-        declarations = {"processCompleted": {"scope": "part"}, **declarations}
+        # A part's process record and unfinished job are its own, whichever resource acts; a robot's model does not
+        # list them.
+        declarations = {"processCompleted": {"scope": "part"}, "current_process": {"scope": "part"}, **declarations}
     result = {
         "composition_validation_version": COMPOSITION_VALIDATION_VERSION,
         "outline_id": task.get("outline_id"), "resource_jid": task.get("resource_jid"),
