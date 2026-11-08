@@ -1679,6 +1679,16 @@ def _resolve_context_ref(
     head = segments[0]
     rest = segments[1:]
 
+    # The recorded regions and scene geometry, served as the outline stage serves them: the places a calculation
+    # targets and the composition checks hold a program to.
+    if head in {"regions", "geometry"} and len(segments) <= 2:
+        from .multi_turn_context import _diagnostic_fact
+
+        try:
+            return _diagnostic_fact(prepared_recovery_request, session_state, "/" + "/".join(segments)), None
+        except ValueError as exc:
+            return None, str(exc)
+
     if (prepared_recovery_request.get("composition_validation_version") == 1
             and head in {"resources", "parts", "projected_snapshot"}):
         from cais_spade_llm.resources.recovery_composition import resolve_composition_value
@@ -2506,6 +2516,11 @@ _PUBLISHED_REF_SCHEMA: list[dict[str, str]] = [
     {
         "ref": "/capability_decompositions/<function_name>",
         "description": "how a nominal function of the active resource composes primitives",
+    },
+    {"ref": "/regions/<name>", "description": "region bounds in the world frame (or /regions for all)"},
+    {
+        "ref": "/geometry/<key>",
+        "description": "station poses and sizes, robot and mobile bases, floor extent and obstacles (or /geometry for all)",
     },
 ]
 

@@ -2782,3 +2782,23 @@ def test_every_aligned_motion_on_the_way_to_a_slot_release_carries_the_insertion
     with pytest.raises(motion.MissingMotionContext):
         robot._release_contacts(None, {}, scene, {}, {"step_index": 3}, held="gear_small")
     assert robot._release_contacts(None, {}, scene, {}, {"step_index": 2}, held=None) == ([], None)
+
+
+def test_composition_serves_the_recorded_regions_and_scene_geometry_as_the_outline_stage_does():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _resolve_context_ref,
+    )
+
+    tray = {"bounds": [[-4.75, -4.6], [1.3, 1.5], [1.0, 1.2]]}
+    prepared = {"composition_validation_version": 1, "diagnostic_regions": {"M1 staging tray": tray},
+                "diagnostic_scene_geometry": {"floor_extent_xy": [-10.5, 1.5, -4.0, 4.8]}}
+
+    served, error = _resolve_context_ref(ref="/regions/M1 staging tray", session_state={},
+                                         prepared_recovery_request=prepared, outline_event={})
+    assert error is None and served["value"] == tray
+    whole, error = _resolve_context_ref(ref="/geometry", session_state={}, prepared_recovery_request=prepared,
+                                        outline_event={})
+    assert error is None and whole["value"]["floor_extent_xy"] == [-10.5, 1.5, -4.0, 4.8]
+    missing, error = _resolve_context_ref(ref="/regions/Exit tray", session_state={}, prepared_recovery_request=prepared,
+                                          outline_event={})
+    assert missing is None and "is not recorded" in error
