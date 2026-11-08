@@ -468,7 +468,7 @@ function renderConditions() {
 
   const study2 = [
     ["Outlines composed", "Passed event-level framework outlines, the first 3 per LLM and scenario"],
-    ["Composing LLM", `The LLM that wrote the outline (${esc(C.effort)} effort)`],
+    ["Composing LLM", `${MODELS.map(modelName).join(", ")} (${esc(C.effort)} effort), each composing only the outlines it generated`],
     ["Composition checks", "Declared primitive effects and motion planning, by each event's RA"],
     ["Maximum turns", `${C.composition_turns} per composition`],
   ];
