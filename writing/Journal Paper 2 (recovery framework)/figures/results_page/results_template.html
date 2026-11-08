@@ -254,8 +254,10 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
       <p class="paper-cap" id="tab5-caption"></p>
       <p class="paper-panel">(a) Compared methods</p>
       <div class="table-wrap"><table class="paper" id="tab5a"></table></div>
-      <p class="paper-panel">(b) Setup</p>
+      <p class="paper-panel">(b) Outline generation (Study 1)</p>
       <div class="table-wrap"><table class="paper kv" id="tab5b"></table></div>
+      <p class="paper-panel">(c) Primitive composition and execution (Study 2)</p>
+      <div class="table-wrap"><table class="paper kv" id="tab5c"></table></div>
       <div class="paper-notes" id="tab5-notes"></div>
     </div>
     <p class="aside-line" id="tab5-source" style="margin:0"></p>
@@ -464,9 +466,18 @@ function renderConditions() {
   ];
   document.getElementById("tab5b").innerHTML = `<thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>${setup.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</tbody>`;
 
-  document.getElementById("tab5-caption").innerHTML = `<b>Table 4.</b> Experimental setup: (a) compared methods; (b) setup.`;
+  const study2 = [
+    ["Outlines composed", `${esc(SETTINGS[FW_INCREMENTAL].n)} outlines that passed the audit: for each LLM and scenario, the first three in run order (for ${modelName(MODELS[0])} also the outline executed)`],
+    ["Composing LLM", `The LLM that wrote the outline (${esc(C.effort)} effort)`],
+    ["Composition checks", "Declared primitive effects, MoveIt on the captured cell model, RA and CCA"],
+    ["Maximum turns", `${C.composition_turns} per composition`],
+    ["Execution", `For each scenario, the passed ${modelName(MODELS[0])} outline with the fewest events (ties: the earliest), executed once in Gazebo from its failure capture, with video`],
+  ];
+  document.getElementById("tab5c").innerHTML = `<thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>${study2.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</tbody>`;
+
+  document.getElementById("tab5-caption").innerHTML = `<b>Table 4.</b> Experimental setup: (a) compared methods; (b) outline generation (Study 1); (c) primitive composition and execution (Study 2).`;
   document.getElementById("tab5-notes").innerHTML = "";
-  document.getElementById("tab5-source").innerHTML = `Read from <code>outline_experiments.CONFIGURATIONS</code> and <code>recovery_case_safety</code>.`;
+  document.getElementById("tab5-source").innerHTML = `Read from <code>outline_experiments.CONFIGURATIONS</code>, <code>recovery_case_safety</code> and <code>primitive_composition</code>.`;
 }
 
 function renderSources() {

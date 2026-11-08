@@ -376,7 +376,10 @@ def scenario_rows() -> list[dict]:
 
 def conditions() -> dict:
     """Return the experimental conditions: the settings, the failure scenarios and what every attempt shares."""
-    return {"settings": setting_rows(), "scenarios": scenario_rows(), "effort": EFFORT}
+    from cais_spade_llm.recovery_framework.primitive_composition import _COMPOSITION_TURN_BUDGET
+
+    return {"settings": setting_rows(), "scenarios": scenario_rows(), "effort": EFFORT,
+            "composition_turns": _COMPOSITION_TURN_BUDGET}
 
 
 def page_data(placeholder: bool, batch_ids: list[str] | None, live: set[str] = frozenset()) -> dict:
