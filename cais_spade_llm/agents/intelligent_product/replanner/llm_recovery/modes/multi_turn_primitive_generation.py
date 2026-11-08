@@ -2330,7 +2330,8 @@ async def generate_primitive_batch_with_llm_agent(
         if prepared_recovery_request.get("composition_validation_version") == 1:
             prompt_text += (
                 "\n\nRA composition validation: author an ordered program that establishes every intended "
-                "resource and part postcondition from declared effects. A robot's resource_location is the last "
+                "resource and part postcondition from declared effects or what the checks find. A robot's "
+                "resource_location is the last "
                 "place it reached: a transfer's declared effect, a named pose's declared place, or the place whose "
                 "recorded area holds the gripper where a motion ends; a motion that ends in no recorded area leaves "
                 "it as it was. A KMR's is the place whose declared dock its base ends on, or none. Primitive support "

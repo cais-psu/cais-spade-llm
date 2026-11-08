@@ -795,6 +795,15 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   rim vertices, as it already checks boxes and meshes, so the gravity check decides (the 50 mm round peg rests at
   3° and tips from 5°). The RA's outline checks keep the exact test, so the outline results do not change. The 36
   are composed on the new commit; the `ab021aa` round is kept and left out.
+- 2026-11-08, Study 2 composition restarted a fourth time, after GPT-6.1 Terra's three Machining compositions had
+  finished on `c1a45b0` and two Opus Machining compositions were stopped minutes in. The composition prompt told
+  the LLM to establish every resource and part postcondition "from declared effects" and said how
+  `resource_location` is decided, but no primitive declares a `part_location` effect: the release check finds
+  where the part comes to rest. Terra stopped three times, without trying a place, on "no visible primitive
+  declares a part_location effect". The prompt now reads "from declared effects or what the checks find", the
+  outline stage's rule (a value holds when it already held, a declared action sets it, or the event's checks find
+  it); no other wording changes. At the user's request Terra's 12 compositions run first. The 36 are composed on
+  the new commit; the `c1a45b0` round is kept and left out.
 
 ### Tables and exports required for the paper
 
