@@ -298,7 +298,7 @@ def check_robot_step(evidence: dict, targets: dict, scene: RobotEventScene, *, i
         raise RuntimeError(f"Step {index} of the program is {written!r}, not the checked {primitive!r}")
     if primitive in _MOTIONS:
         found = _motion_check(evidence, scene, index=index, primitive=primitive, params=params,
-                              recovery_snapshot=recovery_snapshot)
+                              recovery_snapshot=recovery_snapshot, targets=targets)
     elif primitive in _UNMODELLED_MOTIONS:
         found = {"status": "NEEDS_CONTEXT", "reason": f"{primitive} step {index} ({scene.resource_id}): the "
                                                       f"composition's MoveIt check does not model {primitive}"}
@@ -369,13 +369,16 @@ def _slot_origin(evidence: dict, part: str) -> dict:
 
 
 def _release_contacts(model: Any, state: dict, scene: RobotEventScene, evidence: dict, move: dict, *,
-                      held: str | None) -> tuple[list, dict | None]:
+                      held: str | None, targets: dict | None = None) -> tuple[list, dict | None]:
     """Contacts a motion before a release makes by design: its arrival on the support, or its insertion.
 
-    The descent before a release onto a support may end with the part on the support that holds it there
-    (``projected_part_support`` at the descent's end): that one pair is allowed for this one motion. The motion
-    before a release into an assembly slot is the insertion, checked within the part's recorded corridor, and so is
-    each earlier motion on the way to that release that the corridor fits (``_insertion_stage``).
+    The descent before a release onto a support may touch the support the part is set on, as MoveIt's place allows
+    its support surface: the support the program's place calculation names for the part
+    (``support_placement.support_collision_id``), else the one ``projected_part_support`` finds under the part at the
+    descent's end. That one pair is allowed for this one motion; whether the part comes to rest there is the release
+    check's, which states its reason. The motion before a release into an assembly slot is the insertion, checked
+    within the part's recorded corridor, and so is each earlier motion on the way to that release that the corridor
+    fits (``_insertion_stage``).
     """
     from cais_spade_llm.recovery_framework import composed_motion_check as motion
     from cais_spade_llm.recovery_framework.geometry import compose
@@ -391,6 +394,10 @@ def _release_contacts(model: Any, state: dict, scene: RobotEventScene, evidence:
     if "assembly_slot" in (release.get("params") or {}):
         return [], motion.mating_contact_record(model, state, scene.resource_id, evidence, part_name=held,
                                                 target_origin_pose=_slot_origin(evidence, held), target_tool_pose=end)
+    calculated = ((targets or {}).get("compute_place_targets") or {}).get(held) or {}
+    named = (calculated.get("support_placement") or {}).get("support_collision_id")
+    if named:
+        return [motion.place_arrival_contact(model, held, [named])], None
     grasp = motion.projected_snapshot(model, state)["resources"][scene.resource_id]["grasp_transform"]
     support = motion.part_rest_support(model, held, compose(end, list(grasp)))
     if support.get("status") != "supported":
@@ -421,8 +428,11 @@ def _insertion_stage(model: Any, state: dict, scene: RobotEventScene, evidence: 
 
 
 def _motion_check(evidence: dict, scene: RobotEventScene, *, index: int, primitive: str, params: dict,
-                  recovery_snapshot: dict) -> dict:
-    """MoveIt's Cartesian path of one motion on the capture's model, from the joints the program has reached."""
+                  recovery_snapshot: dict, targets: dict | None = None) -> dict:
+    """MoveIt's Cartesian path of one motion on the capture's model, from the joints the program has reached.
+
+    ``targets`` are the event's calculated targets; a place calculation names the support a descent may touch.
+    """
     from cais_spade_llm.recovery_framework import composed_motion_check as motion
 
     rid = scene.resource_id
@@ -436,7 +446,7 @@ def _motion_check(evidence: dict, scene: RobotEventScene, *, index: int, primiti
         # The part a grasp took still rests on its support until the robot's first motion after the grasp.
         if held is not None and (evidence.get("attachment") or {}).get("resting_on_support"):
             departure = motion.support_departure_record(model, state, rid)
-        contacts, mating = _release_contacts(model, state, scene, evidence, move, held=held)
+        contacts, mating = _release_contacts(model, state, scene, evidence, move, held=held, targets=targets)
     except motion.MissingMotionContext as exc:
         return {"status": "NEEDS_CONTEXT", "reason": f"{primitive} step {index} ({rid}): {exc}"}
     result = motion.check_robot_moves(model, state, rid, [move], allowed_contacts=contacts,

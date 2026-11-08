@@ -363,8 +363,11 @@ def projected_part_support(*, part_name: str, state: dict, evidence: dict,
             motion sets down: its end lands within numerical residue of the
             face (5.4e-7 m inside a belt in the fixtures), which the exact test
             here, ``min(contact_min_depth, contact_surface_layer)`` below the
-            face and 1e-12 m above it, does not count. The RA's calls keep the
-            exact test.
+            face and 1e-12 m above it, does not count. It also checks a tilted
+            cylinder by its rim vertices, as boxes and meshes are, where the
+            exact test refuses it: a part keeps the tilt it settled with in the
+            capture (8e-4 rad for the round part in M2 in the Machining
+            capture). The RA's calls keep the exact test.
     """
     from cais_spade_llm.recovery_framework.geometry import compose, rotate
 
@@ -452,8 +455,9 @@ def projected_part_support(*, part_name: str, state: dict, evidence: dict,
                        for value in (radius, length)):
                     raise ValueError("Recorded cylinder geometry is incomplete")
                 axis = rotate(collision_pose[3:], [0., 0., 1.])
-                if not math.isclose(abs(sum(a * b for a, b in zip(axis, up, strict=True))),
-                                    1., rel_tol=1e-12, abs_tol=1e-12):
+                upright = math.isclose(abs(sum(a * b for a, b in zip(axis, up, strict=True))),
+                                       1., rel_tol=1e-12, abs_tol=1e-12)
+                if not upright and not contact_layer_tolerance:
                     raise ValueError("Tilted cylinder settling has no recorded projection model")
                 # An inscribed polygon is a conservative subset of a circular face.
                 vertices = [[radius * math.cos(index * math.pi / 8), radius * math.sin(index * math.pi / 8), z * length / 2]

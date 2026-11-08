@@ -783,6 +783,18 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   contract as contradictory and stalled on every Machining pause. The served contract's description now says
   where `part_name` comes from (a lookup fix; conditions, parameters and the prompt unchanged). The 36 are
   composed on `ab021aa`; the `d472696` round is kept and left out.
+- 2026-11-08, Study 2 composition restarted a third time, after 3 of the 36 had finished on `ab021aa` (GPT-6.1
+  Terra's three Machining compositions, all refused) and two Opus Machining compositions were stopped mid-run.
+  The round part settled in M2 tilted 8e-4 rad in the capture. A tray place whose tool kept its orientation kept
+  that tilt, and composition's support projection refused any tilted cylinder (axis vertical within 1e-12:
+  "Tilted cylinder settling has no recorded projection model"). The place descent then got no arrival allowance,
+  and the LLM saw only an unrelated collision of the part with the tray, 0.0007 mm deep. Two fixes in the
+  composition checks, none in the prompt, the lookups or the outline stage: the descent may touch the support the
+  place calculation names, as MoveIt's place allows its support surface, and whether the part rests there stays
+  the release check's, which states its reason; composition's contact-layer test checks a tilted cylinder by its
+  rim vertices, as it already checks boxes and meshes, so the gravity check decides (the 50 mm round peg rests at
+  3° and tips from 5°). The RA's outline checks keep the exact test, so the outline results do not change. The 36
+  are composed on the new commit; the `ab021aa` round is kept and left out.
 
 ### Tables and exports required for the paper
 

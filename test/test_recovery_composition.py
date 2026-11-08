@@ -1718,7 +1718,7 @@ def _stated_pose_case(stated_pose, steps, monkeypatch, facts=None):
     def check(**_):
         return {"allowed": True, "feasibility_status": "FEASIBLE", "evidence": {}}
 
-    def reached(evidence, scene, *, index, primitive, params, recovery_snapshot):
+    def reached(evidence, scene, *, index, primitive, params, recovery_snapshot, targets=None):
         # MoveIt is not what these cases test: the motion reaches the pose its parameters state.
         end = [params[axis] for axis in "xyz"] + [params.get(axis, start["current_pose"][axis]) for axis in _TOOL_DOWN]
         return {"composed_motion": {"end_joints": [], "end_pose": end}}
@@ -2782,6 +2782,37 @@ def test_every_aligned_motion_on_the_way_to_a_slot_release_carries_the_insertion
     with pytest.raises(motion.MissingMotionContext):
         robot._release_contacts(None, {}, scene, {}, {"step_index": 3}, held="gear_small")
     assert robot._release_contacts(None, {}, scene, {}, {"step_index": 2}, held=None) == ([], None)
+
+
+def test_a_place_descent_may_touch_the_support_its_place_calculation_names(monkeypatch):
+    """Study 2, 2026-11-08: Terra's tray descent was refused as an unrelated collision with the M2 staging tray.
+
+    The round part kept the 8e-4 rad tilt it settled with in M2, the allowance asked the support projection whether
+    the part would rest at the descent's end, and its refusal was dropped. The support the place calculation names
+    is allowed now, as MoveIt's place allows its support surface; the release check judges where the part rests.
+    """
+    from cais_spade_llm.recovery_framework import composed_motion_check as motion
+    from cais_spade_llm.resources.robot import recovery_composition as robot
+
+    part, tray = "RGOCG4-50_Round_4mm", "M2 staging tray::link::surface"
+    move = {"primitive": "move_cartesian", "params": {}}
+    release = {"primitive": "release_part", "params": {"part_name": part}}
+    scene = SimpleNamespace(program=[{"primitive": "compute_place_targets", "params": {}}, move, release],
+                            resource_id="ur5e-2")
+    monkeypatch.setattr(motion, "motion_end_pose", lambda model, state, rid, step: [-2.6, 1.4, 1.243, 0., 1., 0., 0.])
+    monkeypatch.setattr(motion, "projected_snapshot",
+                        lambda model, state: {"resources": {"ur5e-2": {"grasp_transform": [0., 0., .243, 0., 0., 0., 1.]}}})
+    monkeypatch.setattr(motion, "part_rest_support",
+                        lambda model, held, pose: {"status": "NEEDS_CONTEXT",
+                                                   "reason": "Tilted cylinder settling has no recorded projection model"})
+    monkeypatch.setattr(motion, "place_arrival_contact",
+                        lambda model, held, ids: {"part_name": held, "support_collision_ids": list(ids)})
+    targets = {"compute_place_targets": {part: {"support_placement": {"support_collision_id": tray}}}}
+
+    contacts, mating = robot._release_contacts(None, {}, scene, {}, {"step_index": 1}, held=part, targets=targets)
+    assert contacts == [{"part_name": part, "support_collision_ids": [tray]}] and mating is None
+    # A program with no place calculation for the part still takes the support found under it at the descent's end.
+    assert robot._release_contacts(None, {}, scene, {}, {"step_index": 1}, held=part, targets={}) == ([], None)
 
 
 def test_composition_serves_the_recorded_regions_and_scene_geometry_as_the_outline_stage_does():

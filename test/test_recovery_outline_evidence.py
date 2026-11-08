@@ -1380,6 +1380,42 @@ def test_projected_deposit_uses_exact_collision_shapes_and_declared_contact_marg
     assert result["status"] == "NEEDS_CONTEXT"
 
 
+def test_composition_checks_a_tilted_cylinder_by_its_rim_where_the_exact_test_refuses_it():
+    """Study 2, 2026-11-08: the round part settled in M2 with an 8e-4 rad tilt and kept it on the way to the tray.
+
+    The RA's exact test still refuses any tilted cylinder. Composition's contact-layer test checks it by its rim
+    vertices, as it checks boxes and meshes: a slight tilt rests within the recorded layer, a large one on no support.
+    """
+    import math
+    from cais_spade_llm.recovery_framework.geometry import multiply
+    from cais_spade_llm.resources.recovery_geometry import projected_part_support
+    from cais_spade_llm.resources.robot.recovery_capability import _support_place_pose
+
+    scene, _, _, task = _custody_event_case(False)
+    scene["physics_evidence"]["models"]["square"]["joint_count"] = 0
+    scene["physics_evidence"]["models"]["square"]["links"]["link"]["collisions"][0]["geometry"] = {
+        "type": "cylinder", "radius": .02, "length": .1}
+    # The captures record Gazebo's 1 mm contact layer.
+    configuration = scene["physics_evidence"]["physics_configuration"]
+    configuration["sdf"] = configuration["sdf"].replace("<contact_surface_layer>0<", "<contact_surface_layer>0.001<")
+    part, destination = task["part_name"], "Buffer For Machined parts"
+    scene["resources"][destination]["geometry_source"] = {"model": "table"}
+    target = {"target_origin_pose": {"x": .1, "y": .2, "z": -.05}, "support_surface_height": -.05}
+    resting = _support_place_pose(part=part, destination=destination, target=target, physical_evidence=scene)["part_pose"]
+
+    def support(tilt: float, tolerance: bool) -> dict:
+        pose = [*resting[:3], *multiply([math.sin(tilt / 2), 0., 0., math.cos(tilt / 2)], resting[3:])]
+        state = deepcopy(scene["snapshot"])
+        state["parts"][part]["current_pose"] = pose
+        return projected_part_support(part_name=part, state=state, evidence=scene, contact_layer_tolerance=tolerance)
+
+    assert support(0., False)["status"] == "supported"
+    assert support(8e-4, False)["reason"] == "Tilted cylinder settling has no recorded projection model"
+    found = support(8e-4, True)
+    assert found["status"] == "supported", found.get("reason")
+    assert support(.3, True)["status"] != "supported"
+
+
 def test_projected_support_keeps_original_pose_through_complete_json_roundtrip():
     from cais_spade_llm.resources.recovery_geometry import projected_part_support
 
