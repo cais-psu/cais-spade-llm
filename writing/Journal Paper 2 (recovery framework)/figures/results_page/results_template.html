@@ -269,7 +269,7 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     <p class="aside-line" id="coverage-note" style="margin:0"></p>
   </section>
 
-  <h2 class="group">6.3.1 · Performance results · main model</h2>
+  <h2 class="group">6.3.1 · Performance results · all three models</h2>
 
   <figure class="plate" id="fig11">
     <div class="plate-head">
@@ -308,18 +308,6 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     <figcaption id="tab7-caption"></figcaption>
   </figure>
 
-  <h2 class="group">6.3.2 · Model comparison</h2>
-
-  <figure class="plate" id="fig13">
-    <div class="plate-head">
-      <h3>Fig. 13 · Model comparison</h3>
-      <div class="tags" data-tags="model comparison"></div>
-    </div>
-    <div class="legend" id="fig13-legend" aria-hidden="true"></div>
-    <div class="wide-svg narrow" id="fig13-chart"></div>
-    <figcaption id="fig13-caption"></figcaption>
-  </figure>
-
   <h2 class="group">Every attempt</h2>
 
   <figure class="plate" id="attempts">
@@ -350,7 +338,9 @@ const SETTINGS = DATA.settings;
 const ORDER = DATA.scenarios;
 const SHORT = DATA.scenario_short;
 const MODELS = DATA.models;
-const MAIN = MODELS[0];
+// Every figure and table pools the three models' attempts (user decision, 2026-11-08); Fig. 11 marks each model.
+const POOLED = { id: "all", planned: MODELS.reduce((t, m) => t + m.planned, 0) };
+const MODEL_NAMES = `${MODELS.slice(0, -1).map((m) => esc(m.name)).join(", ")} and ${esc(MODELS[MODELS.length - 1].name)}`;
 const FW_SINGLE = 4, FW_INCREMENTAL = 5;
 // Display order: what the LLM gets, then outline-level above event-level in each group.
 const SETTING_GROUPS = [
@@ -381,6 +371,18 @@ function modelMark(m, x, y, r, { stroke = 2, t } = {}) {
   }
   if (shape === "diamond") {
     const d = r * 1.2;
+    return `<path d="M${x},${y - d} L${x + d},${y} L${x},${y + d} L${x - d},${y} Z" style="${style}"${data}/>`;
+  }
+  return `<circle cx="${x}" cy="${y}" r="${r}" style="${style}"${data}/>`;
+}
+// A model's share passed on a Fig. 11 bar: its shape in ink with a halo, readable on every outcome color.
+function passMark(m, x, y, t) {
+  const shape = m.mark || (m.vendor === "Claude" ? "square" : "circle"), r = 3.4;
+  const style = "fill:var(--ink);stroke:var(--plate);stroke-width:1.2";
+  const data = t === undefined ? "" : ` class="hit" data-t="${t}"`;
+  if (shape === "square") return `<rect x="${x - r}" y="${y - r}" width="${r * 2}" height="${r * 2}" style="${style}"${data}/>`;
+  if (shape === "diamond") {
+    const d = r * 1.3;
     return `<path d="M${x},${y - d} L${x + d},${y} L${x},${y + d} L${x - d},${y} Z" style="${style}"${data}/>`;
   }
   return `<circle cx="${x}" cy="${y}" r="${r}" style="${style}"${data}/>`;
@@ -467,11 +469,12 @@ function renderCoverage() {
     : "Started attempts only; attempts a batch never started are left out of every count.";
 }
 
-/* ---------- Fig. 11: audited outcome by setting, main model ---------- */
+/* ---------- Fig. 11: audited outcome by setting, all models pooled, each model marked ---------- */
 function renderOutcome() {
-  const anyNotAudited = SETTINGS.some((_, s) => sumOver(MAIN, s, (c) => c.classes[NOT_AUDITED]) > 0);
+  const anyNotAudited = SETTINGS.some((_, s) => sumOver(POOLED, s, (c) => c.classes[NOT_AUDITED]) > 0);
   document.getElementById("fig11-legend").innerHTML = CLASSES.filter((_, i) => i < NOT_AUDITED || anyNotAudited)
-    .map((c) => `<span><i class="sw" style="background:${c.c};outline:1px solid var(--hair)"></i>${c.label}</span>`).join("");
+    .map((c) => `<span><i class="sw" style="background:${c.c};outline:1px solid var(--hair)"></i>${c.label}</span>`).join("")
+    + MODELS.map((m) => `<span><svg width="14" height="14">${passMark(m, 7, 7)}</svg>${esc(m.name)} passed</span>`).join("");
   const W = 550, X0 = 246, BW = 200, RH = 34, GH = 18, TOP = 16, EX = X0 + BW + 10;
   const H = TOP + SETTING_GROUPS.length * GH + SETTINGS.length * RH + 20;
   let clipId = 0;
@@ -489,7 +492,7 @@ function renderOutcome() {
       p.push(`<text x="0" y="${y + 14}" class="hdr">${g.label}</text>`);
       y += GH;
       g.rows.forEach((s) => {
-        const c = cell(MAIN, s, scn), bh = RH - 12;
+        const c = cell(POOLED, s, scn), bh = RH - 12;
         p.push(`<text x="0" y="${y + 13}" class="lbl">${esc(settingLabel(s))}</text><text x="0" y="${y + 26}" class="lbl2">${esc(SETTINGS[s].d)} · n = ${c.n}</text>`);
         if (!c.n) {
           p.push(`<rect x="${X0}" y="${y + 4}" width="${BW}" height="${bh}" rx="3" style="fill:none;stroke:var(--axis);stroke-dasharray:3 3"/>`);
@@ -509,18 +512,24 @@ function renderOutcome() {
           x += w;
         });
         p.push("</g>");
+        MODELS.forEach((m, i) => {
+          const cm = cell(m, s, scn);
+          if (!cm.n) return;
+          const t = tip(`<b>${esc(scn)}</b> · ${esc(settingLabel(s))}<br>${esc(m.name)}: passed <b>${cm.classes[0]}/${cm.n}</b>`);
+          p.push(passMark(m, X0 + (cm.classes[0] / cm.n) * BW, y + 4 + bh / 2 + markOffset(i, 6), t));
+        });
         const effort = c.tokens_k === null ? dash : `${c.tokens_k}k`;
         p.push(`<text x="${EX}" y="${y + 13}" class="val">${effort} <tspan class="lbl2">· ${c.minutes === null ? dash : c.minutes} min</tspan></text>`);
         p.push(`<text x="${EX}" y="${y + 26}" class="lbl2">${c.lookups === null ? dash : c.lookups} lookups</text>`);
         y += RH;
       });
     });
-    return `<div class="panel"><h4>${esc(scn)}</h4><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Audited outcomes by setting for ${esc(scn)}, main model">${p.join("")}</svg></div>`;
+    return `<div class="panel"><h4>${esc(scn)}</h4><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Audited outcomes by setting for ${esc(scn)}, all models pooled">${p.join("")}</svg></div>`;
   }).join("");
-  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, for the main model (${esc(MAIN.name)}; ${MAIN.planned} attempts per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts. Each attempt has the audit's outcome, set by the first failing check of its first failing event. Numbers at the right are the median tokens, generation time and fact lookups per attempt. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
+  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, pooled over the three models (${MODEL_NAMES}, all at reasoning effort ${esc(DATA.conditions.effort)}; ${MODELS[0].planned} attempts per model, ${POOLED.planned} per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts; each model's mark sits at its own share passed. The models differ in vendor, size and release date, so the marks show whether the effect holds across models, not which model is better. Each attempt has the audit's outcome, set by the first failing check of its first failing event. Numbers at the right are the median tokens, generation time and fact lookups per attempt over all models. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
 }
 
-/* ---------- Table 6: what validation rejected, framework settings, main model ---------- */
+/* ---------- Table 6: what validation rejected, framework settings, all models pooled ---------- */
 function renderTable6() {
   const head = `<thead>
     <tr class="grp"><th></th><th colspan="5" class="sep">${esc(SETTINGS[FW_SINGLE].n)}</th><th colspan="5" class="sep">${esc(SETTINGS[FW_INCREMENTAL].n)}</th></tr>
@@ -532,24 +541,24 @@ function renderTable6() {
     const r = c.rejections;
     return `<td class="sep">${c.completed}/${c.n}</td><td>${redo ? (c.redo ?? dash) : ""}</td><td>${r.ra + r.physical}</td><td>${r.cca}</td><td>${r.eq6}</td>`;
   };
-  const rows = ORDER.map((scn) => `<tr><td>${esc(scn)}</td>${group(cell(MAIN, FW_SINGLE, scn))}${group(cell(MAIN, FW_INCREMENTAL, scn))}</tr>`).join("");
+  const rows = ORDER.map((scn) => `<tr><td>${esc(scn)}</td>${group(cell(POOLED, FW_SINGLE, scn))}${group(cell(POOLED, FW_INCREMENTAL, scn))}</tr>`).join("");
   const total = (s) => {
-    const cs = ORDER.map((scn) => cell(MAIN, s, scn)).filter((c) => c.n && c.rejections);
+    const cs = ORDER.map((scn) => cell(POOLED, s, scn)).filter((c) => c.n && c.rejections);
     if (!cs.length) return group({ n: 0 });
     const add = (f) => cs.reduce((t, c) => t + f(c), 0);
     return group({ n: add((c) => c.n), completed: add((c) => c.completed), rejections: {
       ra: add((c) => c.rejections.ra), physical: add((c) => c.rejections.physical), cca: add((c) => c.rejections.cca), eq6: add((c) => c.rejections.eq6) } }, false);
   };
   document.getElementById("tab6-table").innerHTML = head + `<tbody>${rows}<tr class="total"><td>All four scenarios</td>${total(FW_SINGLE)}${total(FW_INCREMENTAL)}</tr></tbody>`;
-  document.getElementById("tab6-caption").innerHTML = `<b>Table 6.</b> Rejections in the two framework settings for the main model (${esc(MAIN.name)}), summed over the started attempts per scenario. In ${esc(SETTINGS[FW_SINGLE].n)} a rejection stops a whole outline at its first failing event, and the LLM rewrites the outline; in ${esc(SETTINGS[FW_INCREMENTAL].n)} a rejection applies to one proposed event, which the LLM revises. RA (symbolic and physical evidence) runs before CCA safety in both, so every CCA safety rejection is a proposal that passed RA: a feasible but unsafe event (H2). The last column of each group counts CCA completion refusals (Eq. 6). Completed counts the attempts that finished an outline within ${DATA.max_turns} turns. The other models' rejections are in Fig. 13.`;
+  document.getElementById("tab6-caption").innerHTML = `<b>Table 6.</b> Rejections in the two framework settings, pooled over the three models (${MODEL_NAMES}) and summed over the started attempts per scenario. In ${esc(SETTINGS[FW_SINGLE].n)} a rejection stops a whole outline at its first failing event, and the LLM rewrites the outline; in ${esc(SETTINGS[FW_INCREMENTAL].n)} a rejection applies to one proposed event, which the LLM revises. RA (symbolic and physical evidence) runs before CCA safety in both, so every CCA safety rejection is a proposal that passed RA: a feasible but unsafe event (H2). The last column of each group counts CCA completion refusals (Eq. 6). Completed counts the attempts that finished an outline within ${DATA.max_turns} turns.`;
 }
 
-/* ---------- Fig. 12: outline lookups by reference, main model, setting 6 ---------- */
+/* ---------- Fig. 12: outline lookups by reference, all models pooled, setting 6 ---------- */
 function renderRetrieval() {
   const rows = DATA.references;
   const W = 720, X0 = 270, CW = (W - X0) / ORDER.length, RH = 28, TOP = 26;
   const H = TOP + (rows.length + 1) * RH + 8;
-  const counted = ORDER.map((scn) => cell(MAIN, FW_INCREMENTAL, scn).references);
+  const counted = ORDER.map((scn) => cell(POOLED, FW_INCREMENTAL, scn).references);
   const values = counted.map((byPath) => (byPath ? rows.map((path) => byPath[path] || 0) : null));
   const max = Math.max(1, ...values.flatMap((v) => v || []));
   const p = [];
@@ -565,7 +574,7 @@ function renderRetrieval() {
         return;
       }
       const v = row[i], level = v > 0 ? Math.max(1, Math.round((v / max) * 9)) : 0, dark = level >= 7;
-      const t = tip(`<b>${esc(scn)}</b> · <code>${esc(path)}</code><br><b>${v}</b> lookups per attempt (mean of ${cell(MAIN, FW_INCREMENTAL, scn).n})`);
+      const t = tip(`<b>${esc(scn)}</b> · <code>${esc(path)}</code><br><b>${v}</b> lookups per attempt (mean of ${cell(POOLED, FW_INCREMENTAL, scn).n})`);
       p.push(`<rect x="${x + 1.5}" y="${y + 1.5}" width="${CW - 3}" height="${RH - 3}" rx="3" style="fill:${v > 0 ? PASS_RAMP[level] : "var(--band)"}" data-t="${t}"/>`);
       p.push(v > 0
         ? `<text x="${cx}" y="${ty}" text-anchor="middle" style="font:500 11.5px var(--font-ui);fill:${dark ? "#ffffff" : "#15181d"}" pointer-events="none">${v}</text>`
@@ -576,11 +585,11 @@ function renderRetrieval() {
   p.push(`<line x1="0" y1="${y + 2}" x2="${W}" y2="${y + 2}" class="base-line"/>`);
   p.push(`<text x="0" y="${y + RH / 2 + 5}" class="lbl">total</text>`);
   values.forEach((row, j) => p.push(`<text x="${X0 + j * CW + CW / 2}" y="${y + RH / 2 + 5}" class="val" text-anchor="middle">${row ? Math.round(row.reduce((a, c) => a + c, 0) * 10) / 10 : dash}</text>`));
-  document.getElementById("fig12-svg").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Outline lookups per attempt by reference and failure scenario, main model">${p.join("")}</svg>`;
-  document.getElementById("fig12-caption").innerHTML = `<b>Fig. 12.</b> Context retrieved while building the recovery outline, by failure scenario: mean lookups per attempt of each reference in the knowledge base 𝒦, for the main model in ${esc(SETTINGS[FW_INCREMENTAL].n)}. Each row is a reference as the outline prompt lists it, with the resource, part, region or key left out. Shading is scaled to the largest mean; a dot means no lookups and a dash means no attempts. The composition-stage rows follow once composition runs.`;
+  document.getElementById("fig12-svg").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Outline lookups per attempt by reference and failure scenario, all models pooled">${p.join("")}</svg>`;
+  document.getElementById("fig12-caption").innerHTML = `<b>Fig. 12.</b> Context retrieved while building the recovery outline, by failure scenario: mean lookups per attempt of each reference in the knowledge base 𝒦, pooled over the three models, in ${esc(SETTINGS[FW_INCREMENTAL].n)}. Each row is a reference as the outline prompt lists it, with the resource, part, region or key left out. Shading is scaled to the largest mean; a dot means no lookups and a dash means no attempts. The composition-stage rows follow once composition runs.`;
 }
 
-/* ---------- Table 7: setting 6 through primitive composition, main model ---------- */
+/* ---------- Table 7: setting 6 through primitive composition, all models pooled ---------- */
 function renderTable7() {
   document.getElementById("tab7-title").textContent = `Table 7 · ${SETTINGS[FW_INCREMENTAL].n}, through primitive composition`;
   const head = `<thead><tr>
@@ -598,109 +607,14 @@ function renderTable7() {
   } else {
     let outlines = 0, composed = 0, started = 0;
     body = ORDER.map((scn) => {
-      const c = cell(MAIN, FW_INCREMENTAL, scn), r = DATA.composition[scn], outline = c.classes[0];
+      const c = cell(POOLED, FW_INCREMENTAL, scn), r = DATA.composition[scn], outline = c.classes[0];
       outlines += outline; composed += r.comp; started += c.n;
       return `<tr><td>${esc(scn)}</td><td>${outline}/${c.n}</td><td>${r.comp}/${outline}</td><td>${r.comp}/${c.n} ${ci(r.comp, c.n)}</td>
         <td>${r.ev[0]} / ${r.ev[1]}</td><td>${r.prims}</td><td>${r.lookups[0]} / ${r.lookups[1]}</td><td>${r.targeted}%</td><td>${r.tokens_k}k</td><td>${r.minutes} min</td></tr>`;
     }).join("") + `<tr class="total"><td>All four scenarios</td><td>${outlines}/${started}</td><td>${composed}/${outlines}</td><td>${composed}/${started} ${ci(composed, started)}</td><td colspan="6"></td></tr>`;
   }
   document.getElementById("tab7-table").innerHTML = head + `<tbody>${body}</tbody>`;
-  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> ${esc(SETTINGS[FW_INCREMENTAL].n)} carried through primitive composition, for the main model (${esc(MAIN.name)}, one capture per scenario, offline planning). Composition completion is conditional on an accepted outline. Overall completion counts both stages in the same attempt over all started attempts, with a 95% Wilson interval. New events are recovery events absent from the nominal models; nominal events are the connection to the remaining plan. Targeted is the share of the outline's resource and part lookups that were about a resource or part in the accepted outline.`;
-}
-
-/* ---------- Fig. 13: every model ---------- */
-const CHECKS = [
-  { label: "RA feasibility (symbolic)", key: "ra", color: "var(--s2)" },
-  { label: "RA physical evidence", key: "physical", color: "var(--s2)" },
-  { label: "CCA safety", key: "cca", color: "var(--s4)" },
-];
-function renderComparison() {
-  document.getElementById("fig13-legend").innerHTML = MODELS.map((m) => `<span><svg width="14" height="14">${modelMark(m, 7, 7, 5)}</svg>${esc(m.name)} (${esc(m.role)})</span>`).join("");
-  const X0 = 280, X1 = 490, cols = MODELS.map((_, i) => 506 + i * 48), W = 506 + MODELS.length * 48;
-  const xs = (q) => X0 + q * (X1 - X0);
-  const TOP = 22, GH = 22, RH = 26, RR = 24;
-  const bottom = TOP + SETTING_GROUPS.length * GH + SETTINGS.length * RH;
-  // Share of checked candidate events rejected in setting 6, per model and check.
-  const shares = MODELS.map((m) => {
-    const cs = ORDER.map((scn) => cell(m, FW_INCREMENTAL, scn)).filter((c) => c.n && c.rejections && c.proposals);
-    const checked = cs.reduce((t, c) => t + c.proposals, 0);
-    return { checked, values: CHECKS.map((k) => (checked ? cs.reduce((t, c) => t + c.rejections[k.key], 0) / checked : null)) };
-  });
-  // Rejection scale in 10% steps, so the gridlines fall on round shares.
-  const MAX = Math.max(0.1, Math.ceil(Math.max(0, ...shares.flatMap((s) => s.values.filter((v) => v !== null))) / 0.1) * 0.1);
-  const xr = (v) => X0 + (v / MAX) * (X1 - X0);
-  const rTop = bottom + 46, rBottom = rTop + CHECKS.length * RR, H = rBottom + 40;
-  const p = [];
-  const columnMarks = (y) => MODELS.forEach((m, i) => p.push(modelMark(m, cols[i] + 8, y, 4.5)));
-
-  p.push(`<text x="0" y="12" class="hdr">OUTLINES PASSED · ALL FOUR SCENARIOS POOLED</text>`);
-  columnMarks(8);
-  [0, 0.25, 0.5, 0.75, 1].forEach((q) => {
-    p.push(`<line x1="${xs(q)}" y1="${TOP}" x2="${xs(q)}" y2="${bottom}" class="${q === 0 ? "base-line" : "grid-line"}"/>`);
-    p.push(`<text x="${xs(q)}" y="${bottom + 14}" class="ax" text-anchor="middle">${pct(q)}</text>`);
-  });
-  let y = TOP;
-  SETTING_GROUPS.forEach((g) => {
-    p.push(`<text x="0" y="${y + 15}" class="hdr">${g.label}</text>`);
-    y += GH;
-    g.rows.forEach((s) => {
-      const cy = y + RH / 2;
-      p.push(`<text x="0" y="${cy + 4}" class="lbl">${esc(settingLabel(s))}</text>`);
-      // Grey bar: every model's attempts in this setting pooled.
-      const all = MODELS.reduce((t, m) => ({ k: t.k + pooled(m, s).k, n: t.n + pooled(m, s).n }), { k: 0, n: 0 });
-      if (all.n) {
-        const [alo, ahi] = wilson(all.k, all.n);
-        const at = tip(`<b>All models pooled</b> · ${esc(settingLabel(s))}<br>passed <b>${all.k}/${all.n}</b> (${pct(all.k / all.n)})<br><span class="tw">95% CI ${pct(alo)}–${pct(ahi)}</span>`);
-        p.push(`<rect x="${xs(0)}" y="${cy - RH / 2 + 3}" width="${Math.max(0, xs(all.k / all.n) - xs(0))}" height="${RH - 6}" style="fill:var(--ink-2);opacity:0.12" data-t="${at}"/>`);
-      }
-      MODELS.forEach((m, mi) => {
-        const { k, n } = pooled(m, s), my = cy + markOffset(mi, 7);
-        if (!n) {
-          p.push(`<text x="${cols[mi]}" y="${cy + 4}" class="lbl2">${dash}</text>`);
-          return;
-        }
-        const q = k / n, [lo, hi] = wilson(k, n);
-        const t = tip(`<b>${esc(m.name)}</b> (${esc(m.role)}) · ${esc(settingLabel(s))}<br>passed <b>${k}/${n}</b> (${pct(q)})<br><span class="tw">95% CI ${pct(lo)}–${pct(hi)}</span>`);
-        p.push(`<path d="M${xs(lo)},${my - 3} V${my + 3} M${xs(lo)},${my} H${xs(hi)} M${xs(hi)},${my - 3} V${my + 3}" style="stroke:${m.color};stroke-width:1.4;fill:none;opacity:0.55"/>`);
-        p.push(modelMark(m, xs(q), my, 4.5, { t }));
-        p.push(`<text x="${cols[mi]}" y="${cy + 4}" class="val">${pct(q)}</text>`);
-      });
-      y += RH;
-    });
-  });
-
-  p.push(`<text x="0" y="${rTop - 12}" class="hdr">CHECKED EVENTS REJECTED · ${esc(SETTINGS[FW_INCREMENTAL].n.toUpperCase())}</text>`);
-  columnMarks(rTop - 16);
-  [0, MAX / 2, MAX].forEach((v, k) => {
-    p.push(`<line x1="${xr(v)}" y1="${rTop}" x2="${xr(v)}" y2="${rBottom}" class="${k === 0 ? "base-line" : "grid-line"}"/>`);
-    p.push(`<text x="${xr(v)}" y="${rBottom + 14}" class="ax" text-anchor="middle">${pct(v)}</text>`);
-  });
-  y = rTop;
-  CHECKS.forEach((check, j) => {
-    const cy = y + RR / 2;
-    p.push(`<rect x="0" y="${cy - 5}" width="3" height="10" style="fill:${check.color}"/><text x="8" y="${cy + 4}" style="font:400 11px var(--font-ui);fill:var(--ink-2)">${esc(check.label)}</text>`);
-    p.push(`<line x1="${X0}" y1="${cy}" x2="${X1}" y2="${cy}" class="grid-line"/>`);
-    MODELS.forEach((m, i) => {
-      const v = shares[i].values[j];
-      if (v === null) {
-        p.push(`<text x="${cols[i]}" y="${cy + 4}" class="lbl2">${dash}</text>`);
-        return;
-      }
-      const t = tip(`<b>${esc(m.name)}</b> · ${esc(check.label)}<br><b>${pct(v)}</b> of ${shares[i].checked} checked events rejected`);
-      p.push(modelMark(m, xr(v), cy + markOffset(i, 6), 4.5, { t }));
-      p.push(`<text x="${cols[i]}" y="${cy + 4}" class="val">${pct(v)}</text>`);
-    });
-    y += RR;
-  });
-  p.push(`<text x="0" y="${rBottom + 30}" class="lbl" style="font-weight:600">any check</text>`);
-  MODELS.forEach((m, i) => {
-    const vs = shares[i].values;
-    p.push(`<text x="${cols[i]}" y="${rBottom + 30}" class="val" style="font-weight:600">${vs.some((v) => v === null) ? dash : pct(vs.reduce((a, c) => a + c, 0))}</text>`);
-  });
-  document.getElementById("fig13-chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Share of attempts passed per setting and ${esc(SETTINGS[FW_INCREMENTAL].n)} rejections by check, per model">${p.join("")}</svg>`;
-  const shapes = { square: "squares", circle: "circles", diamond: "diamonds" };
-  const named = MODELS.map((m) => `${esc(m.name)} (${shapes[m.mark || (m.vendor === "Claude" ? "square" : "circle")]}${m === MAIN ? ", main model" : ""})`);
-  document.getElementById("fig13-caption").innerHTML = `<b>Fig. 13.</b> ${["No", "One", "Two", "Three", "Four", "Five"][MODELS.length] || MODELS.length} models: ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}, all at reasoning effort ${esc(DATA.conditions.effort)} and ${MAIN.planned} attempts per setting and scenario. The figure shows whether the framework's effect holds across models, not which model is better: the models differ in vendor, size and release date. The prompt was first developed on gpt-5.4 (frozen on 21 Oct 2026), and later code fixes were tried on Claude Opus 5.5. Top: share of started attempts passed in each setting, pooled over the four scenarios, with 95% Wilson intervals per model; the grey bar pools every model's attempts, and the main model's marks pool the bars of Fig. 11. Bottom: share of each model's checked candidate events that each check rejected in ${esc(SETTINGS[FW_INCREMENTAL].n)}. A provider refusal counts as a failed attempt; no automatic fallback to another model is used.`;
+  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> ${esc(SETTINGS[FW_INCREMENTAL].n)} carried through primitive composition, pooled over the three models (${MODEL_NAMES}; one capture per scenario, offline planning). Composition completion is conditional on an accepted outline. Overall completion counts both stages in the same attempt over all started attempts, with a 95% Wilson interval. New events are recovery events absent from the nominal models; nominal events are the connection to the remaining plan. Targeted is the share of the outline's resource and part lookups that were about a resource or part in the accepted outline.`;
 }
 
 /* ---------- Every attempt ---------- */
@@ -749,7 +663,6 @@ renderOutcome();
 renderTable6();
 renderRetrieval();
 renderTable7();
-renderComparison();
 renderAttempts();
 </script>
 </body></html>

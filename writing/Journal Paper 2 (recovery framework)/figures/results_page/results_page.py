@@ -1,7 +1,7 @@
 """Write the RCIM results page (Section 6.3 figures and tables) from the Study 1 batch records.
 
-The page has the layout of the figure mock-ups: Fig. 11, Table 6, Fig. 12 (outline rows) and Table 7 for the
-main model, Fig. 13 for every model, and every attempt. With ``--placeholder`` it is filled with layout numbers
+The page has the layout of the figure mock-ups: Fig. 11 (each model marked), Table 6, Fig. 12 (outline rows) and
+Table 7, all pooled over the models, and every attempt. With ``--placeholder`` it is filled with layout numbers
 instead, so the page can be reviewed before any batch has run.
 
 Usage, from the repository root:
@@ -16,6 +16,7 @@ import json
 import logging
 import statistics
 import sys
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,16 +38,18 @@ logger = logging.getLogger(__name__)
 
 TEMPLATE = HERE / "results_template.html"
 OUTPUT = HERE / "results.html"
-# The main model gives every Section 6.3.1 result; the other models appear only in the model comparison (Fig. 13).
+# Every Section 6.3.1 result pools these models; Fig. 11 marks each model's share passed.
 # planned: attempts per setting and scenario (user decision 2026-11-06: 10 for every model). mark: Fig. 13 shape.
 MODELS = [
-    {"id": "opus55", "model": "claude-opus-5-5", "name": "Claude Opus 5.5 medium", "role": "main model",
+    {"id": "opus55", "model": "claude-opus-5-5", "name": "Claude Opus 5.5 medium", "role": "Anthropic flagship",
      "vendor": "Claude", "color": "var(--s3)", "mark": "square", "planned": 10},
-    {"id": "sol", "model": "gpt-6.1-sol", "name": "GPT-6.1 Sol medium", "role": "second model",
+    {"id": "sol", "model": "gpt-6.1-sol", "name": "GPT-6.1 Sol medium", "role": "OpenAI flagship",
      "vendor": "OpenAI", "color": "var(--s1)", "mark": "circle", "planned": 10},
-    {"id": "terra", "model": "gpt-6.1-terra", "name": "GPT-6.1 Terra medium", "role": "third model",
+    {"id": "terra", "model": "gpt-6.1-terra", "name": "GPT-6.1 Terra medium", "role": "OpenAI lower-priced",
      "vendor": "OpenAI", "color": "var(--s5)", "mark": "diamond", "planned": 10},
 ]
+# Every figure and table pools the models' attempts (user decision, 2026-11-08); Fig. 11 marks each model's share.
+POOLED = "all"
 EFFORT = "medium"
 MAX_TURNS = 40
 SETTING_NOTES = ["one answer", "one answer", "one event per turn", "one event per turn", "whole-outline rewrites",
@@ -182,13 +185,17 @@ def attempts_from_batches(batch_ids: list[str] | None, live: set[str] = frozense
 
 
 def cells_from_attempts(attempts: list[dict]) -> dict:
-    """Return one cell per model, setting and scenario: counts by class, medians and check totals."""
-    cells = {model["id"]: [{scenario: empty_cell() for scenario in SCENARIOS} for _ in CONFIGURATIONS]
-             for model in MODELS}
+    """Return one cell per model, setting and scenario, and the same cells pooled over every model under ``POOLED``.
+
+    Each cell holds counts by class, medians and check totals.
+    """
+    cells = {model_id: [{scenario: empty_cell() for scenario in SCENARIOS} for _ in CONFIGURATIONS]
+             for model_id in [*(model["id"] for model in MODELS), POOLED]}
     grouped: dict[tuple, list[dict]] = {}
     for attempt in attempts:
         if attempt["scenario"] in SCENARIOS:
-            grouped.setdefault((attempt["model"], attempt["setting"], attempt["scenario"]), []).append(attempt)
+            for model_id in (attempt["model"], POOLED):
+                grouped.setdefault((model_id, attempt["setting"], attempt["scenario"]), []).append(attempt)
     for (model, setting, scenario), group in grouped.items():
         rows = [attempt["row"] for attempt in group]
         cell = cells[model][setting][scenario]
@@ -301,8 +308,8 @@ _PLACEHOLDER_COMPOSITION = {
 def placeholder_cells() -> dict:
     """Return layout numbers in the shape cells_from_attempts returns."""
     main, others = MODELS[0], MODELS[1:]
-    cells = {model["id"]: [{scenario: empty_cell() for scenario in SCENARIOS} for _ in CONFIGURATIONS]
-             for model in MODELS}
+    cells = {model_id: [{scenario: empty_cell() for scenario in SCENARIOS} for _ in CONFIGURATIONS]
+             for model_id in [*(model["id"] for model in MODELS), POOLED]}
     for scenario in SCENARIOS:
         for setting in range(len(CONFIGURATIONS)):
             counts = _PLACEHOLDER_OUTCOME[scenario][setting]
@@ -335,6 +342,7 @@ def placeholder_cells() -> dict:
                     rejections={"ra": round(ra * 0.6), "physical": round(physical * 0.6), "cca": round(cca * 0.65),
                                 "eq6": round(eq6 * 0.5)})
         cells[main["id"]][FW_INCREMENTAL][scenario]["references"] = dict(_PLACEHOLDER_REFERENCES[scenario])
+    cells[POOLED] = deepcopy(cells[main["id"]])
     return cells
 
 
