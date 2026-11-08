@@ -1621,6 +1621,13 @@ _ASSEMBLY_SLOT_FIELDS = ("Fields: slot_x, slot_y, part_height, board_top_z, part
                          "place_part_origin_z) and destination_location.")
 
 
+# The live controller's catalog describes destination_location as a registered controller token, which its own
+# geometry files resolve; composition's place calculation reads the place the event states instead
+# (recovery_composition._calculation_inputs) and refuses any other value, so the served contract says that.
+_COMPOSITION_PLACE_DESTINATION = ("The place the event states (its part_location, else its resource_location); "
+                                  "the composition's calculation reads it from the event.")
+
+
 def _composition_contract(entry: dict[str, Any], resource_type: str) -> dict[str, Any]:
     """Add to an arm's served contract what its catalog does not list; the catalog itself stays as recorded."""
     served = deepcopy(entry)
@@ -1631,6 +1638,9 @@ def _composition_contract(entry: dict[str, Any], resource_type: str) -> dict[str
     slot = (served.get("params") or {}).get("assembly_slot")
     if isinstance(slot, dict):
         slot["description"] = f"{slot.get('description', '')} {_ASSEMBLY_SLOT_FIELDS}".strip()
+    destination = (served.get("params") or {}).get("destination_location")
+    if served.get("name") == "compute_place_targets" and isinstance(destination, dict):
+        destination["description"] = _COMPOSITION_PLACE_DESTINATION
     return served
 
 

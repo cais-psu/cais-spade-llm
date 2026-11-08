@@ -2722,6 +2722,22 @@ def test_an_arms_contracts_list_what_the_catalog_does_not():
     assert "publishes" not in _composition_contract({"name": "compute_pick_targets"}, "kmr")
 
 
+def test_an_arms_place_calculation_says_it_reads_the_place_the_event_states_not_a_registered_token():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        _composition_contract,
+    )
+
+    recorded = {"name": "compute_place_targets", "params": {"destination_location": {
+        "type": "string", "description": "Optional registered controller destination token. A descriptive ontology "
+                                         "label does not establish a resolvable token."}}}
+    served = _composition_contract(recorded, "robot")["params"]["destination_location"]
+
+    assert served == {"type": "string", "description": "The place the event states (its part_location, else its "
+                                                       "resource_location); the composition's calculation reads it "
+                                                       "from the event."}
+    assert "registered controller" in recorded["params"]["destination_location"]["description"]
+
+
 def test_every_aligned_motion_on_the_way_to_a_slot_release_carries_the_insertion_corridor(monkeypatch):
     """A program may reach its slot release through more than one motion (Part slippage v8, 2026-11-07).
 
