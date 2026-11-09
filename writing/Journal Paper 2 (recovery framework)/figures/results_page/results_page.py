@@ -376,16 +376,12 @@ def _reply(text: str) -> dict:
         record = json.loads(text[start:]) if start >= 0 else {}
     except json.JSONDecodeError:
         return {}
-    stack = [record]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, dict):
-            if "decision" in item and ("primitive_steps" in item or "context_requests" in item):
-                return item
-            stack.extend(item.values())
-        elif isinstance(item, list):
-            stack.extend(item)
-    return {}
+    # The record keeps the LLM's reply under "response"; its schema elsewhere also names "decision".
+    reply = record.get("response") if isinstance(record, dict) else None
+    if isinstance(reply, dict) and isinstance(reply.get("decision"), str):
+        return reply
+    raw = ((record.get("validation_evidence") or {}).get("llm_raw_response") if isinstance(record, dict) else None)
+    return raw if isinstance(raw, dict) and isinstance(raw.get("decision"), str) else {}
 
 
 def composition_row(log: Path) -> dict | None:
