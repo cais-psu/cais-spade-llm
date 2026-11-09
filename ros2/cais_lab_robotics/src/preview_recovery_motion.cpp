@@ -448,15 +448,13 @@ private:
     const auto& policy = mating_.at("simulation_mating_contact");
     const auto& target = mating_.at("target_origin_pose");
     const double tolerance = policy.at("axis_tolerance_m").get<double>();
+    // The corridor does not bound the part's turn about its shaft, as part_collision.mating_pose_valid (2026-11-08).
     const Eigen::Quaterniond q(pose.linear());
-    const double yaw = std::atan2(2 * (q.w() * q.z() + q.x() * q.y()), 1 - 2 * (q.y() * q.y() + q.z() * q.z()));
-    const double error = yaw - policy.at("target_yaw_rad").get<double>();
     return pose.matrix().allFinite() &&
       std::hypot(pose.translation().x() - target.at("x").get<double>(), pose.translation().y() - target.at("y").get<double>()) <= tolerance &&
       pose.translation().z() >= target.at("z").get<double>() - tolerance &&
       pose.translation().z() <= mating_.at("start_part_z").get<double>() + tolerance &&
-      1 - 2 * (q.x() * q.x() + q.y() * q.y()) >= std::cos(.02) &&
-      std::abs(std::atan2(std::sin(error), std::cos(error))) <= policy.at("yaw_tolerance_rad").get<double>();
+      1 - 2 * (q.x() * q.x() + q.y() * q.y()) >= std::cos(.02);
   }
 
   void initialize_mating(const Action::Goal& goal, const moveit::core::RobotState& start)

@@ -860,6 +860,13 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   live-detection flag on a part an earlier event put down says only "Owner calculation lacks required recorded
   inputs", and the event's own part's `/parts/<name>/snapshot` path does not resolve inside a program. Sol composed
   PS_sol_1 completely once, on `389dcdc` (composition `697ab2a7`); that round is kept and left out.
+- 2026-11-08, completing the gear-turn change: the native MoveIt check (`preview_recovery_motion.cpp`) keeps its own
+  copy of the corridor and still bounded the turn, so a gear the Python side let through was refused by the native
+  tool as a malformed request, and PS_sol_3 on `386b8cd` crashed (exit 1, no result) instead of being judged. The C++
+  corridor now matches `mating_pose_valid`, the workspace package was rebuilt (the tool installed on 1 November had
+  matched its committed source until then), and the remaining compositions run on the commit that holds both. Only a
+  gear insertion reaches this code: PS_sol_1 and PS_sol_2 on `386b8cd` never had an insertion checked, and the
+  Machining, Conveyor and ur5e-1 compositions insert nothing, so their results stand; PS_sol_3 is composed again.
 
 ### Tables and exports required for the paper
 
