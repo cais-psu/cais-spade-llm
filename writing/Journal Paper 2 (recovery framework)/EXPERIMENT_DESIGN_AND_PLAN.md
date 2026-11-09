@@ -827,6 +827,13 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   serves, at the path shown. A fuller statement of how a grasp and a release change values was drafted and left out
   at the user's request as too much. Part slippage for Sol and Terra runs again first; the `d43a7f9` round is kept and
   left out.
+- 2026-11-08, Table 7 adds a measure after the compositions began, at the user's request: Events composed, the
+  share of an outline's events that received a primitive program passing the composition checks, averaged over the
+  composed outlines so that each counts once. Events are composed in order, so a composition that stops leaves the
+  rest of its outline uncomposed; the share is how far a composition got, not a per-event success rate. The planned
+  measure, Composition passed (k/n with a Wilson interval), stays beside it, and Table 7 adds a row per model. After
+  the Part slippage trial on `389dcdc` (Sol completed PS_sol_1), the user chose to compose all 36 on `389dcdc`
+  without further changes.
 
 ### Tables and exports required for the paper
 

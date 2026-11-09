@@ -298,10 +298,10 @@ _PLACEHOLDER_REFERENCES = {
 }
 # Table 7 layout numbers: per scenario, the composed outlines pooled over the models (3 per model).
 _PLACEHOLDER_COMPOSITION = {
-    "Part slippage": {"composed": 10, "passed": 9, "events": 5, "primitives": 21, "refused": 2, "calls": 8, "tokens_k": 190, "minutes": 14},
-    "Conveyor breakdown": {"composed": 9, "passed": 8, "events": 9, "primitives": 30, "refused": 4, "calls": 12, "tokens_k": 240, "minutes": 18},
-    "Machining breakdown during part processing": {"composed": 9, "passed": 6, "events": 18, "primitives": 52, "refused": 7, "calls": 20, "tokens_k": 420, "minutes": 33},
-    "ur5e-1 breakdown": {"composed": 9, "passed": 8, "events": 7, "primitives": 26, "refused": 3, "calls": 11, "tokens_k": 230, "minutes": 17},
+    "Part slippage": {"composed": 10, "passed": 9, "share": 0.94, "events": 5, "primitives": 21, "refused": 2, "calls": 8, "tokens_k": 190, "minutes": 14},
+    "Conveyor breakdown": {"composed": 9, "passed": 8, "share": 0.91, "events": 9, "primitives": 30, "refused": 4, "calls": 12, "tokens_k": 240, "minutes": 18},
+    "Machining breakdown during part processing": {"composed": 9, "passed": 6, "share": 0.78, "events": 18, "primitives": 52, "refused": 7, "calls": 20, "tokens_k": 420, "minutes": 33},
+    "ur5e-1 breakdown": {"composed": 9, "passed": 8, "share": 0.9, "events": 7, "primitives": 26, "refused": 3, "calls": 11, "tokens_k": 230, "minutes": 17},
 }
 # Table 8 layout numbers: the selected Claude Opus 5.5 outline per scenario executed in Gazebo.
 _PLACEHOLDER_EXECUTION = {
@@ -310,6 +310,106 @@ _PLACEHOLDER_EXECUTION = {
     "Machining breakdown during part processing": {"model": "Claude Opus 5.5", "events": 16, "primitives": 49, "steps": 49, "completed": 49, "sim_seconds": 610, "result": "completed", "video": ""},
     "ur5e-1 breakdown": {"model": "Claude Opus 5.5", "events": 7, "primitives": 27, "steps": 27, "completed": 27, "sim_seconds": 260, "result": "completed", "video": ""},
 }
+
+
+# Study 2's compositions: all 36 composed once on 389dcdc (round r7, user decision 2026-11-08); each log names its
+# composition directory, and its name is <scenario>_<model>_<rank>.
+COMPOSITION_LOGS = Path("/home/jongh/recovery_review_1030/study2_20261108/logs_r7")
+COMPOSITION_SCENARIOS = {"PS": "Part slippage", "CONV": "Conveyor breakdown",
+                         "MACH": "Machining breakdown during part processing", "UR5": "ur5e-1 breakdown"}
+COMPOSITION_MODELS = {"opus": "opus55", "sol": "sol", "terra": "terra"}
+
+
+def _usage(record: Any) -> dict | None:
+    """Return the first provider usage block in a response record."""
+    if isinstance(record, dict):
+        if "input_tokens" in record or "prompt_tokens" in record:
+            return record
+        values = record.values()
+    elif isinstance(record, list):
+        values = record
+    else:
+        return None
+    return next((found for value in values if (found := _usage(value)) is not None), None)
+
+
+def _decision(text: str) -> str | None:
+    """Return the decision a composing LLM's turn response states."""
+    start = text.find("{")
+    try:
+        record = json.loads(text[start:]) if start >= 0 else {}
+    except json.JSONDecodeError:
+        return None
+    stack = [record]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if "decision" in item and ("primitive_steps" in item or "context_requests" in item):
+                return item["decision"]
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return None
+
+
+def composition_row(log: Path) -> dict | None:
+    """Return one finished composition: its outline's events, how many were composed, and its effort."""
+    from cais_spade_llm.recovery_framework.outline_draft import _token_usage
+
+    text = log.read_text(errors="replace")
+    result = next((json.loads(line) for line in reversed(text.splitlines())
+                   if line.startswith("{") and '"primitive_status"' in line), None)
+    found = [line.split("composing into ", 1)[1].strip() for line in text.splitlines() if "composing into " in line]
+    if result is None or not found:
+        return None
+    directory = Path(found[-1])
+    scenario, model, _rank = log.stem.split("_")
+    events = len(json.loads((directory / "outline.json").read_text())["outline"])
+    accepted = int(result.get("accepted") or 0)
+    passed = result.get("primitive_status") == "completed"
+    primitives = None
+    if passed:
+        program = json.loads((directory / "composition.json").read_text())["accepted_primitive_program"]
+        primitives = sum(len(event.get("primitive_steps") or []) for event in program)
+    turns = [_decision(path.read_text(errors="replace"))
+             for path in sorted((directory / "recovery_primitves").glob("multi_turn_*_response_*.txt"))]
+    calls = tokens = 0
+    for path in sorted((directory / "recovery_primitves" / "requests").glob("*/round*_response.json")):
+        calls += 1
+        usage = _usage(json.loads(path.read_text()))
+        tokens += int(_token_usage(usage).get("total_tokens") or 0) if usage else 0
+    return {"name": log.stem, "scenario": COMPOSITION_SCENARIOS[scenario], "model": COMPOSITION_MODELS[model],
+            "events": events, "accepted": accepted, "share": accepted / events if events else None, "passed": passed,
+            "primitives": primitives, "refused": max(turns.count("primitive_steps_ready") - accepted, 0),
+            "calls": calls, "tokens": tokens, "seconds": result.get("seconds")}
+
+
+def composition_summary(rows: list[dict]) -> dict | None:
+    """Return Table 7's numbers for some compositions: counts, the mean share composed and the medians."""
+    if not rows:
+        return None
+    tokens = _median([row["tokens"] for row in rows])
+    minutes = _median([row["seconds"] / 60 for row in rows if row.get("seconds") is not None])
+    return {"composed": len(rows), "passed": sum(row["passed"] for row in rows),
+            "share": statistics.fmean(row["share"] for row in rows if row["share"] is not None),
+            "events": _median([row["events"] for row in rows]),
+            "primitives": _median([row["primitives"] for row in rows if row["primitives"] is not None]),
+            "refused": _median([row["refused"] for row in rows]), "calls": _median([row["calls"] for row in rows]),
+            "tokens_k": _round(tokens / 1000 if tokens is not None else None),
+            "minutes": _round(minutes, 1)}
+
+
+def compositions_from_logs(logs: Path = COMPOSITION_LOGS) -> dict | None:
+    """Return Table 7: per scenario, pooled over the models, and per model; finished compositions only."""
+    rows = [row for log in sorted(logs.glob("*.log")) if (row := composition_row(log)) is not None]
+    if not rows:
+        return None
+    return {"scenarios": {scenario: composition_summary([row for row in rows if row["scenario"] == scenario])
+                          for scenario in SCENARIOS},
+            "total": composition_summary(rows),
+            "models": {model["id"]: composition_summary([row for row in rows if row["model"] == model["id"]])
+                       for model in MODELS},
+            "rows": rows}
 
 
 def placeholder_cells() -> dict:
@@ -376,20 +476,27 @@ def scenario_rows() -> list[dict]:
 
 def conditions() -> dict:
     """Return the experimental conditions: the settings, the failure scenarios and what every attempt shares."""
+    import inspect
+
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
+        generate_primitive_batch_with_llm_agent,
+    )
     from cais_spade_llm.recovery_framework.primitive_composition import _COMPOSITION_TURN_BUDGET
 
+    event_turns = inspect.signature(generate_primitive_batch_with_llm_agent).parameters["max_turns"].default
     return {"settings": setting_rows(), "scenarios": scenario_rows(), "effort": EFFORT,
-            "composition_turns": _COMPOSITION_TURN_BUDGET}
+            "composition_turns": _COMPOSITION_TURN_BUDGET, "composition_event_turns": event_turns}
 
 
 def page_data(placeholder: bool, batch_ids: list[str] | None, live: set[str] = frozenset()) -> dict:
     """Return the data block the page template renders."""
     if placeholder:
         attempts, sources, cells = [], [], placeholder_cells()
-        composition, execution = _PLACEHOLDER_COMPOSITION, _PLACEHOLDER_EXECUTION
+        composition = {"scenarios": _PLACEHOLDER_COMPOSITION, "total": None, "models": None, "rows": []}
+        execution = _PLACEHOLDER_EXECUTION
     else:
         attempts, sources = attempts_from_batches(batch_ids, live)
-        cells, composition, execution = cells_from_attempts(attempts), None, None
+        cells, composition, execution = cells_from_attempts(attempts), compositions_from_logs(), None
     return {
         "mode": "placeholder" if placeholder else "records",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
