@@ -867,6 +867,10 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   matched its committed source until then), and the remaining compositions run on the commit that holds both. Only a
   gear insertion reaches this code: PS_sol_1 and PS_sol_2 on `386b8cd` never had an insertion checked, and the
   Machining, Conveyor and ur5e-1 compositions insert nothing, so their results stand; PS_sol_3 is composed again.
+- 2026-11-09, user decision: GPT-6.1 Sol and GPT-6.1 Terra compose each of their Part slippage outlines twice on
+  the final commit, and Table 7 reports the second attempt for all six, whatever it gives; Claude Opus 5.5 composes
+  each outline once. Sol's first attempts were 2/4, 3/5 and 3/5 events (no pass) and its second 4/4, 5/5 and 3/5.
+  The caption states the rule; the first attempts stay in `logs_r9`, the second in `logs_r9b`.
 
 ### Tables and exports required for the paper
 

@@ -316,6 +316,10 @@ _PLACEHOLDER_EXECUTION = {
 # names its composition directory, and its name is <scenario>_<model>_<rank>. Sol's and Terra's second Part slippage
 # attempts are in logs_r9b and stay out of Table 7, which holds one attempt per outline.
 COMPOSITION_LOGS = Path("/home/jongh/recovery_review_1030/study2_20261108/logs_r9")
+# User decision 2026-11-08: Sol's and Terra's Part slippage outlines were composed twice on the final commit, and
+# Table 7 reports the second attempt for each of them, whatever it gave; the caption says so.
+SECOND_ATTEMPT_LOGS = Path("/home/jongh/recovery_review_1030/study2_20261108/logs_r9b")
+SECOND_ATTEMPT = {"PS_sol_1", "PS_sol_2", "PS_sol_3", "PS_terra_1", "PS_terra_2", "PS_terra_3"}
 COMPOSITION_SCENARIOS = {"PS": "Part slippage", "CONV": "Conveyor breakdown",
                          "MACH": "Machining breakdown during part processing", "UR5": "ur5e-1 breakdown"}
 COMPOSITION_MODELS = {"opus": "opus55", "sol": "sol", "terra": "terra"}
@@ -443,7 +447,13 @@ def composition_summary(rows: list[dict]) -> dict | None:
 
 def compositions_from_logs(logs: Path = COMPOSITION_LOGS) -> dict | None:
     """Return Table 7: per scenario, pooled over the models, and per model; finished compositions only."""
-    rows = [row for log in sorted(logs.glob("*.log")) if (row := composition_row(log)) is not None]
+    rows = []
+    for log in sorted(logs.glob("*.log")):
+        second = SECOND_ATTEMPT_LOGS / log.name
+        use_second = log.stem in SECOND_ATTEMPT and second.exists() and composition_row(second) is not None
+        row = composition_row(second if use_second else log)
+        if row is not None:
+            rows.append({**row, "attempt": 2 if use_second else 1})
     if not rows:
         return None
     references = {}
@@ -454,7 +464,9 @@ def compositions_from_logs(logs: Path = COMPOSITION_LOGS) -> dict | None:
                                  for path in paths} if composed else None)
     used = {path for counts in references.values() if counts for path in counts}
     reference_rows = [path for path in COMPOSITION_REFERENCES if path in used] + sorted(used - set(COMPOSITION_REFERENCES))
-    return {"references": references, "reference_rows": reference_rows, "scenarios": {scenario: composition_summary([row for row in rows if row["scenario"] == scenario])
+    second_attempts = sorted(row["name"] for row in rows if row["attempt"] == 2)
+    return {"second_attempts": second_attempts, "references": references, "reference_rows": reference_rows,
+            "scenarios": {scenario: composition_summary([row for row in rows if row["scenario"] == scenario])
                           for scenario in SCENARIOS},
             "total": composition_summary(rows),
             "models": {model["id"]: composition_summary([row for row in rows if row["model"] == model["id"]])
