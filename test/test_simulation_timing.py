@@ -1555,17 +1555,20 @@ def test_verified_mating_fixture_handoff_precedes_release_settling(mode, seated,
         assert success and calls == ['observe', 'detach', 'fixture', 'scene']
         assert controller._last_command_evidence['seated_mating_part']['orientation_preserved']
 
-def test_mating_corridor_rejects_wrong_tooth_phase():
+def test_mating_corridor_accepts_any_turn_but_keeps_the_axis_and_the_tilt():
+    """User decision 2026-11-08: a round part seats on its round shaft at any turn; the slot snap sets its pose."""
     from cais_spade_llm.recovery_framework.part_collision import mating_pose_valid
 
     context = {'axis_tolerance_m':.0005, 'target_origin_pose':{'x':0.,'y':0.,'z':1.039},
                'start_part_z':1.08, 'target_yaw_rad':math.radians(103.2)}
-    assert not mating_pose_valid(context, [0.,0.,1.04,0.,0.,0.,1.])
+    assert mating_pose_valid(context, [0.,0.,1.04,0.,0.,0.,1.])
     yaw = context['target_yaw_rad']
     assert mating_pose_valid(context, [0.,0.,1.04,0.,0.,math.sin(yaw/2),math.cos(yaw/2)])
+    assert not mating_pose_valid(context, [.001,0.,1.04,0.,0.,0.,1.])
+    assert not mating_pose_valid(context, [0.,0.,1.04,math.sin(.015),0.,0.,math.cos(.015)])
 
 
-def test_simulation_gear_release_accepts_bounded_yaw_drift_but_rejects_wrong_phase():
+def test_simulation_gear_release_accepts_any_turn_but_rejects_an_off_axis_gear():
     from cais_spade_llm.recovery_framework import ROOT, read_json
     from cais_spade_llm.recovery_framework.part_collision import mating_pose_valid
 
@@ -1580,9 +1583,8 @@ def test_simulation_gear_release_accepts_bounded_yaw_drift_but_rejects_wrong_pha
                 .7078902776770403, .7063181823098459]
     assert context['yaw_tolerance_rad'] == .005
     assert mating_pose_valid(context, observed)
-    wrong_yaw = context['target_yaw_rad'] + .006
-    assert not mating_pose_valid(context, [*observed[:3], 0., 0.,
-                                           math.sin(wrong_yaw/2), math.cos(wrong_yaw/2)])
+    half_turn = context['target_yaw_rad'] + math.pi
+    assert mating_pose_valid(context, [*observed[:3], 0., 0., math.sin(half_turn/2), math.cos(half_turn/2)])
     assert not mating_pose_valid(context, [observed[0] + .001, *observed[1:]])
 
 

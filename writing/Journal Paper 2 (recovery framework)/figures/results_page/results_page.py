@@ -312,9 +312,10 @@ _PLACEHOLDER_EXECUTION = {
 }
 
 
-# Study 2's compositions: all 36 composed once on 389dcdc (round r7, user decision 2026-11-08); each log names its
-# composition directory, and its name is <scenario>_<model>_<rank>.
-COMPOSITION_LOGS = Path("/home/jongh/recovery_review_1030/study2_20261108/logs_r7")
+# Study 2's compositions: all 36 composed once on the gear-turn commit (round r9, user decision 2026-11-08); each log
+# names its composition directory, and its name is <scenario>_<model>_<rank>. Sol's and Terra's second Part slippage
+# attempts are in logs_r9b and stay out of Table 7, which holds one attempt per outline.
+COMPOSITION_LOGS = Path("/home/jongh/recovery_review_1030/study2_20261108/logs_r9")
 COMPOSITION_SCENARIOS = {"PS": "Part slippage", "CONV": "Conveyor breakdown",
                          "MACH": "Machining breakdown during part processing", "UR5": "ur5e-1 breakdown"}
 COMPOSITION_MODELS = {"opus": "opus55", "sol": "sol", "terra": "terra"}

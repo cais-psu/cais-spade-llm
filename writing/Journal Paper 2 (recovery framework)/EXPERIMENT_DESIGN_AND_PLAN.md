@@ -844,6 +844,22 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   place where the released part comes to rest." It is a lookup, not prompt text; only the four arms' models carry
   it. A fuller move of the robot and KMR rules out of the first composition prompt was drafted and left out. The
   Part slippage trial for Sol and Terra runs again first; the `389dcdc` round is kept and left out.
+- 2026-11-08, Study 2 composition restarted an eighth time, after the Part slippage compositions on `c4bb491`
+  (first attempts: Opus 4/4, 5/5, 5/5; Sol 3/4, 3/5, 3/5; Terra 2/5, 1/5, 1/5; Sol's second attempt at PS_sol_2
+  3/5) and with MACH_terra_1 and Sol's second PS_sol_3 stopped mid-run. Sol's gear insertions reached the slot exactly
+  but kept the tool's turn, so gear_small arrived turned -90 degrees instead of the declared +90 (+/- 0.005 rad)
+  and the insertion corridor refused it; Opus copied the calculated orientation, which turns the tool half a turn.
+  The nominal place_approach, which Sol looked up, shows that orientation, so this was Sol's error; the user judged
+  the turn bound too strict for a round part on a round shaft that the simulator's slot snap seats anyway, and chose
+  to drop it. The corridor (`mating_pose_valid`, used by composition and the Gazebo controller alike) now bounds the
+  distance from the shaft axis, the height and the tilt, not the turn. Only the three gears declare a corridor, and
+  of the 36 outlines only the nine Part slippage ones insert into the board. All 36 are composed on the new commit,
+  in the user's order: Sol (Part slippage, Machining, Conveyor, ur5e-1 outline 1, then 2, then 3), Sol's three Part
+  slippage second attempts, Opus in the same order, then Terra and Terra's three Part slippage second attempts. Two
+  known feedback limits stay, neither of which turned a valid program into a failure: a calculation refused for a
+  live-detection flag on a part an earlier event put down says only "Owner calculation lacks required recorded
+  inputs", and the event's own part's `/parts/<name>/snapshot` path does not resolve inside a program. Sol composed
+  PS_sol_1 completely once, on `389dcdc` (composition `697ab2a7`); that round is kept and left out.
 
 ### Tables and exports required for the paper
 
