@@ -334,6 +334,37 @@ def _usage(record: Any) -> dict | None:
     return next((found for value in values if (found := _usage(value)) is not None), None)
 
 
+# Composition lookup references in the order the composition prompt lists them, with the resource, part, region,
+# key or name left out; the model and evidence records the prompt points to follow their resource.
+COMPOSITION_REFERENCES = [
+    "/outline_event", "/resources/<jid>/snapshot", "/resources/<jid>/current_pose", "/resources/<jid>/held_part",
+    "/resources/<jid>/static_capabilities", "/resources/<jid>/recovery_des_model",
+    "/resources/<jid>/resource_evidence/controller_config/cartesian_motion", "/resources/<jid>/resource_evidence/<field>",
+    "/parts/<name>/snapshot", "/parts/<name>/observed_pose", "/parts/<name>/target", "/primitive_catalog/<jid>",
+    "/primitive_contracts/<name>", "/projected_snapshot/<jid>", "/capability_decompositions/<function_name>",
+    "/regions", "/regions/<name>", "/geometry", "/geometry/<key>",
+]
+_NAMED = {"primitive_contracts": "<name>", "primitive_catalog": "<jid>", "projected_snapshot": "<jid>",
+          "capability_decompositions": "<function_name>", "regions": "<name>", "geometry": "<key>"}
+
+
+def composition_reference(ref: str) -> str:
+    """Return a requested reference with its resource, part, region, key or name left out."""
+    head, *rest = [segment for segment in str(ref).split("/") if segment] or [""]
+    if head == "resources" and rest:
+        tail = rest[1:]
+        if tail[:1] == ["resource_evidence"]:
+            return ("/resources/<jid>/resource_evidence/controller_config/cartesian_motion"
+                    if tail[1:3] == ["controller_config", "cartesian_motion"]
+                    else "/resources/<jid>/resource_evidence/<field>")
+        return "/resources/<jid>" + (f"/{tail[0]}" if tail else "")
+    if head == "parts" and rest:
+        return "/parts/<name>" + (f"/{rest[1]}" if len(rest) > 1 else "")
+    if head in _NAMED:
+        return f"/{head}" + (f"/{_NAMED[head]}" if rest else "")
+    return f"/{head}"
+
+
 def _reply(text: str) -> dict:
     """Return a composing LLM's turn reply (decision, context_requests, primitive_steps) from its response record."""
     start = text.find("{")
@@ -376,7 +407,12 @@ def composition_row(log: Path) -> dict | None:
                for path in sorted((directory / "recovery_primitves").glob("multi_turn_*_response_*.txt"))]
     turns = [reply.get("decision") for reply in replies]
     # A lookup is one reference the composing LLM requested, as the outline stage counts its retrievals.
-    lookups = sum(len(reply.get("context_requests") or []) for reply in replies if reply.get("decision") == "need_context")
+    requested = [ref for reply in replies if reply.get("decision") == "need_context"
+                 for ref in reply.get("context_requests") or []]
+    lookups = len(requested)
+    references: dict[str, int] = {}
+    for ref in requested:
+        references[composition_reference(ref)] = references.get(composition_reference(ref), 0) + 1
     calls = tokens = 0
     for path in sorted((directory / "recovery_primitves" / "requests").glob("*/round*_response.json")):
         calls += 1
@@ -385,7 +421,8 @@ def composition_row(log: Path) -> dict | None:
     return {"name": log.stem, "scenario": COMPOSITION_SCENARIOS[scenario], "model": COMPOSITION_MODELS[model],
             "events": events, "accepted": accepted, "share": accepted / events if events else None, "passed": passed,
             "primitives": primitives, "refused": max(turns.count("primitive_steps_ready") - accepted, 0),
-            "calls": calls, "lookups": lookups, "tokens": tokens, "seconds": result.get("seconds")}
+            "calls": calls, "lookups": lookups, "references": references, "tokens": tokens,
+            "seconds": result.get("seconds")}
 
 
 def composition_summary(rows: list[dict]) -> dict | None:
@@ -409,7 +446,15 @@ def compositions_from_logs(logs: Path = COMPOSITION_LOGS) -> dict | None:
     rows = [row for log in sorted(logs.glob("*.log")) if (row := composition_row(log)) is not None]
     if not rows:
         return None
-    return {"scenarios": {scenario: composition_summary([row for row in rows if row["scenario"] == scenario])
+    references = {}
+    for scenario in SCENARIOS:
+        composed = [row for row in rows if row["scenario"] == scenario]
+        paths = {path for row in composed for path in row["references"]}
+        references[scenario] = ({path: round(sum(row["references"].get(path, 0) for row in composed) / len(composed), 1)
+                                 for path in paths} if composed else None)
+    used = {path for counts in references.values() if counts for path in counts}
+    reference_rows = [path for path in COMPOSITION_REFERENCES if path in used] + sorted(used - set(COMPOSITION_REFERENCES))
+    return {"references": references, "reference_rows": reference_rows, "scenarios": {scenario: composition_summary([row for row in rows if row["scenario"] == scenario])
                           for scenario in SCENARIOS},
             "total": composition_summary(rows),
             "models": {model["id"]: composition_summary([row for row in rows if row["model"] == model["id"]])

@@ -321,10 +321,13 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
 
   <figure class="plate" id="fig12">
     <div class="plate-head">
-      <h3>Fig. O1 · Context retrieval in the outline stage</h3>
+      <h3>Fig. O1 · Context retrieval</h3>
       <div class="tags" data-tags="Sec. 5 · 𝒦 · optional"></div>
     </div>
+    <p class="paper-panel">(a) Outline generation, per attempt</p>
     <div class="wide-svg" id="fig12-svg"></div>
+    <p class="paper-panel">(b) Primitive composition, per composition</p>
+    <div class="wide-svg" id="fig12b-svg"></div>
     <figcaption id="fig12-caption"></figcaption>
   </figure>
 
@@ -589,14 +592,13 @@ function renderTable6() {
   document.getElementById("tab6-caption").innerHTML = `<b>Table 6.</b> Rejections in the two framework settings, pooled over the three models (${MODEL_NAMES}) and summed over the started attempts per scenario. In ${esc(SETTINGS[FW_SINGLE].n)} a rejection stops a whole outline at its first failing event, and the LLM rewrites the outline; in ${esc(SETTINGS[FW_INCREMENTAL].n)} a rejection applies to one proposed event, which the LLM revises. RA (symbolic and physical evidence) runs before CCA safety in both, so every CCA safety rejection is a proposal that passed RA: a feasible but unsafe event (H2). The last column of each group counts CCA completion refusals (Eq. 6). Completed counts the attempts that finished an outline within ${DATA.max_turns} turns.`;
 }
 
-/* ---------- Fig. O1 (optional): outline lookups by reference, all models pooled, setting 6 ---------- */
-function renderRetrieval() {
-  const rows = DATA.references;
-  const W = 720, X0 = 270, CW = (W - X0) / ORDER.length, RH = 28, TOP = 26;
+/* ---------- Fig. O1 (optional): lookups by reference, all models pooled: (a) outline, setting 6; (b) composition ---------- */
+function retrievalPanel(rows, values, counts, unit, svgId, label) {
+  // values: one {path: mean} or null per scenario in ORDER; counts: how many attempts or compositions each mean is over.
+  const W = 720, X0 = 300, CW = (W - X0) / ORDER.length, RH = 28, TOP = 26;
   const H = TOP + (rows.length + 1) * RH + 8;
-  const counted = ORDER.map((scn) => cell(POOLED, FW_INCREMENTAL, scn).references);
-  const values = counted.map((byPath) => (byPath ? rows.map((path) => byPath[path] || 0) : null));
-  const max = Math.max(1, ...values.flatMap((v) => v || []));
+  const grid = values.map((byPath) => (byPath ? rows.map((path) => byPath[path] || 0) : null));
+  const max = Math.max(1, ...grid.flatMap((v) => v || []));
   const p = [];
   SHORT.forEach((s, j) => p.push(`<text x="${X0 + j * CW + CW / 2}" y="16" class="lbl" text-anchor="middle">${esc(s)}</text>`));
   let y = TOP;
@@ -604,13 +606,13 @@ function renderRetrieval() {
   rows.forEach((path, i) => {
     p.push(`<text x="0" y="${y + RH / 2 + 4}" class="lbl2" style="font-family:var(--font-mono)">${esc(path)}</text>`);
     ORDER.forEach((scn, j) => {
-      const row = values[j], x = X0 + j * CW, cx = x + CW / 2, ty = y + RH / 2 + 4;
+      const row = grid[j], x = X0 + j * CW, cx = x + CW / 2, ty = y + RH / 2 + 4;
       if (!row) {
         p.push(`<text x="${cx}" y="${ty}" text-anchor="middle" class="lbl2">${dash}</text>`);
         return;
       }
       const v = row[i], level = v > 0 ? Math.max(1, Math.round((v / max) * 9)) : 0, dark = level >= 7;
-      const t = tip(`<b>${esc(scn)}</b> · <code>${esc(path)}</code><br><b>${v}</b> lookups per attempt (mean of ${cell(POOLED, FW_INCREMENTAL, scn).n})`);
+      const t = tip(`<b>${esc(scn)}</b> · <code>${esc(path)}</code><br><b>${v}</b> lookups per ${unit} (mean of ${counts[j]})`);
       p.push(`<rect x="${x + 1.5}" y="${y + 1.5}" width="${CW - 3}" height="${RH - 3}" rx="3" style="fill:${v > 0 ? PASS_RAMP[level] : "var(--band)"}" data-t="${t}"/>`);
       p.push(v > 0
         ? `<text x="${cx}" y="${ty}" text-anchor="middle" style="font:500 11.5px var(--font-ui);fill:${dark ? "#ffffff" : "#15181d"}" pointer-events="none">${v}</text>`
@@ -620,9 +622,20 @@ function renderRetrieval() {
   });
   p.push(`<line x1="0" y1="${y + 2}" x2="${W}" y2="${y + 2}" class="base-line"/>`);
   p.push(`<text x="0" y="${y + RH / 2 + 5}" class="lbl">total</text>`);
-  values.forEach((row, j) => p.push(`<text x="${X0 + j * CW + CW / 2}" y="${y + RH / 2 + 5}" class="val" text-anchor="middle">${row ? Math.round(row.reduce((a, c) => a + c, 0) * 10) / 10 : dash}</text>`));
-  document.getElementById("fig12-svg").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Outline lookups per attempt by reference and failure scenario, all models pooled">${p.join("")}</svg>`;
-  document.getElementById("fig12-caption").innerHTML = `<b>Fig. O1.</b> Context retrieved while building the recovery outline, by failure scenario: mean lookups per attempt of each reference in the knowledge base 𝒦, pooled over the three models, in ${esc(SETTINGS[FW_INCREMENTAL].n)}. Each row is a reference as the outline prompt lists it, with the resource, part, region or key left out. Shading is scaled to the largest mean; a dot means no lookups and a dash means no attempts. The composition-stage rows follow once composition runs.`;
+  grid.forEach((row, j) => p.push(`<text x="${X0 + j * CW + CW / 2}" y="${y + RH / 2 + 5}" class="val" text-anchor="middle">${row ? Math.round(row.reduce((a, c) => a + c, 0) * 10) / 10 : dash}</text>`));
+  document.getElementById(svgId).innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${label}">${p.join("")}</svg>`;
+}
+
+function renderRetrieval() {
+  retrievalPanel(DATA.references, ORDER.map((scn) => cell(POOLED, FW_INCREMENTAL, scn).references),
+    ORDER.map((scn) => cell(POOLED, FW_INCREMENTAL, scn).n), "attempt", "fig12-svg",
+    "Outline lookups per attempt by reference and failure scenario, all models pooled");
+  const C7 = DATA.composition;
+  const byScenario = C7 && C7.references ? ORDER.map((scn) => C7.references[scn]) : ORDER.map(() => null);
+  retrievalPanel(C7 && C7.reference_rows ? C7.reference_rows : [], byScenario,
+    ORDER.map((scn) => (C7 && C7.scenarios && C7.scenarios[scn] ? C7.scenarios[scn].composed : 0)), "composition",
+    "fig12b-svg", "Composition lookups per composition by reference and failure scenario, all models pooled");
+  document.getElementById("fig12-caption").innerHTML = `<b>Fig. O1.</b> Context retrieved from the knowledge base 𝒦, by failure scenario, pooled over the three LLMs: (a) while building the recovery outline, mean lookups per attempt in ${esc(SETTINGS[FW_INCREMENTAL].n)}; (b) while composing primitive programs for the outlines of Table 7, mean lookups per composition over all its events. Each row is a reference as that stage's prompt lists it, with the resource, part, region, key or name left out; in (b) the resource's model and its recorded evidence fields, which the composition prompt points to, follow the resource. Shading is scaled to each panel's largest mean; a dot means no lookups and a dash means none composed or attempted yet.`;
 }
 
 /* ---------- Table 7: primitive composition, by LLM and by failure scenario ---------- */
