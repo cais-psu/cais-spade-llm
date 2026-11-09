@@ -126,14 +126,15 @@ def turn_checks(draft: dict, turn: int) -> list[str]:
 
 
 def tokens(paths: list[Path]) -> int:
-    """Sum the recorded token usage of the replies beside these requests."""
+    """Sum the recorded token usage of the replies beside these requests, as Table 7 sums it for every provider."""
+    from cais_spade_llm.recovery_framework.outline_draft import _token_usage
+
     total = 0
     for path in paths:
         response = path.with_name(path.name.replace("_request.json", "_response.json"))
         if response.exists():
             usage = (json.loads(response.read_text(encoding="utf-8")).get("raw_response") or {}).get("usage") or {}
-            total += sum(usage.get(key) or 0 for key in ("input_tokens", "cache_read_input_tokens",
-                                                       "cache_creation_input_tokens", "output_tokens"))
+            total += int(_token_usage(usage).get("total_tokens") or 0)
     return total
 
 

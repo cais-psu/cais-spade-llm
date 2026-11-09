@@ -99,6 +99,19 @@ def test_the_paper_export_writes_ascii_latex_for_overleaf_and_the_supplementary_
     assert "supplementary_material/records/conveyor/composition/composition.json" in names
 
 
+def test_tokens_sum_claude_and_openai_usage_alike(tmp_path):
+    usages = {"claude": {"input_tokens": 100, "cache_read_input_tokens": 50, "cache_creation_input_tokens": 5,
+                         "output_tokens": 10},
+              "openai": {"prompt_tokens": 8739, "completion_tokens": 204, "total_tokens": 8943,
+                         "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 8736}}}
+    requests = []
+    for name, usage in usages.items():
+        (tmp_path / f"{name}_response.json").write_text(json.dumps({"raw_response": {"usage": usage}}))
+        requests.append(tmp_path / f"{name}_request.json")
+    assert paper_export.tokens(requests[:1]) == 165
+    assert paper_export.tokens(requests[1:]) == 8943
+
+
 def test_latex_text_is_escaped_and_written_in_ascii():
     assert paper_export.tex("a_b & 50% #1 {x} → y") == r"a\_b \& 50\% \#1 \{x\} -> y"
     assert paper_export.tex("back\\slash") == r"back\textbackslash{}slash"

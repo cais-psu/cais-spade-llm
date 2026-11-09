@@ -1,5 +1,38 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Recovery UI and appendix set — November 9, 2026 — Study 2 video picks retained (user go "yes do it")
+
+The Recovery UI and `appendix/appendix_set.json` now hold, per scenario, the passed Study 1 Framework outline with the
+fewest events across the three models (the Study 2 video picks, GAZEBO_QUEUE item 123), composed in Study 2 round 9.
+This replaces the November 3 rule that only Opus 5.5 gives the appendix answers: two of the four are GPT-6.1 Sol's.
+
+| Scenario | Outline (model, Study 1 batch) | Composition (round 9) | Events |
+|---|---|---|---|
+| Part slippage | `draft_fa0c3793…` (Opus 5.5, `batch_…2d360a`) | `composition_096a6822…` (`7f6f712`) | 4/4 |
+| Conveyor breakdown | `draft_71aa4a94…` (Opus 5.5, `batch_…589dd0`) | `composition_9e6b4263…` (`7f6f712`) | 7/7 |
+| ur5e-1 breakdown | `draft_6f500c9f…` (Sol, `batch_…1b4787`) | `composition_3075cbc4…` (`386b8cd`) | 4/4 |
+| Machining breakdown | `draft_91d5a2aa…` (Sol, `batch_…4eb465`) | `composition_040388ef…` (`386b8cd`) | 14/14 |
+
+- Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
+  `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.
+- Copied, not moved: the drafts from `outline_experiments` (never deleted) into `outline_drafts`, the compositions from
+  `/home/jongh/recovery_review_1030/study2_20261108/compositions_r9` (never deleted) into `draft_compositions`.
+- All four replay on `a64387b` with RA, CCA safety and nonblocking on and find their saved composition
+  (`check_retained.py`); the paper export builds. Worked example: Conveyor turns 4–7 (a CCA refusal at M1 and ur5e-1's
+  retreat, then an RA refusal for a pick with no `part_location` and its restatement); the old turns 11–13 belonged to
+  the retired Conveyor draft.
+- Moved, not deleted, to `/home/jongh/recovery_archives/20261109_v8_reference_set_before_study2_picks/` (10 GB,
+  `manifest.json`): the November 7 v8 set (`draft_355260e1…`, `draft_520ea8f3…`, `draft_d3a60303…`, `draft_b351abd8…`;
+  `composition_9e399125…`, `composition_aeedc6de…`, `composition_d382703a…`, `composition_4c05a6b1…`) and the November 6
+  v7b compositions `composition_56633fa3…` and `composition_f29ddbc3…`. `test_composed_motion_check.py` reads its own
+  fixture copy of `f29ddbc3` in `regression_fixtures/composed_motion`.
+- Appendix token counts: `paper_export.tokens` summed only Claude's usage fields, so Sol's runs showed 0. It now sums
+  `_token_usage(...)["total_tokens"]`, as Table 7 does; the four outline counts equal Study 1's and the four composition
+  counts equal Table 7's (test extended). The LaTeX appendix does not name each run's model; only the supplementary
+  README does, on one line.
+- Kept: the hand-trimmed Machining demo `draft_demo_trimmed_c9ed21daaf68` (replays with the checks it records).
+  `check_retained_trimmed.py`'s second pass reads its parent `draft_b351abd8…`, now in the archive.
+
 ## Primitive composition with MoveIt physical checks — November 6–7, 2026 — decided by the user; built offline in the `composition-physics` worktree, committed on `recovery-framework-journal` November 7 (overnight go); the open choices below were decided overnight and await the user's review
 
 **Why.** Composition checked end points and symbols. A hand-written program passing it said little about physics ("Hand

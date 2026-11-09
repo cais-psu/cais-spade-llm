@@ -1,12 +1,13 @@
 {
-  "model": "claude-opus-5-5, reasoning effort medium",
-  "outline_commit": "29e13d2 (Part slippage: a338cfe)",
-  "composition_commit": "a338cfe (Part slippage: 47b5170; all four replay unchanged at 47b5170)",
+  "model": "claude-opus-5-5 (Part slippage, Conveyor breakdown) and gpt-6.1-sol (ur5e-1 breakdown, Machining breakdown during part processing), reasoning effort medium",
+  "selection": "Study 2 video picks: per scenario, the passed Study 1 Framework outline with the fewest events across the three models, composed in Study 2 round 9",
+  "outline_commit": "9776af2 (Study 1 Framework batches; outline prompt from 9f1faee)",
+  "composition_commit": "7f6f712 (ur5e-1 and Machining: 386b8cd, the same Python; the native corridor change between them reaches only a gear insertion, which neither has)",
   "scenarios": [
-    {"key": "part_slippage", "scenario": "Part slippage", "outline": "draft_355260e1cd5740afaabb37421641e733", "composition": "composition_9e399125f54a4e2ba7b3b9cda41ffdc4"},
-    {"key": "conveyor", "scenario": "Conveyor breakdown", "outline": "draft_520ea8f366964c67bebd9659c133e315", "composition": "composition_aeedc6de4dc24caf80bcf20f419ac02f"},
-    {"key": "ur5e1", "scenario": "ur5e-1 breakdown", "outline": "draft_d3a6030384384607903da4f00469d438", "composition": "composition_d382703a8d2044ecbca07c2276ad5796"},
-    {"key": "machining", "scenario": "Machining breakdown during part processing", "outline": "draft_b351abd84d434e859a290ca861472403", "composition": "composition_4c05a6b139774037837929eafc88a2f5"}
+    {"key": "part_slippage", "scenario": "Part slippage", "outline": "draft_fa0c3793d43d4095b9dfe7abdff0c054", "composition": "composition_096a682291294dd69f9000b6d8af9837"},
+    {"key": "conveyor", "scenario": "Conveyor breakdown", "outline": "draft_71aa4a94261b46c0a7cc4a2c0c114fda", "composition": "composition_9e6b4263a25741e3ad94f41bda088398"},
+    {"key": "ur5e1", "scenario": "ur5e-1 breakdown", "outline": "draft_6f500c9fff744472b795e37c3cf1a718", "composition": "composition_3075cbc499dc4693a0271b242f57e9a8"},
+    {"key": "machining", "scenario": "Machining breakdown during part processing", "outline": "draft_91d5a2aa116347649c62d9ff1c070944", "composition": "composition_040388ef330c4ee3a657dd7a871a7bc4"}
   ],
-  "worked_example": {"key": "conveyor", "turns": [11, 12, 13]}
+  "worked_example": {"key": "conveyor", "turns": [4, 5, 6, 7]}
 }
