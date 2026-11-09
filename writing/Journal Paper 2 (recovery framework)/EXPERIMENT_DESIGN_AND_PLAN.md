@@ -817,6 +817,16 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   and Terra runs first, as a trial, before the other 30.
   Each event has its own 24-turn limit (`max_turns`) besides the composition's 80; a run that reaches it stops with
   "The event requires exactly one RA-validated program" (CONV_terra_2 on `cf47652`), and Table 4 states both limits.
+- 2026-11-08, Study 2 composition restarted a sixth time, after the Part slippage trial for Sol and Terra on
+  `d43a7f9` (Sol 2/4, 2/5, 2/5; Terra 1/5, 1/5, 1/5; none completed). Five of the six ended on the composing LLM's
+  own `primitive_blocked`, with no program ever checked; the sixth after Terra's programs bound numbers to paths its
+  lookups had served (`/projected_snapshot/...`, `/regions/...`), which parameters could not resolve although the
+  prompt says every number is a reference into the served context. Two changes, no new prompt wording: a composition
+  ends only on its checks or its turn limits (the response format offers no block, and a block that still arrives is
+  a reported gap that counts as a turn without progress), and a program's references resolve in everything a lookup
+  serves, at the path shown. A fuller statement of how a grasp and a release change values was drafted and left out
+  at the user's request as too much. Part slippage for Sol and Terra runs again first; the `d43a7f9` round is kept and
+  left out.
 
 ### Tables and exports required for the paper
 

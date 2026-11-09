@@ -2326,7 +2326,10 @@ def test_composition_stops_after_three_same_cause_rejections(monkeypatch):
         calls.append(prompt)
         return {"decision": "primitive_steps_ready", "revision": len(calls)}
 
+    formats = []
+
     async def recorded(fn, **kwargs):
+        formats.append(kwargs["response_format"])
         return await fn(kwargs["prompt"])
 
     async def reject(**kwargs):
@@ -2352,6 +2355,8 @@ def test_composition_stops_after_three_same_cause_rejections(monkeypatch):
     assert result["primitive_events"] == []
     assert result["feedback"][0]["reason"] == "Retreat is missing"
     assert result["turns"][-1]["composition_same_cause_failures"] == 3
+    # Composition's response format offers no block: its checks or its turn limits end it.
+    assert all("primitive_blocked" not in row["schema"]["properties"]["decision"]["enum"] for row in formats)
 
 
 def test_the_robot_guidance_says_where_a_location_comes_from_and_gives_no_recipe(monkeypatch):
@@ -2852,6 +2857,63 @@ def test_composition_serves_the_recorded_regions_and_scene_geometry_as_the_outli
                                           outline_event={})
     assert missing is None and "is not recorded" in error
 
+
+
+def test_a_composing_llm_cannot_end_its_composition_by_declaring_an_event_blocked(contract):
+    """Study 2, 2026-11-08: Sol and Terra ended runs by declaring events blocked, with no program ever checked.
+
+    Composition ends on its checks or its turn limits: its response format offers no block, and a block that still
+    arrives is a reported gap, so the event goes on and the no-progress limit still applies.
+    """
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+        multi_turn_primitive_generation as generation,
+    )
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import (
+        multi_turn_phase_response_schema,
+    )
+
+    assert "primitive_blocked" in multi_turn_phase_response_schema("primitive_generation")["schema"]["properties"][
+        "decision"]["enum"]
+    session = {"accepted_outline_prefix": [deepcopy(contract["task"])], "accepted_primitive_program": []}
+    reply = {"decision": "primitive_blocked", "rationale": "No effect sets the part location.",
+             "outline_id": "restore", "resource_jid": "owner"}
+    decision, entry = asyncio.run(generation._handle_primitive_generation_phase(
+        session_state=session, parsed_response=reply, prepared_recovery_request=_prepared(contract), planner=None))
+
+    assert decision == "need_primitive_revision" and session["status"] == "paused_after_primitive_turn"
+    assert entry["primitive_response"]["legacy_decision"] == "primitive_blocked"
+    assert entry["primitive_rejection_feedback"][0]["reason"] == (
+        "LLM reported primitive-surface gap: No effect sets the part location.")
+
+
+def test_a_composed_program_may_reference_every_path_a_lookup_serves(contract, monkeypatch):
+    """Study 2, 2026-11-08: Terra bound numbers to paths its lookups had served, and each was unresolved.
+
+    The prompt says every number is a reference into the served context; a program's references now resolve in what
+    /projected_snapshot, /parts/<name>/snapshot, /regions and /geometry serve, at the path shown. A path not shown
+    stays unresolved.
+    """
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+        multi_turn_primitive_generation as generation,
+    )
+    from cais_spade_llm.resources.recovery_composition import resolve_composition_value
+
+    zone = {"bounds": [[-4.75, -4.6], [1.3, 1.5], [1.0, 1.2]]}
+    prepared = {**_prepared(contract), "diagnostic_regions": {"Buffer.zone_4": zone},
+                "diagnostic_scene_geometry": {"floor_extent_xy": [-10.5, 1.5, -4.0, 4.8]}}
+    task = {**contract["task"], "resource_jid": "owner"}
+    context = generation._composition_parameter_context(session_state={}, prepared_recovery_request=prepared,
+                                                        outline_event=task)
+
+    def value(ref: str):
+        return resolve_composition_value({"context_ref": ref}, context)
+
+    assert value("/projected_snapshot/owner/mode") == value("/resources/owner/snapshot/mode") == "fault"
+    assert value("/parts/P/snapshot/quality") == value("/parts/P/quality") == "pending"
+    assert value("/regions/Buffer.zone_4/value/bounds/0/0") == value("/regions/value/Buffer.zone_4/bounds/0/0") == -4.75
+    assert value("/geometry/value/floor_extent_xy/1") == value("/geometry/floor_extent_xy/value/1") == 1.5
+    with pytest.raises(KeyError):
+        value("/regions/Buffer.zone_4/bounds/0/0")
 
 
 def test_a_machine_command_says_its_part_name_condition_reads_the_events_part():

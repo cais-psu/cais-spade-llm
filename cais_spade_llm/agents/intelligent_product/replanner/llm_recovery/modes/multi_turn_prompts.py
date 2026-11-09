@@ -3626,7 +3626,9 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             params_rule,
             "- compute_pick_targets publishes event_facts.pick_targets.<part>; compute_place_targets publishes event_facts.place_targets.<part>.",
             "- need_context: refs in context_requests, primitive_steps empty.",
-            "- primitive_steps_ready: non-empty primitive_steps. need_primitive_revision or primitive_blocked: say why in rationale.",
+            "- primitive_steps_ready: non-empty primitive_steps. need_primitive_revision: say why in rationale."
+            if session_state.get("composition_validation_version") == 1
+            else "- primitive_steps_ready: non-empty primitive_steps. need_primitive_revision or primitive_blocked: say why in rationale.",
         ]
     )
     return "\n".join(sections).strip() + "\n"

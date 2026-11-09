@@ -1982,6 +1982,43 @@ def _validate_authored_plan(
 # ---------------------------------------------------------------------------
 
 
+def _composition_parameter_context(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    outline_event: dict[str, Any],
+) -> dict[str, Any]:
+    """The context a composed program's references resolve in: every path a lookup serves, as it is shown.
+
+    Besides the recorded state, it carries the lookups' own aliases (``/projected_snapshot/<jid>`` is the resource's
+    snapshot, ``/parts/<name>/snapshot`` the part) and the ``/regions`` and ``/geometry`` records, each under its
+    lookup's ref: ``/regions/<name>/value/...`` and ``/regions/value/<name>/...`` both read what was shown.
+    """
+    from .multi_turn_context import _diagnostic_fact
+
+    context = _primitive_grounding_context(session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request, outline_event=outline_event)
+    context["projected_snapshot"] = {jid: deepcopy(entry.get("snapshot") or {})
+                                     for jid, entry in (context.get("resources") or {}).items()
+                                     if isinstance(entry, dict)}
+    for name, part in (context.get("parts") or {}).items():
+        if isinstance(part, dict) and "snapshot" not in part:
+            context["parts"][name] = {**part, "snapshot": deepcopy(part)}
+    for head in ("regions", "geometry"):
+        try:
+            served = _diagnostic_fact(prepared_recovery_request, session_state, f"/{head}")
+        except ValueError:
+            continue
+        for key in (served.get("value") or {}) if isinstance(served.get("value"), dict) else ():
+            if key not in served:
+                try:
+                    served[key] = _diagnostic_fact(prepared_recovery_request, session_state, f"/{head}/{key}")
+                except ValueError:
+                    continue
+        context[head] = served
+    return context
+
+
 def _validate_single_event_primitive_steps(
     *,
     session_state: dict[str, Any],
@@ -1998,7 +2035,7 @@ def _validate_single_event_primitive_steps(
         validator = getattr(composition_owner, "validate_recovery_primitive_composition", None)
         evidence = (validator(task=outline_event, primitive_steps=primitive_steps,
             prepared=prepared_recovery_request, recovery_snapshot=resource, part_context=part,
-            grounding_context=_primitive_grounding_context(session_state=session_state,
+            grounding_context=_composition_parameter_context(session_state=session_state,
                 prepared_recovery_request=prepared_recovery_request, outline_event=outline_event))
             if callable(validator) else {"feasibility_status": "NEEDS_CONTEXT",
                 "reason": "The responsible resource has no composition validator"})
@@ -2283,6 +2320,10 @@ async def generate_primitive_batch_with_llm_agent(
     llm_input = dict(prepared_recovery_request.get("llm_input") or {})
     recovery_resources = dict(prepared_recovery_request.get("recovery_resources") or {})
     response_schema = multi_turn_phase_response_schema("primitive_generation")
+    if prepared_recovery_request.get("composition_validation_version") == 1:
+        # Composition ends on its checks or its turn limits, not on the LLM's own judgement that an event cannot be
+        # done; a gap is still reported with need_primitive_revision.
+        response_schema["schema"]["properties"]["decision"]["enum"].remove("primitive_blocked")
     system_instructions = ""
     if session_state is not None:
         session_state = deepcopy(session_state)
@@ -2686,6 +2727,10 @@ async def _handle_primitive_generation_phase(
         outline_id=outline_id,
         resource_jid=resource_jid,
     )
+    if (prepared_recovery_request.get("composition_validation_version") == 1
+            and response_decision == "primitive_blocked"):
+        # A block is a reported gap: the event goes on until its checks accept a program or a turn limit ends it.
+        response_decision = "need_primitive_revision"
     logged_response = dict(parsed_response)
     logged_response["decision"] = response_decision
     _log_primitive_turn_summary(
@@ -2979,7 +3024,9 @@ async def _handle_primitive_generation_phase(
                 outline_event=active_event,
                 constraint_code="primitive_schema_violation",
                 reason=(
-                    "decision must be one of: primitive_steps_ready, need_context, "
+                    "decision must be one of: primitive_steps_ready, need_context, need_primitive_revision"
+                    if prepared_recovery_request.get("composition_validation_version") == 1
+                    else "decision must be one of: primitive_steps_ready, need_context, "
                     "need_primitive_revision, primitive_blocked"
                 ),
             )
