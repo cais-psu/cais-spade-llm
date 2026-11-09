@@ -630,24 +630,24 @@ function renderTable7() {
   const head = (first) => `<thead><tr>
     <th>${first}</th><th>Compositions passed<small>every event composed</small></th>
     <th>Events composed<small>mean share per outline</small></th><th>Events<small>median per outline</small></th>
-    <th>Refused programs<small>median per composition</small></th>
+    <th>Refused programs<small>median per composition</small></th><th>Lookups<small>median per composition</small></th>
     <th>Tokens<small>median</small></th><th>Time<small>median</small></th></tr></thead>`;
   const cell = (v, unit = "") => (v === null || v === undefined ? dash : `${v}${unit}`);
   const share = (v) => (v === null || v === undefined ? dash : `${Math.round(v * 100)}%`);
   const nameOf = (m) => esc(m.name.replace(/ medium$/, ""));
   const row = (label, r, cls = "") => `<tr${cls ? ` class="${cls}"` : ""}><td>${label}</td><td>${r.passed}</td>
-        <td>${share(r.share)}</td><td>${cell(r.events)}</td><td>${cell(r.refused)}</td>
+        <td>${share(r.share)}</td><td>${cell(r.events)}</td><td>${cell(r.refused)}</td><td>${cell(r.lookups)}</td>
         <td>${cell(r.tokens_k, "k")}</td><td>${cell(r.minutes, " min")}</td></tr>`;
-  const todo = (label) => `<tr><td>${label}</td><td colspan="6" class="todo">not composed yet</td></tr>`;
+  const todo = (label) => `<tr><td>${label}</td><td colspan="7" class="todo">not composed yet</td></tr>`;
   let byModel, byScenario;
   if (!DATA.composition) {
-    byModel = byScenario = `<tr><td colspan="7" class="todo">Primitive composition has not been collected yet.</td></tr>`;
+    byModel = byScenario = `<tr><td colspan="8" class="todo">Primitive composition has not been collected yet.</td></tr>`;
   } else {
     const C7 = DATA.composition;
     const total = C7.total ? row("All", C7.total, "total") : "";
     byModel = C7.models
       ? MODELS.map((m) => (C7.models[m.id] ? row(nameOf(m), C7.models[m.id]) : todo(nameOf(m)))).join("") + total
-      : `<tr><td colspan="7" class="todo">Not split by LLM in the layout numbers.</td></tr>`;
+      : `<tr><td colspan="8" class="todo">Not split by LLM in the layout numbers.</td></tr>`;
     byScenario = ORDER.map((scn) => {
       const r = C7.scenarios[scn];
       return r && r.composed ? row(esc(scn), r) : todo(esc(scn));
@@ -655,7 +655,7 @@ function renderTable7() {
   }
   document.getElementById("tab7-table").innerHTML = head("LLM") + `<tbody>${byModel}</tbody>`;
   document.getElementById("tab7b-table").innerHTML = head("Failure scenario") + `<tbody>${byScenario}</tbody>`;
-  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines: (a) by LLM, pooled over the four failure scenarios; (b) by failure scenario, pooled over the three LLMs (${MODEL_NAMES}). The All row is the same in both. For each LLM and scenario, the three passed outlines with the fewest events (ties: the earliest run; they include the outlines executed in Gazebo, Table 8) are each composed once, by the LLM that wrote the outline, at reasoning effort ${esc(DATA.conditions.effort)}: 12 compositions per LLM, 9 per scenario, 36 in all. Compositions passed counts the outlines whose every event received a primitive program that passed the composition checks, which each event's RA runs on its own program: the primitives' declared effects, and motion planning in the cell recorded at the failure. Events composed is the share of an outline's events that received such a program, averaged over the composed outlines so that each counts once; events are composed in order, so a composition that stops leaves the rest of its outline uncomposed. It was added after the compositions ran, beside the planned measure. Every composed outline had already passed RA and CCA; the CCA does not check the programs again. Refused programs counts the proposed programs the checks refused before the composition passed or stopped. Medians are over the composed outlines; tokens and time are the composition stage only. The outline stage is in Fig. 11 and Table 6.`;
+  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines: (a) by LLM, pooled over the four failure scenarios; (b) by failure scenario, pooled over the three LLMs (${MODEL_NAMES}). The All row is the same in both. For each LLM and scenario, the three passed outlines with the fewest events (ties: the earliest run; they include the outlines executed in Gazebo, Table 8) are each composed once, by the LLM that wrote the outline, at reasoning effort ${esc(DATA.conditions.effort)}: 12 compositions per LLM, 9 per scenario, 36 in all. Compositions passed counts the outlines whose every event received a primitive program that passed the composition checks, which each event's RA runs on its own program: the primitives' declared effects, and motion planning in the cell recorded at the failure. Events composed is the share of an outline's events that received such a program, averaged over the composed outlines so that each counts once; events are composed in order, so a composition that stops leaves the rest of its outline uncomposed. It was added after the compositions ran, beside the planned measure. Every composed outline had already passed RA and CCA; the CCA does not check the programs again. Refused programs counts the proposed programs the checks refused before the composition passed or stopped. Lookups counts the references the composing LLM requested from the knowledge base 𝒦 over all its events, as Fig. 11 counts the outline stage's. Medians are over the composed outlines; tokens and time are the composition stage only. The outline stage is in Fig. 11 and Table 6.`;
 }
 
 /* ---------- Table 8 (optional): the selected outline per scenario executed in Gazebo ---------- */

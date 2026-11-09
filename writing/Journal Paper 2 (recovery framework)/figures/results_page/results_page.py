@@ -334,23 +334,23 @@ def _usage(record: Any) -> dict | None:
     return next((found for value in values if (found := _usage(value)) is not None), None)
 
 
-def _decision(text: str) -> str | None:
-    """Return the decision a composing LLM's turn response states."""
+def _reply(text: str) -> dict:
+    """Return a composing LLM's turn reply (decision, context_requests, primitive_steps) from its response record."""
     start = text.find("{")
     try:
         record = json.loads(text[start:]) if start >= 0 else {}
     except json.JSONDecodeError:
-        return None
+        return {}
     stack = [record]
     while stack:
         item = stack.pop()
         if isinstance(item, dict):
             if "decision" in item and ("primitive_steps" in item or "context_requests" in item):
-                return item["decision"]
+                return item
             stack.extend(item.values())
         elif isinstance(item, list):
             stack.extend(item)
-    return None
+    return {}
 
 
 def composition_row(log: Path) -> dict | None:
@@ -372,8 +372,11 @@ def composition_row(log: Path) -> dict | None:
     if passed:
         program = json.loads((directory / "composition.json").read_text())["accepted_primitive_program"]
         primitives = sum(len(event.get("primitive_steps") or []) for event in program)
-    turns = [_decision(path.read_text(errors="replace"))
-             for path in sorted((directory / "recovery_primitves").glob("multi_turn_*_response_*.txt"))]
+    replies = [_reply(path.read_text(errors="replace"))
+               for path in sorted((directory / "recovery_primitves").glob("multi_turn_*_response_*.txt"))]
+    turns = [reply.get("decision") for reply in replies]
+    # A lookup is one reference the composing LLM requested, as the outline stage counts its retrievals.
+    lookups = sum(len(reply.get("context_requests") or []) for reply in replies if reply.get("decision") == "need_context")
     calls = tokens = 0
     for path in sorted((directory / "recovery_primitves" / "requests").glob("*/round*_response.json")):
         calls += 1
@@ -382,7 +385,7 @@ def composition_row(log: Path) -> dict | None:
     return {"name": log.stem, "scenario": COMPOSITION_SCENARIOS[scenario], "model": COMPOSITION_MODELS[model],
             "events": events, "accepted": accepted, "share": accepted / events if events else None, "passed": passed,
             "primitives": primitives, "refused": max(turns.count("primitive_steps_ready") - accepted, 0),
-            "calls": calls, "tokens": tokens, "seconds": result.get("seconds")}
+            "calls": calls, "lookups": lookups, "tokens": tokens, "seconds": result.get("seconds")}
 
 
 def composition_summary(rows: list[dict]) -> dict | None:
@@ -396,6 +399,7 @@ def composition_summary(rows: list[dict]) -> dict | None:
             "events": _median([row["events"] for row in rows]),
             "primitives": _median([row["primitives"] for row in rows if row["primitives"] is not None]),
             "refused": _median([row["refused"] for row in rows]), "calls": _median([row["calls"] for row in rows]),
+            "lookups": _median([row["lookups"] for row in rows]),
             "tokens_k": _round(tokens / 1000 if tokens is not None else None),
             "minutes": _round(minutes, 1)}
 
