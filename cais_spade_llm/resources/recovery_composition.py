@@ -115,6 +115,11 @@ def composition_start_views(*, session: dict, prepared: dict, task: dict) -> tup
     return resource, part_context
 
 
+# What composition binds a transfer's declared location parameters to: the model declares the effect, not the binding.
+_TRANSFER_LOCATION_PARAMS = ("In a transfer's declared effect, origin_resource_location is the grasped part's "
+                             "part_location, and destination_location is the place where the released part comes to rest.")
+
+
 def composition_grounding_context(*, session: dict, prepared: dict, task: dict) -> dict:
     """Expose recorded contracts and the current accepted state to retrieval."""
     context = deepcopy(prepared.get("grounding_context", {}))
@@ -142,6 +147,11 @@ def composition_grounding_context(*, session: dict, prepared: dict, task: dict) 
             for step in (event.get("composition_contract") or {}).get("steps") or []:
                 step.pop("public_params", None)
                 step.pop("note", None)
+        location = (model.get("state_variables") or {}).get("resource_location")
+        if isinstance(location, dict) and any(
+                ((event.get("updates") or {}).get("resource_location") or {}).get("set_from_param")
+                in {"origin_resource_location", "destination_location"} for event in model.get("events") or []):
+            location["description"] = _TRANSFER_LOCATION_PARAMS
     part_names = set(parts) | set(session.get("base_symbolic_parts", {}))
     for row in [*session.get("composition_prefix", []), *session.get("accepted_primitive_program", [])]:
         part_names.update(row.get("composition_validation", {}).get("projected_parts", {}))

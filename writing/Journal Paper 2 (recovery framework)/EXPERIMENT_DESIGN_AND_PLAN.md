@@ -834,6 +834,16 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   measure, Composition passed (k/n with a Wilson interval), stays beside it, and Table 7 adds a row per model. After
   the Part slippage trial on `389dcdc` (Sol completed PS_sol_1), the user chose to compose all 36 on `389dcdc`
   without further changes.
+- 2026-11-08, Study 2 composition restarted a seventh time, at the user's request after a pause, before the other 30
+  began. In the `389dcdc` Part slippage trial three of the four failed runs (PS_sol_2, PS_sol_3, PS_terra_1) stalled
+  on one question: an arm's served model declares that pick_grasp sets its resource_location from
+  `origin_resource_location`, but nothing said what composition binds that parameter to, so Sol and Terra held that a
+  robot at the Buffer could not end at null (22 of the 36 outlines state such a null, Opus's included). The served
+  copy of a model whose transfers set resource_location from these parameters now describes them: "In a transfer's
+  declared effect, origin_resource_location is the grasped part's part_location, and destination_location is the
+  place where the released part comes to rest." It is a lookup, not prompt text; only the four arms' models carry
+  it. A fuller move of the robot and KMR rules out of the first composition prompt was drafted and left out. The
+  Part slippage trial for Sol and Terra runs again first; the `389dcdc` round is kept and left out.
 
 ### Tables and exports required for the paper
 

@@ -2859,6 +2859,33 @@ def test_composition_serves_the_recorded_regions_and_scene_geometry_as_the_outli
 
 
 
+def test_a_served_model_says_what_composition_binds_its_transfer_location_parameters_to(contract):
+    """Study 2, 2026-11-08: Sol and Terra read pick_grasp's resource_location effect, set from
+    origin_resource_location, and found nothing saying what that parameter is, so they held that a robot at the Buffer
+    could not end at null. The served model now says; a model with no such effect is served as before.
+    """
+    from cais_spade_llm.resources.recovery_composition import _TRANSFER_LOCATION_PARAMS, composition_grounding_context
+
+    prepared = _prepared(contract)
+    arm = prepared["recovery_resources"]["owner"]
+    arm["recovery_des_model"]["state_variables"]["resource_location"] = {"scope": "resource", "domain": ["Buffer", None]}
+    arm["recovery_des_model"]["events"] = [
+        {"event_name": "pick_grasp", "updates": {"resource_location": {"set_from_param": "origin_resource_location"}}},
+        {"event_name": "move_home", "updates": {"resource_location": {"set": "home"}}}]
+    prepared["recovery_resources"]["machine"] = deepcopy(arm)
+    machine = prepared["recovery_resources"]["machine"]["recovery_des_model"]
+    machine["events"] = [{"event_name": "pause_job", "updates": {"resource_state": {"set": "paused"}}}]
+
+    served = composition_grounding_context(session={}, prepared=prepared, task={"resource_jid": "owner", "part_name": "P"})
+    variables = served["resources"]["owner"]["recovery_des_model"]["state_variables"]
+    assert variables["resource_location"] == {"scope": "resource", "domain": ["Buffer", None],
+                                              "description": _TRANSFER_LOCATION_PARAMS}
+    assert "description" not in served["resources"]["machine"]["recovery_des_model"]["state_variables"]["resource_location"]
+    # The owner's check reads the prepared model, which is not changed.
+    assert "description" not in prepared["recovery_resources"]["owner"]["recovery_des_model"]["state_variables"][
+        "resource_location"]
+
+
 def test_a_composing_llm_cannot_end_its_composition_by_declaring_an_event_blocked(contract):
     """Study 2, 2026-11-08: Sol and Terra ended runs by declaring events blocked, with no program ever checked.
 
