@@ -316,10 +316,10 @@ _PLACEHOLDER_EXECUTION = {
 # names its composition directory, and its name is <scenario>_<model>_<rank>. Sol's and Terra's second Part slippage
 # attempts are in logs_r9b and stay out of Table 7, which holds one attempt per outline.
 COMPOSITION_LOGS = Path("/home/jongh/recovery_review_1030/study2_20261108/logs_r9")
-# User decision 2026-11-08: Sol's and Terra's Part slippage outlines were composed twice on the final commit, and
-# Table 7 reports the second attempt for each of them, whatever it gave; the caption says so.
+# User decisions 2026-11-08/09: Sol's Part slippage outlines were composed twice on the final commit, and Table 7
+# reports the second attempt for each of them, whatever it gave; the caption says so. Terra gets no second attempt.
 SECOND_ATTEMPT_LOGS = Path("/home/jongh/recovery_review_1030/study2_20261108/logs_r9b")
-SECOND_ATTEMPT = {"PS_sol_1", "PS_sol_2", "PS_sol_3", "PS_terra_1", "PS_terra_2", "PS_terra_3"}
+SECOND_ATTEMPT = {"PS_sol_1", "PS_sol_2", "PS_sol_3"}
 COMPOSITION_SCENARIOS = {"PS": "Part slippage", "CONV": "Conveyor breakdown",
                          "MACH": "Machining breakdown during part processing", "UR5": "ur5e-1 breakdown"}
 COMPOSITION_MODELS = {"opus": "opus55", "sol": "sol", "terra": "terra"}

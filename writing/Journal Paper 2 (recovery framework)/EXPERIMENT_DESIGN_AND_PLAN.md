@@ -871,6 +871,9 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   the final commit, and Table 7 reports the second attempt for all six, whatever it gives; Claude Opus 5.5 composes
   each outline once. Sol's first attempts were 2/4, 3/5 and 3/5 events (no pass) and its second 4/4, 5/5 and 3/5.
   The caption states the rule; the first attempts stay in `logs_r9`, the second in `logs_r9b`.
+- 2026-11-09, user decision: GPT-6.1 Terra gets no second attempt. Its three Part slippage second attempts were taken
+  out of the queue before any ran, and Table 7 reports Terra's first attempts; only Sol's Part slippage outlines
+  report the second attempt. Terra's PS_terra_2 composed all 5 events on its first attempt.
 
 ### Tables and exports required for the paper
 
