@@ -298,7 +298,10 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
       <h3 id="tab7-title">Table 7 · Primitive composition</h3>
       <div class="tags" data-tags="RC1 + RC2"></div>
     </div>
+    <p class="paper-panel">(a) By failure scenario, the three LLMs pooled</p>
     <div class="table-wrap"><table class="results wide" id="tab7-table"></table></div>
+    <p class="paper-panel">(b) By LLM, the four scenarios pooled</p>
+    <div class="table-wrap"><table class="results wide" id="tab7b-table"></table></div>
     <figcaption id="tab7-caption"></figcaption>
   </figure>
 
@@ -624,8 +627,8 @@ function renderRetrieval() {
 
 /* ---------- Table 7: primitive composition, all models pooled ---------- */
 function renderTable7() {
-  const head = `<thead><tr>
-    <th>Failure scenario</th><th>Outlines composed<small>3 per model</small></th><th>Events composed<small>mean share per outline</small></th><th>Composition passed<small>k/n [95% CI]</small></th>
+  const head = (first) => `<thead><tr>
+    <th>${first}</th><th>Outlines composed<small>3 per model and scenario</small></th><th>Events composed<small>mean share per outline</small></th><th>Composition passed<small>k/n [95% CI]</small></th>
     <th>Events<small>median per outline</small></th><th>Primitives<small>median per program</small></th>
     <th>Programs refused<small>median per composition</small></th><th>Model calls<small>median</small></th>
     <th>Tokens<small>median</small></th><th>Time<small>median</small></th></tr></thead>`;
@@ -640,23 +643,24 @@ function renderTable7() {
         <td>${r.passed}/${r.composed} ${ci(r.passed, r.composed)}</td>
         <td>${cell(r.events)}</td><td>${cell(r.primitives)}</td><td>${cell(r.refused)}</td><td>${cell(r.calls)}</td>
         <td>${cell(r.tokens_k, "k")}</td><td>${cell(r.minutes, " min")}</td></tr>`;
-  let body;
+  const todo = (label) => `<tr><td>${label}</td><td colspan="9" class="todo">not composed yet</td></tr>`;
+  let byScenario, byModel;
   if (!DATA.composition) {
-    body = `<tr><td colspan="10" class="todo">Primitive composition has not been collected yet.</td></tr>`;
+    byScenario = byModel = `<tr><td colspan="10" class="todo">Primitive composition has not been collected yet.</td></tr>`;
   } else {
     const C7 = DATA.composition;
-    body = ORDER.map((scn) => {
+    const total = C7.total ? row("All", C7.total, "total") : "";
+    byScenario = ORDER.map((scn) => {
       const r = C7.scenarios[scn];
-      if (!r || !r.composed) return `<tr><td>${esc(scn)}</td><td colspan="9" class="todo">not composed yet</td></tr>`;
-      return row(esc(scn), r);
-    }).join("");
-    if (C7.total) body += row("All four scenarios", C7.total, "total");
-    if (C7.models) body += MODELS.map((m) => C7.models[m.id]
-      ? row(`${nameOf(m)}<small>all scenarios</small>`, C7.models[m.id])
-      : `<tr><td>${nameOf(m)}</td><td colspan="9" class="todo">not composed yet</td></tr>`).join("");
+      return r && r.composed ? row(esc(scn), r) : todo(esc(scn));
+    }).join("") + total;
+    byModel = C7.models
+      ? MODELS.map((m) => (C7.models[m.id] ? row(nameOf(m), C7.models[m.id]) : todo(nameOf(m)))).join("") + total
+      : `<tr><td colspan="10" class="todo">Not split by LLM in the layout numbers.</td></tr>`;
   }
-  document.getElementById("tab7-table").innerHTML = head + `<tbody>${body}</tbody>`;
-  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines, pooled over the three models (${MODEL_NAMES}). For each model and scenario, the three passed outlines with the fewest events (ties: the earliest run; they include the outlines executed in Gazebo, Table 8) are each composed once, by the model that wrote the outline, at reasoning effort ${esc(DATA.conditions.effort)}. Events composed is the share of an outline's events that received a primitive program passing the composition checks, averaged over the composed outlines so that each counts once; events are composed in order, so a composition that stops leaves the rest of its outline uncomposed. It was added after the compositions ran, beside the planned measure. Composition passed counts the outlines whose every event received a primitive program that passed the composition checks, which each event's RA runs on its own program: the primitives' declared effects, and motion planning in the cell recorded at the failure. The interval is a 95% Wilson interval. Every composed outline had already passed RA and CCA; the CCA does not check the programs again. Programs refused counts the proposed programs the checks refused before the composition ended. Medians are over the composed outlines; tokens and time are the composition stage only. The outline stage is in Fig. 11 and Table 6.`;
+  document.getElementById("tab7-table").innerHTML = head("Failure scenario") + `<tbody>${byScenario}</tbody>`;
+  document.getElementById("tab7b-table").innerHTML = head("LLM") + `<tbody>${byModel}</tbody>`;
+  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines: (a) by failure scenario, pooled over the three LLMs (${MODEL_NAMES}); (b) by LLM, pooled over the four scenarios. The All row is the same in both. For each model and scenario, the three passed outlines with the fewest events (ties: the earliest run; they include the outlines executed in Gazebo, Table 8) are each composed once, by the model that wrote the outline, at reasoning effort ${esc(DATA.conditions.effort)}. Events composed is the share of an outline's events that received a primitive program passing the composition checks, averaged over the composed outlines so that each counts once; events are composed in order, so a composition that stops leaves the rest of its outline uncomposed. It was added after the compositions ran, beside the planned measure. Composition passed counts the outlines whose every event received a primitive program that passed the composition checks, which each event's RA runs on its own program: the primitives' declared effects, and motion planning in the cell recorded at the failure. The interval is a 95% Wilson interval. Every composed outline had already passed RA and CCA; the CCA does not check the programs again. Programs refused counts the proposed programs the checks refused before the composition ended. Medians are over the composed outlines; tokens and time are the composition stage only. The outline stage is in Fig. 11 and Table 6.`;
 }
 
 /* ---------- Table 8 (optional): the selected outline per scenario executed in Gazebo ---------- */
