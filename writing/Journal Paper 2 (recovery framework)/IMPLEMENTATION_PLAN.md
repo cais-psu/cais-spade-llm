@@ -28,8 +28,12 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   fixture copy of `f29ddbc3` in `regression_fixtures/composed_motion`.
 - Appendix token counts: `paper_export.tokens` summed only Claude's usage fields, so Sol's runs showed 0. It now sums
   `_token_usage(...)["total_tokens"]`, as Table 7 does; the four outline counts equal Study 1's and the four composition
-  counts equal Table 7's (test extended). The LaTeX appendix does not name each run's model; only the supplementary
-  README does, on one line.
+  counts equal Table 7's (test extended).
+- Model names (user "sure", 2026-11-09): each scenario in `appendix_set.json` names its LLM as the paper does
+  (Claude Opus 5.5, GPT-6.1 Sol; each matches the recorded `model` of every outline and composition request). The
+  LaTeX shows it on each outline and composition line and in a new LLM column of the summary table, whose caption
+  is now "Appendix runs, one per scenario" (the old "Reference runs" read as hand-edited reference outlines, which
+  this set has none of). Not compiled here (no LaTeX on the laptop); check the summary table's width in Overleaf.
 - Kept: the hand-trimmed Machining demo `draft_demo_trimmed_c9ed21daaf68` (replays with the checks it records).
   `check_retained_trimmed.py`'s second pass reads its parent `draft_b351abd8…`, now in the archive.
 

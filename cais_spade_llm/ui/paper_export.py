@@ -1,7 +1,7 @@
 """Build the paper's appendix tables and supplementary material from the recorded recovery runs.
 
-The appendix set (`appendix_set.json`) names, per scenario, the model outline, an optional hand-edited reference
-outline, and the composition. `build_paper_export` writes two zips:
+The appendix set (`appendix_set.json`) names, per scenario, the LLM, the model outline, an optional hand-edited
+reference outline, and the composition. `build_paper_export` writes two zips:
 
 - `appendix_overleaf.zip`: LaTeX for the appendix (prompt template, each scenario's turn-1 facts, turn table,
   events, reference edit and composition, a cross-scenario summary and one worked example), for `\\input` in Overleaf;
@@ -255,7 +255,8 @@ def outline_tex(entry: dict) -> str:
     first = sections(exchange(directory / turns[0]["request"])[1])
     facts = "\n\n".join(f"{name}\n{first[name]}" for name in ("Failure", "Recovery Goal", "Resources", "Parts") if name in first)
     out = [f"\\subsection{{{tex(entry['scenario'])}}}\\label{{app:{entry['key']}}}", "",
-           f"Model outline \\texttt{{{tex(entry['outline'][:14])}}}: {len(draft.get('transition_trace') or [])} events, "
+           f"Model outline \\texttt{{{tex(entry['outline'][:14])}}} ({tex(entry['model'])}): "
+           f"{len(draft.get('transition_trace') or [])} events, "
            f"{len(turns)} turns, {tokens([directory / turn['request'] for turn in turns]):,} tokens.", "",
            "\\paragraph{Facts at the failure (turn~1).}", listing(facts), "\\paragraph{Turns.}"]
     rows = []
@@ -330,7 +331,8 @@ def composition_tex(entry: dict) -> str:
                      str(calls.get(row["outline_id"], 0))])
     return "\n".join([
         f"\\subsection{{{tex(entry['scenario'])}: primitive composition}}", "",
-        f"Composition \\texttt{{{tex(entry['composition'][:20])}}} on outline \\texttt{{{tex(composition['source_outline_draft'][:14])}}}: "
+        f"Composition \\texttt{{{tex(entry['composition'][:20])}}} ({tex(entry['model'])}) on outline "
+        f"\\texttt{{{tex(composition['source_outline_draft'][:14])}}}: "
         f"{len(rows)} events, {len(requests)} calls, {tokens(requests):,} tokens.", "",
         _longtable(r"@{}r p{0.24\linewidth} p{0.08\linewidth} p{0.5\linewidth} r@{}",
                    ["\\#", "Event", "Resource", "Primitive steps", "Calls"], rows)])
@@ -347,12 +349,15 @@ def summary_tex(entries: list[dict]) -> str:
             reference = json.loads((RECORDS / "outline_drafts" / entry["reference"] / "draft.json").read_text(encoding="utf-8"))
             events += f" ({len(reference['transition_trace'])})"
         requests = composition_requests(RECORDS / "draft_compositions" / entry["composition"])
-        rows.append([tex(entry["scenario"]), events, str(len(turns)), f"{tokens([outline / turn['request'] for turn in turns]):,}",
-                     str(len(requests)), f"{tokens(requests):,}"])
-    return "\n".join(["\\begin{table}[ht]\\centering\\small", "\\caption{Reference runs: outline events (reference outline "
-                      "in parentheses), LLM turns and calls, and tokens.}\\label{tab:appendix-summary}",
-                      "\\begin{tabular}{@{}lrrrrr@{}}", r"\toprule",
-                      r"Scenario & Events & Outline turns & Outline tokens & Composition calls & Composition tokens \\ \midrule",
+        rows.append([tex(entry["scenario"]), tex(entry["model"]), events, str(len(turns)),
+                     f"{tokens([outline / turn['request'] for turn in turns]):,}", str(len(requests)), f"{tokens(requests):,}"])
+    in_parentheses = " (reference outline in parentheses)" if any(entry.get("reference") for entry in entries) else ""
+    return "\n".join(["\\begin{table}[ht]\\centering\\small",
+                      f"\\caption{{Appendix runs, one per scenario: the LLM, outline events{in_parentheses}, LLM turns and calls, "
+                      "and tokens.}\\label{tab:appendix-summary}",
+                      r"\begin{tabular}{@{}p{0.22\linewidth}lrrrrr@{}}", r"\toprule",
+                      r"Scenario & LLM & Events & \shortstack{Outline\\turns} & \shortstack{Outline\\tokens} & "
+                      r"\shortstack{Composition\\calls} & \shortstack{Composition\\tokens} \\ \midrule",
                       *(" & ".join(row) + r" \\" for row in rows), r"\bottomrule", "\\end{tabular}", "\\end{table}", ""])
 
 

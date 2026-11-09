@@ -62,7 +62,8 @@ def records(tmp_path, monkeypatch):
          "primitive_steps": [{"primitive": "move_base", "params": {"target_pose": [-4.7, 2.2, 1.57]}}]}]}))
     monkeypatch.setattr(paper_export, "RECORDS", tmp_path)
     return {"model": "claude-opus-5-5", "outline_commit": "a", "composition_commit": "b",
-            "scenarios": [{"key": "conveyor", "scenario": "Conveyor breakdown", "outline": "draft_one", "composition": "composition_one"}],
+            "scenarios": [{"key": "conveyor", "model": "Claude Opus 5.5", "scenario": "Conveyor breakdown", "outline": "draft_one",
+                           "composition": "composition_one"}],
             "worked_example": {"key": "conveyor", "turns": [2]}}
 
 
@@ -85,6 +86,10 @@ def test_the_paper_export_writes_ascii_latex_for_overleaf_and_the_supplementary_
             "appendix/appendix_worked_example.tex", "appendix/appendix_prompt_template.tex"} <= set(files)
     assert all(text.isascii() for text in files.values())
     outline = files["appendix/conveyor_outline.tex"]
+    # Each scenario names its LLM, in the outline, the composition and the summary table.
+    assert r"\texttt{draft\_one} (Claude Opus 5.5): 1 events" in outline
+    assert r"(Claude Opus 5.5) on outline" in files["appendix/conveyor_composition.tex"]
+    assert r"Conveyor breakdown & Claude Opus 5.5 & 1 & 2" in files["appendix/appendix_summary.tex"]
     # The turn table: a lookup, then the candidates with each check on its own line; LaTeX specials are escaped.
     assert "1 & looked up /regions" in outline
     assert r"UNSAFE -- SAFE\_M1\_mutex is broken: 50\% \& \#1 \newline" in outline
