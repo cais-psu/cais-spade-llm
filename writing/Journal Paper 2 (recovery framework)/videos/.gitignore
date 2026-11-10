@@ -1,0 +1,3 @@
+# Full-length recordings stay on disk only; the 20x copies are committed.
+failure.mp4
+recovery.mp4
