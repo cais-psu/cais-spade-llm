@@ -34,6 +34,9 @@
   --on-seg: #15181d;
   --v-openai: #008300;
   --v-claude: #6250d6;
+  --m1: rgb(80% 0% 0%);
+  --m2: rgb(0% 20% 80%);
+  --m3: rgb(0% 55% 0%);
   --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   --font-cap: "Source Serif 4", Georgia, "Times New Roman", serif;
@@ -45,6 +48,7 @@
     --nominal-fill: #262a30; --nominal-stroke: #4c525b;
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --dnf: #70757d;
     --v-openai: #1f9a1f; --v-claude: #9085e9;
+    --m1: rgb(100% 35% 35%); --m2: rgb(40% 60% 100%); --m3: rgb(25% 80% 25%);
     color-scheme: dark;
   }
 }
@@ -54,6 +58,7 @@
   --nominal-fill: #262a30; --nominal-stroke: #4c525b;
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --dnf: #70757d;
   --v-openai: #1f9a1f; --v-claude: #9085e9;
+  --m1: rgb(100% 35% 35%); --m2: rgb(40% 60% 100%); --m3: rgb(25% 80% 25%);
   color-scheme: dark;
 }
 
@@ -82,8 +87,6 @@ h1 { margin: 0; font-family: var(--font-cap); font-weight: 600; font-size: clamp
 .chip .real { background: var(--accent); }
 .chip .fake { border: 1.5px dashed var(--muted); }
 
-.guide { background: var(--plate); border: 1px solid var(--hair); border-radius: 10px; padding: 18px 20px; display: grid; gap: 18px; }
-.guide h2 { margin: 0 0 -8px; font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 .guide-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .guide-table td { padding: 7px 10px 7px 0; border-top: 1px solid var(--hair); vertical-align: top; }
 .guide-table td:first-child { white-space: nowrap; font-weight: 600; }
@@ -187,7 +190,6 @@ table.results tbody tr:last-child td { border-bottom: 1.5px solid var(--ink); }
 table.results td.na { color: var(--muted); font-style: italic; }
 table.results tr.ref td { font-weight: 600; }
 table.results .sep { border-left: 1px solid var(--axis); }
-table.results.plan td { white-space: normal; vertical-align: top; }
 table.results.wide { min-width: 960px; }
 table.results.text th, table.results.text td { text-align: left; }
 table.results.text td { white-space: normal; vertical-align: top; }
@@ -263,14 +265,6 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     <p class="aside-line" id="tab5-source" style="margin:0"></p>
   </figure>
 
-  <section class="guide" aria-labelledby="data-h">
-    <h2 id="data-h">Data</h2>
-    <div class="table-wrap"><table class="results plan text" id="sources-table"></table></div>
-    <h2>Attempts collected</h2>
-    <div class="table-wrap"><table class="results" id="coverage-table"></table></div>
-    <p class="aside-line" id="coverage-note" style="margin:0"></p>
-  </section>
-
   <h2 class="group">6.3.1 · Performance results · all three models</h2>
 
   <figure class="plate" id="fig11">
@@ -283,25 +277,15 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     <figcaption id="fig11-caption"></figcaption>
   </figure>
 
-  <figure class="plate" id="tab6">
-    <div class="plate-head">
-      <h3>Table 6 · What validation rejected</h3>
-      <div class="tags" data-tags="RC2 · H2"></div>
-    </div>
-    <div class="table-wrap"><table class="results wide" id="tab6-table"></table></div>
-    <figcaption id="tab6-caption"></figcaption>
-  </figure>
-
-
   <figure class="plate" id="tab7">
     <div class="plate-head">
       <h3 id="tab7-title">Table 7 · Primitive composition</h3>
       <div class="tags" data-tags="RC1 + RC2"></div>
     </div>
     <p class="paper-panel">(a) By LLM, the four scenarios pooled</p>
-    <div class="table-wrap"><table class="results wide" id="tab7-table"></table></div>
+    <div class="table-wrap"><table class="results" id="tab7-table"></table></div>
     <p class="paper-panel">(b) By failure scenario, the three LLMs pooled</p>
-    <div class="table-wrap"><table class="results wide" id="tab7b-table"></table></div>
+    <div class="table-wrap"><table class="results" id="tab7b-table"></table></div>
     <figcaption id="tab7-caption"></figcaption>
   </figure>
 
@@ -329,6 +313,15 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     <p class="paper-panel">(b) Primitive composition, per composition</p>
     <div class="wide-svg" id="fig12b-svg"></div>
     <figcaption id="fig12-caption"></figcaption>
+  </figure>
+
+  <figure class="plate" id="tabo1">
+    <div class="plate-head">
+      <h3>Table O1 · What validation rejected</h3>
+      <div class="tags" data-tags="RC2 · H2 · optional"></div>
+    </div>
+    <div class="table-wrap"><table class="results" id="tabo1-table"></table></div>
+    <figcaption id="tabo1-caption"></figcaption>
   </figure>
 
   <figure class="plate" id="tab8">
@@ -369,8 +362,14 @@ const PLACEHOLDER = DATA.mode === "placeholder";
 const SETTINGS = DATA.settings;
 const ORDER = DATA.scenarios;
 const SHORT = DATA.scenario_short;
+// The paper's name for each failure scenario (user decision, 2026-11-09). The attempt list keeps the records' names.
+const SCENARIO_LABELS = {
+  "Conveyor breakdown": "Conveyor breakdown", "ur5e-1 breakdown": "UR5e-1 robot breakdown",
+  "Machining breakdown during part processing": "M1 machine breakdown", "Part slippage": "Part slippage",
+};
+const scenarioLabel = (scn) => SCENARIO_LABELS[scn] ?? scn;
 const MODELS = DATA.models;
-// Fig. 11, Tables 6–7 and Fig. O1 pool the three models' attempts (user decision, 2026-11-08); Fig. 12 compares them.
+// Fig. 11, Table 7, Fig. O1 and Table O1 pool the three models' attempts (user decision, 2026-11-08); Fig. 12 compares them.
 const POOLED = { id: "all", planned: MODELS.reduce((t, m) => t + m.planned, 0) };
 const MODEL_NAMES = `${MODELS.slice(0, -1).map((m) => esc(m.name)).join(", ")} and ${esc(MODELS[MODELS.length - 1].name)}`;
 const FW_SINGLE = 4, FW_INCREMENTAL = 5;
@@ -387,12 +386,18 @@ const NOT_AUDITED = CLASSES.length - 1;
 // Fig. 11 shows unresolved and did_not_finish as one segment under both names, and its caption explains them
 // (user decision, 2026-11-08); the records and the attempt list keep each attempt's own outcome.
 const JOINED = ["unresolved", "did_not_finish"].map((name) => DATA.classes.indexOf(name));
-const JOINED_LABEL = "unresolved / did_not_finish";
+const JOINED_LABEL = "No outline established";
+// Fig. 11's name for each audit outcome, with the check that sets it, as in the paper's figures
+// (cais_spade_llm/experimental_results/style.py, OUTCOME_LABELS). The attempt list keeps the audit's names.
+const OUTCOME_LABELS = {
+  passed: "Passed", infeasible: "Infeasible: symbolic (RA)", physically_unsupported: "Infeasible: physical (RA)",
+  unsafe: "Unsafe (CCA)", no_nominal_continuation: "Blocking (CCA)", "not audited": "Not audited",
+};
 // Fig. 11's segments: each class in the audit's order, the joined pair at the first of the two.
 function fig11Segments(classes) {
   return classes.flatMap((k, ci) => {
     if (ci === JOINED[1]) return [];
-    if (ci !== JOINED[0]) return [{ k, label: CLASSES[ci].label, color: CLASSES[ci].c, detail: "" }];
+    if (ci !== JOINED[0]) return [{ k, label: OUTCOME_LABELS[CLASSES[ci].label], color: CLASSES[ci].c, detail: "" }];
     const [a, b] = JOINED.map((i) => classes[i]);
     return [{ k: a + b, label: JOINED_LABEL, color: CLASSES[ci].c,
               detail: `<br>unresolved ${a} · did_not_finish ${b}` }];
@@ -424,7 +429,7 @@ function modelMark(m, x, y, r, { stroke = 2, t } = {}) {
 // Vertical offset of model i's mark within a row, so every model's mark stays visible.
 const markOffset = (i, step) => (i - (MODELS.length - 1) / 2) * step;
 
-/* ---------- Header, data sources and coverage ---------- */
+/* ---------- Header ---------- */
 function renderHeader() {
   const started = DATA.attempts.length;
   document.getElementById("lede").textContent = PLACEHOLDER
@@ -486,37 +491,11 @@ function renderConditions() {
   document.getElementById("tab5-source").innerHTML = `Read from <code>outline_experiments.CONFIGURATIONS</code>, <code>recovery_case_safety</code> and <code>primitive_composition</code>.`;
 }
 
-function renderSources() {
-  const head = `<thead><tr><th>Batch</th><th>Model</th><th>Status</th><th>Attempts started / planned</th><th>Created (UTC)</th><th>Code</th></tr></thead>`;
-  const body = DATA.sources.length
-    ? DATA.sources.map((b) => `<tr><td><code>${esc(b.batch)}</code></td><td>${esc(b.model)}</td><td>${esc(b.status)}</td><td>${b.started} / ${b.planned}</td><td>${esc(b.created)}</td><td>${esc(b.code)}</td></tr>`).join("")
-    : `<tr><td colspan="6" class="todo">${PLACEHOLDER ? "Placeholder page: no batch records are read." : "No study batch has been recorded yet."}</td></tr>`;
-  document.getElementById("sources-table").innerHTML = head + `<tbody>${body}</tbody>`;
-}
-
-function renderCoverage() {
-  const head = `<thead><tr><th>Setting</th>${SHORT.map((s) => `<th>${esc(s)}</th>`).join("")}<th>All four</th></tr></thead>`;
-  const body = MODELS.map((m) => `<tr class="model"><td colspan="${ORDER.length + 2}">${esc(m.name)} · ${esc(m.role)} · ${m.planned} attempts per cell planned</td></tr>` +
-    SETTINGS.map((_, s) => {
-      const cells = ORDER.map((scn) => {
-        const n = cell(m, s, scn).n;
-        return `<td${n ? "" : ' class="na"'}>${n} / ${m.planned}</td>`;
-      }).join("");
-      const total = sumOver(m, s, (c) => c.n);
-      return `<tr><td>${esc(settingLabel(s))}</td>${cells}<td>${total} / ${m.planned * ORDER.length}</td></tr>`;
-    }).join("")).join("");
-  document.getElementById("coverage-table").innerHTML = head + `<tbody>${body}</tbody>`;
-  const notAudited = MODELS.reduce((t, m) => t + SETTINGS.reduce((u, _, s) => u + sumOver(m, s, (c) => c.classes[NOT_AUDITED]), 0), 0);
-  document.getElementById("coverage-note").textContent = notAudited
-    ? `${notAudited} started attempts are not audited yet; they count in every denominator and show as "not audited". Run Audit missing in the Experiments tab.`
-    : "Started attempts only; attempts a batch never started are left out of every count.";
-}
-
 /* ---------- Fig. 11: audited outcome by setting, all models pooled ---------- */
 function renderOutcome() {
   const anyNotAudited = SETTINGS.some((_, s) => sumOver(POOLED, s, (c) => c.classes[NOT_AUDITED]) > 0);
   document.getElementById("fig11-legend").innerHTML = CLASSES
-    .map((c, i) => ({ ...c, i, label: i === JOINED[0] ? JOINED_LABEL : c.label }))
+    .map((c, i) => ({ ...c, i, label: i === JOINED[0] ? JOINED_LABEL : OUTCOME_LABELS[c.label] }))
     .filter(({ i }) => i !== JOINED[1] && (i < NOT_AUDITED || anyNotAudited))
     .map((c) => `<span><i class="sw" style="background:${c.c};outline:1px solid var(--hair)"></i>${c.label}</span>`).join("");
   const W = 550, X0 = 246, BW = 200, RH = 34, GH = 18, TOP = 16, EX = X0 + BW + 10;
@@ -551,7 +530,7 @@ function renderOutcome() {
         segments.forEach(({ k, label, color, detail }, si) => {
           if (!k) return;
           const w = (k / c.n) * BW, last = segments.slice(si + 1).every((seg) => seg.k === 0);
-          const t = tip(`<b>${esc(scn)}</b> · ${esc(settingLabel(s))}<br>${label}: <b>${k}/${c.n}</b>${detail}`);
+          const t = tip(`<b>${esc(scenarioLabel(scn))}</b> · ${esc(settingLabel(s))}<br>${label}: <b>${k}/${c.n}</b>${detail}`);
           p.push(`<rect x="${x}" y="${y + 4}" width="${Math.max(0, w - (last ? 0 : 2))}" height="${bh}" style="fill:${color}" class="hit" data-t="${t}"/>`);
           if (w >= 18) p.push(`<text x="${x + w / 2 - (last ? 0 : 1)}" y="${y + 4 + bh / 2 + 4}" class="seg" text-anchor="middle" pointer-events="none">${k}</text>`);
           x += w;
@@ -563,33 +542,9 @@ function renderOutcome() {
         y += RH;
       });
     });
-    return `<div class="panel"><h4>${esc(scn)}</h4><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Audited outcomes by setting for ${esc(scn)}, all models pooled">${p.join("")}</svg></div>`;
+    return `<div class="panel"><h4>${esc(scenarioLabel(scn))}</h4><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Audited outcomes by setting for ${esc(scenarioLabel(scn))}, all models pooled">${p.join("")}</svg></div>`;
   }).join("");
-  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, pooled over the three models (${MODEL_NAMES}, all at reasoning effort ${esc(DATA.conditions.effort)}; ${MODELS[0].planned} attempts per model, ${POOLED.planned} per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts; Fig. 12 compares the models. Each attempt has the audit's outcome, set by the first failing check of its first failing event. The segment unresolved / did_not_finish joins the two outcomes that leave no established outline: unresolved, a finished outline the audit could not establish (an event leaves out a value it changes, or the search for a nominal continuation ran out), and did_not_finish, an attempt that ended without an outline (the ${DATA.max_turns}-request budget or the stall stop); its tooltip and the attempt list give each attempt's own outcome. It differs from no_nominal_continuation, where every event passed and the audit proved that normal production cannot resume. Numbers at the right are the median tokens, generation time and fact lookups per attempt over all models. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
-}
-
-/* ---------- Table 6: what validation rejected, framework settings, all models pooled ---------- */
-function renderTable6() {
-  const head = `<thead>
-    <tr class="grp"><th></th><th colspan="5" class="sep">${esc(SETTINGS[FW_SINGLE].n)}</th><th colspan="5" class="sep">${esc(SETTINGS[FW_INCREMENTAL].n)}</th></tr>
-    <tr><th>Failure scenario</th>
-      <th class="sep">Completed<small>within ${DATA.max_turns} turns</small></th><th>Rewrites<small>whole outline, median</small></th><th>Rejected by RA<small>outlines</small></th><th>Rejected by CCA safety<small>after passing RA</small></th><th>Refused by CCA completion<small>Eq. 6</small></th>
-      <th class="sep">Completed<small>within ${DATA.max_turns} turns</small></th><th>Revisions<small>one event, median</small></th><th>Rejected by RA<small>events</small></th><th>Rejected by CCA safety<small>after passing RA</small></th><th>Refused by CCA completion<small>Eq. 6</small></th></tr></thead>`;
-  const group = (c, redo = true) => {
-    if (!c.n || !c.rejections) return `<td class="sep na">${dash}</td>` + `<td class="na">${dash}</td>`.repeat(4);
-    const r = c.rejections;
-    return `<td class="sep">${c.completed}/${c.n}</td><td>${redo ? (c.redo ?? dash) : ""}</td><td>${r.ra + r.physical}</td><td>${r.cca}</td><td>${r.eq6}</td>`;
-  };
-  const rows = ORDER.map((scn) => `<tr><td>${esc(scn)}</td>${group(cell(POOLED, FW_SINGLE, scn))}${group(cell(POOLED, FW_INCREMENTAL, scn))}</tr>`).join("");
-  const total = (s) => {
-    const cs = ORDER.map((scn) => cell(POOLED, s, scn)).filter((c) => c.n && c.rejections);
-    if (!cs.length) return group({ n: 0 });
-    const add = (f) => cs.reduce((t, c) => t + f(c), 0);
-    return group({ n: add((c) => c.n), completed: add((c) => c.completed), rejections: {
-      ra: add((c) => c.rejections.ra), physical: add((c) => c.rejections.physical), cca: add((c) => c.rejections.cca), eq6: add((c) => c.rejections.eq6) } }, false);
-  };
-  document.getElementById("tab6-table").innerHTML = head + `<tbody>${rows}<tr class="total"><td>All four scenarios</td>${total(FW_SINGLE)}${total(FW_INCREMENTAL)}</tr></tbody>`;
-  document.getElementById("tab6-caption").innerHTML = `<b>Table 6.</b> Rejections in the two framework settings, pooled over the three models (${MODEL_NAMES}) and summed over the started attempts per scenario. In ${esc(SETTINGS[FW_SINGLE].n)} a rejection stops a whole outline at its first failing event, and the LLM rewrites the outline; in ${esc(SETTINGS[FW_INCREMENTAL].n)} a rejection applies to one proposed event, which the LLM revises. RA (symbolic and physical evidence) runs before CCA safety in both, so every CCA safety rejection is a proposal that passed RA: a feasible but unsafe event (H2). The last column of each group counts CCA completion refusals (Eq. 6). Completed counts the attempts that finished an outline within ${DATA.max_turns} turns.`;
+  document.getElementById("fig11-caption").innerHTML = `<b>Fig. 11.</b> Audited outcome of each started attempt, by setting and failure scenario, pooled over the three models (${MODEL_NAMES}, all at reasoning effort ${esc(DATA.conditions.effort)}; ${MODELS[0].planned} attempts per model, ${POOLED.planned} per setting and scenario planned, n started shown per row). Bars show the share of started attempts and segment labels give counts; Fig. 12 compares the models. Each attempt has the audit's outcome, set by the first failing check of its first failing event. Each segment names the check that set it: Infeasible: symbolic (RA) is the audit's infeasible (Alg. 1), Infeasible: physical (RA) its physically_unsupported (Eq. 12), Unsafe (CCA) its unsafe (Eq. 13) and Blocking (CCA) its no_nominal_continuation (Eq. 6). The segment ${JOINED_LABEL} joins the two outcomes that leave no established outline: unresolved, a finished outline the audit could not establish (an event leaves out a value it changes, or the search for a nominal continuation ran out), and did_not_finish, an attempt that ended without an outline (the ${DATA.max_turns}-request budget or the stall stop); its tooltip and the attempt list give each attempt's own outcome. It differs from Blocking (CCA), where every event passed and the audit proved that normal production cannot resume. Numbers at the right are the median tokens, generation time and fact lookups per attempt over all models. Settings 2 and 4 show the safety rules in the prompt; the others hide them, and in the framework settings (5 and 6) the CCA holds them. The two framework settings cannot finish an infeasible or unsafe outline, or one with no nominal continuation, by construction.`;
 }
 
 /* ---------- Fig. O1 (optional): lookups by reference, all models pooled: (a) outline, setting 6; (b) composition ---------- */
@@ -612,7 +567,7 @@ function retrievalPanel(rows, values, counts, unit, svgId, label) {
         return;
       }
       const v = row[i], level = v > 0 ? Math.max(1, Math.round((v / max) * 9)) : 0, dark = level >= 7;
-      const t = tip(`<b>${esc(scn)}</b> · <code>${esc(path)}</code><br><b>${v}</b> lookups per ${unit} (mean of ${counts[j]})`);
+      const t = tip(`<b>${esc(scenarioLabel(scn))}</b> · <code>${esc(path)}</code><br><b>${v}</b> lookups per ${unit} (mean of ${counts[j]})`);
       p.push(`<rect x="${x + 1.5}" y="${y + 1.5}" width="${CW - 3}" height="${RH - 3}" rx="3" style="fill:${v > 0 ? PASS_RAMP[level] : "var(--band)"}" data-t="${t}"/>`);
       p.push(v > 0
         ? `<text x="${cx}" y="${ty}" text-anchor="middle" style="font:500 11.5px var(--font-ui);fill:${dark ? "#ffffff" : "#15181d"}" pointer-events="none">${v}</text>`
@@ -638,37 +593,64 @@ function renderRetrieval() {
   document.getElementById("fig12-caption").innerHTML = `<b>Fig. O1.</b> Context retrieved from the knowledge base 𝒦, by failure scenario, pooled over the three LLMs: (a) while building the recovery outline, mean lookups per attempt in ${esc(SETTINGS[FW_INCREMENTAL].n)}; (b) while composing primitive programs for the outlines of Table 7, mean lookups per composition over all its events. Each row is a reference as that stage's prompt lists it, with the resource, part, region, key or name left out; in (b) the resource's model and its recorded evidence fields, which the composition prompt points to, follow the resource. Shading is scaled to each panel's largest mean; a dot means no lookups and a dash means none composed or attempted yet.`;
 }
 
+/* ---------- Table O1 (optional): what validation rejected, framework settings as row groups, all models pooled ---------- */
+function renderTableO1() {
+  const swatch = (name) => `<i class="sw" style="background:${CLASSES[DATA.classes.indexOf(name)].c};margin-right:5px;vertical-align:-1px"></i>`;
+  const head = `<thead>
+    <tr class="grp"><th></th><th colspan="2">Attempts</th><th colspan="4" class="sep">Rejections, by the check that rejected</th></tr>
+    <tr><th>Failure scenario</th><th>Completed<small>within ${DATA.max_turns} turns</small></th><th>Rewrites or revisions<small>median per attempt</small></th>
+      <th class="sep">${swatch("infeasible")}${OUTCOME_LABELS.infeasible}<small>Alg. 1</small></th>
+      <th>${swatch("physically_unsupported")}${OUTCOME_LABELS.physically_unsupported}<small>Eq. 12</small></th>
+      <th>${swatch("unsafe")}${OUTCOME_LABELS.unsafe}<small>Eq. 13, after passing RA</small></th>
+      <th>${swatch("no_nominal_continuation")}${OUTCOME_LABELS.no_nominal_continuation}<small>Eq. 6</small></th></tr></thead>`;
+  const row = (c, redo = true) => {
+    if (!c.n || !c.rejections) return `<td class="na">${dash}</td>`.repeat(6);
+    const r = c.rejections;
+    return `<td>${c.completed}/${c.n}</td><td>${redo ? (c.redo ?? dash) : ""}</td><td class="sep">${r.ra}</td><td>${r.physical}</td><td>${r.cca}</td><td>${r.eq6}</td>`;
+  };
+  const total = (s) => {
+    const cs = ORDER.map((scn) => cell(POOLED, s, scn)).filter((c) => c.n && c.rejections);
+    const add = (f) => cs.reduce((t, c) => t + f(c), 0);
+    return { n: add((c) => c.n), completed: add((c) => c.completed), rejections: {
+      ra: add((c) => c.rejections.ra), physical: add((c) => c.rejections.physical), cca: add((c) => c.rejections.cca), eq6: add((c) => c.rejections.eq6) } };
+  };
+  const body = [FW_SINGLE, FW_INCREMENTAL].map((s) =>
+    `<tr class="model"><td colspan="7">${esc(settingLabel(s))} <span style="font-weight:400;color:var(--muted)">· ${esc(SETTINGS[s].d)}</span></td></tr>`
+    + ORDER.map((scn) => `<tr><td>${esc(scenarioLabel(scn))}</td>${row(cell(POOLED, s, scn))}</tr>`).join("")
+    + `<tr class="total"><td>All four scenarios</td>${row(total(s), false)}</tr>`).join("");
+  document.getElementById("tabo1-table").innerHTML = head + `<tbody>${body}</tbody>`;
+  document.getElementById("tabo1-caption").innerHTML = `<b>Table O1.</b> Optional. Rejections in the two framework settings, pooled over the three models (${MODEL_NAMES}) and summed over the started attempts per scenario. Each rejection column uses the name and colour that Fig. 11 gives the outcome its check sets, but counts rejections, not attempts: one attempt can be rejected many times before it passes. In ${esc(SETTINGS[FW_SINGLE].n)} a rejection stops a whole outline at its first failing event, and the LLM rewrites the outline; in ${esc(SETTINGS[FW_INCREMENTAL].n)} a rejection applies to one proposed event, which the LLM revises. RA runs before CCA safety, so every Unsafe (CCA) rejection is a proposal that passed RA: a feasible but unsafe event (H2). Completed counts the attempts that finished an outline within ${DATA.max_turns} turns.`;
+}
+
 /* ---------- Table 7: primitive composition, by LLM and by failure scenario ---------- */
 function renderTable7() {
-  const head = (first, of) => `<thead><tr>
-    <th>${first}</th><th>Compositions passed<small>of ${of} each, All of 36</small></th>
-    <th>Events composed<small>mean share per outline</small></th><th>Events<small>median per outline</small></th>
-    <th>Refused programs<small>median per composition</small></th><th>Lookups<small>median per composition</small></th>
-    <th>Tokens<small>median</small></th><th>Time<small>median</small></th></tr></thead>`;
-  const cell = (v, unit = "") => (v === null || v === undefined ? dash : `${v}${unit}`);
-  const share = (v) => (v === null || v === undefined ? dash : `${Math.round(v * 100)}%`);
+  const head = (first) => `<thead>
+    <tr class="grp"><th style="width:30%"></th><th colspan="2" class="sep">Composed (%)</th><th colspan="3" class="sep">Median per outline</th></tr>
+    <tr><th>${first}</th><th class="sep">Outlines</th><th>Events</th><th class="sep">Events</th><th>Tokens (k)</th><th>Time (min)</th></tr></thead>`;
+  const cell = (v) => (v === null || v === undefined ? dash : `${v}`);
+  const percent = (v) => (v === null || v === undefined ? dash : `${Math.round(v * 100)}`);
   const nameOf = (m) => esc(m.name.replace(/ medium$/, ""));
-  const row = (label, r, cls = "") => `<tr${cls ? ` class="${cls}"` : ""}><td>${label}</td><td>${r.passed}</td>
-        <td>${share(r.share)}</td><td>${cell(r.events)}</td><td>${cell(r.refused)}</td><td>${cell(r.lookups)}</td>
-        <td>${cell(r.tokens_k, "k")}</td><td>${cell(r.minutes, " min")}</td></tr>`;
-  const todo = (label) => `<tr><td>${label}</td><td colspan="7" class="todo">not composed yet</td></tr>`;
+  const row = (label, r, cls = "") => `<tr${cls ? ` class="${cls}"` : ""}><td>${label}</td>
+        <td class="sep">${percent(r.passed / r.composed)}</td><td>${percent(r.share)}</td>
+        <td class="sep">${cell(r.events)}</td><td>${cell(r.tokens_k)}</td><td>${cell(r.minutes)}</td></tr>`;
+  const todo = (label) => `<tr><td>${label}</td><td colspan="5" class="todo">not composed yet</td></tr>`;
   let byModel, byScenario;
   if (!DATA.composition) {
-    byModel = byScenario = `<tr><td colspan="8" class="todo">Primitive composition has not been collected yet.</td></tr>`;
+    byModel = byScenario = `<tr><td colspan="6" class="todo">Primitive composition has not been collected yet.</td></tr>`;
   } else {
     const C7 = DATA.composition;
     const total = C7.total ? row("All", C7.total, "total") : "";
     byModel = C7.models
       ? MODELS.map((m) => (C7.models[m.id] ? row(nameOf(m), C7.models[m.id]) : todo(nameOf(m)))).join("") + total
-      : `<tr><td colspan="8" class="todo">Not split by LLM in the layout numbers.</td></tr>`;
+      : `<tr><td colspan="6" class="todo">Not split by LLM in the layout numbers.</td></tr>`;
     byScenario = ORDER.map((scn) => {
       const r = C7.scenarios[scn];
-      return r && r.composed ? row(esc(scn), r) : todo(esc(scn));
+      return r && r.composed ? row(esc(scenarioLabel(scn)), r) : todo(esc(scenarioLabel(scn)));
     }).join("") + total;
   }
-  document.getElementById("tab7-table").innerHTML = head("LLM", 12) + `<tbody>${byModel}</tbody>`;
-  document.getElementById("tab7b-table").innerHTML = head("Failure scenario", 9) + `<tbody>${byScenario}</tbody>`;
-  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines: (a) by LLM, pooled over the four failure scenarios; (b) by failure scenario, pooled over the three LLMs (${MODEL_NAMES}). The All row is the same in both. For each LLM and scenario, the three passed outlines with the fewest events (ties: the earliest run; they include the outlines executed in Gazebo, Table 8) are each composed by the LLM that wrote the outline, at reasoning effort ${esc(DATA.conditions.effort)}: 12 compositions per LLM, 9 per scenario, 36 in all. Each outline is composed once, except that GPT-6.1 Sol composed each of its Part slippage outlines twice and the table reports the second attempt. Compositions passed counts the outlines whose every event received a primitive program that passed the composition checks, which each event's RA runs on its own program: the primitives' declared effects, and motion planning in the cell recorded at the failure. Events composed is the share of an outline's events that received such a program, averaged over the composed outlines so that each counts once; events are composed in order, so a composition that stops leaves the rest of its outline uncomposed. It was added after the compositions ran, beside the planned measure. Every composed outline had already passed RA and CCA; the CCA does not check the programs again. Refused programs counts the proposed programs the checks refused before the composition passed or stopped. Lookups counts the references the composing LLM requested from the knowledge base 𝒦 over all its events, as Fig. 11 counts the outline stage's. Medians are over the composed outlines; tokens and time are the composition stage only. The outline stage is in Fig. 11 and Table 6.`;
+  document.getElementById("tab7-table").innerHTML = head("LLM (medium effort)") + `<tbody>${byModel}</tbody>`;
+  document.getElementById("tab7b-table").innerHTML = head("Failure scenario") + `<tbody>${byScenario}</tbody>`;
+  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines: (a) by LLM, pooled over the four failure scenarios (12 outlines per LLM); (b) by failure scenario, pooled over the three LLMs (${MODEL_NAMES}; 9 outlines per scenario); 36 in all. The All row is the same in both. For each LLM and scenario, the three accepted outlines with the fewest events (ties: the earliest run; they include the outlines executed in Gazebo, Table 8) were composed by the LLM that wrote them, at reasoning effort ${esc(DATA.conditions.effort)}. Composed: Outlines is the share of outlines in which every event received a primitive program that the composition checks accepted, which each event's RA runs on its own program: the primitives' declared effects, and motion planning in the cell recorded at the failure. Events is the mean share of an outline's events that received one, so that each outline counts once; events are composed in order, so a composition that stops leaves the rest of its outline uncomposed. It was added after the compositions ran, beside the planned measure. Median per outline: the number of events in the outline, and the tokens and time spent composing the whole outline (the composition stage only), over all composed outlines, including those that stopped early. Every composed outline had already been accepted by RA and CCA; the CCA does not check the programs again. Each outline was composed once, except that GPT-6.1 Sol composed its Part slippage outlines twice and the table reports the second attempt. Lookups during composition are in Fig. O1 (b). The outline stage is in Fig. 11 and Table O1.`;
 }
 
 /* ---------- Table 8 (optional): the selected outline per scenario executed in Gazebo ---------- */
@@ -682,8 +664,8 @@ function renderTable8() {
   } else {
     body = ORDER.map((scn) => {
       const r = DATA.execution[scn];
-      if (!r) return `<tr><td>${esc(scn)}</td><td colspan="6" class="todo">not run yet</td></tr>`;
-      return `<tr><td>${esc(scn)}</td><td>${esc(r.model)} · ${r.events}</td><td>${r.primitives}</td><td>${r.completed}/${r.steps}</td>
+      if (!r) return `<tr><td>${esc(scenarioLabel(scn))}</td><td colspan="6" class="todo">not run yet</td></tr>`;
+      return `<tr><td>${esc(scenarioLabel(scn))}</td><td>${esc(r.model)} · ${r.events}</td><td>${r.primitives}</td><td>${r.completed}/${r.steps}</td>
         <td>${r.sim_seconds === null ? dash : `${Math.round(r.sim_seconds)} s`}</td><td>${esc(r.result)}</td>
         <td>${r.video ? `<a href="${esc(r.video)}">video</a>` : dash}</td></tr>`;
     }).join("");
@@ -693,23 +675,38 @@ function renderTable8() {
 }
 
 /* ---------- Fig. 12: every model ---------- */
+// Fig. 12 draws each model in its own color, none of which Fig. 11 uses, and names each check in words only, with no
+// outcome color beside it (user decisions, 2026-11-09).
 const CHECKS = [
-  { label: "RA feasibility (symbolic)", key: "ra", color: "var(--s2)" },
-  { label: "RA physical evidence", key: "physical", color: "var(--s2)" },
-  { label: "CCA safety", key: "cca", color: "var(--s4)" },
+  { label: OUTCOME_LABELS.infeasible, key: "ra" },
+  { label: OUTCOME_LABELS.physically_unsupported, key: "physical" },
+  { label: OUTCOME_LABELS.unsafe, key: "cca" },
 ];
+// A model's checked candidate events in setting 6, and how many and what share of them each check rejected.
+function eventRejections(m) {
+  const cs = ORDER.map((scn) => cell(m, FW_INCREMENTAL, scn)).filter((c) => c.n && c.rejections && c.proposals);
+  const checked = cs.reduce((t, c) => t + c.proposals, 0);
+  const counts = CHECKS.map((k) => cs.reduce((t, c) => t + c.rejections[k.key], 0));
+  const values = counts.map((k) => (checked ? k / checked : null));
+  return { checked, counts, values, rounded: checked ? roundedParts(values) : null };
+}
+// Whole percentages for shares that add up to a total: the total rounds as usual and the parts take the largest
+// remainders, so the printed parts add up to the printed total.
+function roundedParts(values) {
+  const total = Math.round(values.reduce((a, c) => a + c, 0) * 100);
+  const parts = values.map((v) => Math.floor(v * 100 + 1e-9));
+  const order = values.map((_, i) => i).sort((a, b) => (values[b] * 100 - parts[b]) - (values[a] * 100 - parts[a]));
+  const missing = total - parts.reduce((a, c) => a + c, 0);
+  for (let k = 0; k < missing; k++) parts[order[k]] += 1;
+  return { parts, total };
+}
 function renderComparison() {
   document.getElementById("fig13-legend").innerHTML = MODELS.map((m) => `<span><svg width="14" height="14">${modelMark(m, 7, 7, 5)}</svg>${esc(m.name)} (${esc(m.role)})</span>`).join("");
   const X0 = 280, X1 = 490, cols = MODELS.map((_, i) => 506 + i * 48), W = 506 + MODELS.length * 48;
   const xs = (q) => X0 + q * (X1 - X0);
   const TOP = 22, GH = 22, RH = 26, RR = 24;
   const bottom = TOP + SETTING_GROUPS.length * GH + SETTINGS.length * RH;
-  // Share of checked candidate events rejected in setting 6, per model and check.
-  const shares = MODELS.map((m) => {
-    const cs = ORDER.map((scn) => cell(m, FW_INCREMENTAL, scn)).filter((c) => c.n && c.rejections && c.proposals);
-    const checked = cs.reduce((t, c) => t + c.proposals, 0);
-    return { checked, values: CHECKS.map((k) => (checked ? cs.reduce((t, c) => t + c.rejections[k.key], 0) / checked : null)) };
-  });
+  const shares = MODELS.map((m) => eventRejections(m));
   // Rejection scale in 10% steps, so the gridlines fall on round shares.
   const MAX = Math.max(0.1, Math.ceil(Math.max(0, ...shares.flatMap((s) => s.values.filter((v) => v !== null))) / 0.1) * 0.1);
   const xr = (v) => X0 + (v / MAX) * (X1 - X0);
@@ -762,7 +759,7 @@ function renderComparison() {
   y = rTop;
   CHECKS.forEach((check, j) => {
     const cy = y + RR / 2;
-    p.push(`<rect x="0" y="${cy - 5}" width="3" height="10" style="fill:${check.color}"/><text x="8" y="${cy + 4}" style="font:400 11px var(--font-ui);fill:var(--ink-2)">${esc(check.label)}</text>`);
+    p.push(`<text x="0" y="${cy + 4}" style="font:400 11px var(--font-ui);fill:var(--ink-2)">${esc(check.label)}</text>`);
     p.push(`<line x1="${X0}" y1="${cy}" x2="${X1}" y2="${cy}" class="grid-line"/>`);
     MODELS.forEach((m, i) => {
       const v = shares[i].values[j];
@@ -770,21 +767,21 @@ function renderComparison() {
         p.push(`<text x="${cols[i]}" y="${cy + 4}" class="lbl2">${dash}</text>`);
         return;
       }
-      const t = tip(`<b>${esc(m.name)}</b> · ${esc(check.label)}<br><b>${pct(v)}</b> of ${shares[i].checked} checked events rejected`);
+      const t = tip(`<b>${esc(m.name)}</b> · ${esc(check.label)}<br><b>${(v * 100).toFixed(1)}%</b>: ${shares[i].counts[j]} of ${shares[i].checked} checked events rejected`);
       p.push(modelMark(m, xr(v), cy + markOffset(i, 6), 4.5, { t }));
-      p.push(`<text x="${cols[i]}" y="${cy + 4}" class="val">${pct(v)}</text>`);
+      p.push(`<text x="${cols[i]}" y="${cy + 4}" class="val">${shares[i].rounded.parts[j]}%</text>`);
     });
     y += RR;
   });
-  p.push(`<text x="0" y="${rBottom + 30}" class="lbl" style="font-weight:600">any check</text>`);
+  p.push(`<text x="0" y="${rBottom + 30}" class="lbl" style="font-weight:600">All checks</text>`);
   MODELS.forEach((m, i) => {
-    const vs = shares[i].values;
-    p.push(`<text x="${cols[i]}" y="${rBottom + 30}" class="val" style="font-weight:600">${vs.some((v) => v === null) ? dash : pct(vs.reduce((a, c) => a + c, 0))}</text>`);
+    const r = shares[i].rounded;
+    p.push(`<text x="${cols[i]}" y="${rBottom + 30}" class="val" style="font-weight:600">${r === null ? dash : `${r.total}%`}</text>`);
   });
   document.getElementById("fig13-chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Share of attempts passed per setting and ${esc(SETTINGS[FW_INCREMENTAL].n)} rejections by check, per model">${p.join("")}</svg>`;
   const shapes = { square: "squares", circle: "circles", diamond: "diamonds" };
   const named = MODELS.map((m) => `${esc(m.name)} (${shapes[m.mark || (m.vendor === "Claude" ? "square" : "circle")]})`);
-  document.getElementById("fig13-caption").innerHTML = `<b>Fig. 12.</b> ${["No", "One", "Two", "Three", "Four", "Five"][MODELS.length] || MODELS.length} models: ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}, all at reasoning effort ${esc(DATA.conditions.effort)} and ${MODELS[0].planned} attempts per model, setting and scenario. The figure shows whether the framework's effect holds across models, not which model is better: the models differ in vendor, size and release date. The prompt was first developed on gpt-5.4 (frozen on 21 Oct 2026), and later code fixes were tried on Claude Opus 5.5. Top: share of started attempts passed in each setting, pooled over the four scenarios, with 95% Wilson intervals per model; the grey bar pools every model's attempts, as Fig. 11 does. Bottom: share of each model's checked candidate events that each check rejected in ${esc(SETTINGS[FW_INCREMENTAL].n)}. A provider refusal counts as a failed attempt; no automatic fallback to another model is used.`;
+  document.getElementById("fig13-caption").innerHTML = `<b>Fig. 12.</b> ${["No", "One", "Two", "Three", "Four", "Five"][MODELS.length] || MODELS.length} models: ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}, all at reasoning effort ${esc(DATA.conditions.effort)} and ${MODELS[0].planned} attempts per model, setting and scenario. The figure shows whether the framework's effect holds across models, not which model is better: the models differ in vendor, size and release date. The prompt was first developed on gpt-5.4 (frozen on 21 Oct 2026), and later code fixes were tried on Claude Opus 5.5. Top: share of started attempts passed in each setting, pooled over the four scenarios, with 95% Wilson intervals per model; the grey bar pools every model's attempts, as Fig. 11 does. Bottom: share of each model's checked candidate events that each check rejected in ${esc(SETTINGS[FW_INCREMENTAL].n)}, named as in Fig. 11. Blocking (CCA), the Eq. 6 check, is not drawn: it runs once per outline, when the LLM declares the outline complete, not on each candidate event. Each model has its own color and shape, and Fig. 11 uses none of these colors. In each model's column of the bottom panel, the percentages are rounded so that the three checks add up to All checks; each event is rejected by at most one check. A provider refusal counts as a failed attempt; no automatic fallback to another model is used.`;
 }
 
 /* ---------- Every attempt ---------- */
@@ -827,10 +824,8 @@ window.addEventListener("scroll", () => { tipEl.hidden = true; }, { passive: tru
 
 renderHeader();
 renderConditions();
-renderSources();
-renderCoverage();
 renderOutcome();
-renderTable6();
+renderTableO1();
 renderRetrieval();
 renderTable7();
 renderTable8();

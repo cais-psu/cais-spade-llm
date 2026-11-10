@@ -40,13 +40,14 @@ TEMPLATE = HERE / "results_template.html"
 OUTPUT = HERE / "results.html"
 # Fig. 11, Tables 6–7 and Fig. O1 pool these models; Fig. 12 compares them.
 # planned: attempts per setting and scenario (user decision 2026-11-06: 10 for every model). mark: Fig. 12 shape.
+# color: Fig. 12 color, none of which Fig. 11's outcomes use (user decision, 2026-11-09).
 MODELS = [
     {"id": "opus55", "model": "claude-opus-5-5", "name": "Claude Opus 5.5 medium", "role": "Anthropic flagship",
-     "vendor": "Claude", "color": "var(--s3)", "mark": "square", "planned": 10},
+     "vendor": "Claude", "color": "var(--m1)", "mark": "square", "planned": 10},
     {"id": "sol", "model": "gpt-6.1-sol", "name": "GPT-6.1 Sol medium", "role": "OpenAI flagship",
-     "vendor": "OpenAI", "color": "var(--s1)", "mark": "circle", "planned": 10},
+     "vendor": "OpenAI", "color": "var(--m2)", "mark": "circle", "planned": 10},
     {"id": "terra", "model": "gpt-6.1-terra", "name": "GPT-6.1 Terra medium", "role": "OpenAI lower-priced",
-     "vendor": "OpenAI", "color": "var(--s5)", "mark": "diamond", "planned": 10},
+     "vendor": "OpenAI", "color": "var(--m3)", "mark": "diamond", "planned": 10},
 ]
 # Fig. 11, Tables 6–7 and Fig. O1 pool the models' attempts (user decision, 2026-11-08); Fig. 12 compares them.
 POOLED = "all"

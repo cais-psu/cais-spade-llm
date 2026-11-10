@@ -63,6 +63,11 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   `/home/jongh/recovery_archives/20261106_v7_reference_outline_batches/`. Their
   attempt folders are byte-identical to the `outline_drafts` copies that the
   Recovery UI and the appendix read.
+  On 2026-11-07 the user had the six Study 1 batches from `571da65` (453
+  attempts, stopped at 17:31 when the prompt was found to leave out
+  conventions the checks require) moved, not deleted, to
+  `/home/jongh/recovery_archives/20261107_study1_before_prompt_fix/` before
+  Study 1 restarts on the fixed prompt.
 - Protect active work and the current partial attempt still needed for debugging,
   including work owned by another chat or process. Remove abandoned attempts once
   their useful findings are recorded and their required dependencies are retained.

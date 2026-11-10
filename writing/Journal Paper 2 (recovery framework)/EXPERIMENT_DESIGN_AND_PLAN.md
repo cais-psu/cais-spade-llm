@@ -859,7 +859,10 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   known feedback limits stay, neither of which turned a valid program into a failure: a calculation refused for a
   live-detection flag on a part an earlier event put down says only "Owner calculation lacks required recorded
   inputs", and the event's own part's `/parts/<name>/snapshot` path does not resolve inside a program. Sol composed
-  PS_sol_1 completely once, on `389dcdc` (composition `697ab2a7`); that round is kept and left out.
+  PS_sol_1 completely once, on `389dcdc` (composition `697ab2a7`); that round is left out. On 2026-11-09 the user
+  had every composition round the results page does not read (all but `compositions_r9` and `compositions_r9b`,
+  `697ab2a7` included) deleted outright for disk space; logs and scripts are kept, and the list is in
+  `study2_20261108/old_rounds_deletion_list_20261109.json`.
 - 2026-11-08, completing the gear-turn change: the native MoveIt check (`preview_recovery_motion.cpp`) keeps its own
   copy of the corridor and still bounded the turn, so a gear the Python side let through was refused by the native
   tool as a malformed request, and PS_sol_3 on `386b8cd` crashed (exit 1, no result) instead of being judged. The C++
