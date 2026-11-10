@@ -40,6 +40,9 @@ Recovery UI).
   had not yet settled. The video shows the slip and was kept (GAZEBO_QUEUE item 119).
 - Gazebo ran far below real time (Machining's recovery at about 7%), so the full-length videos are slow; the 20x
   copies are the ones to show.
-- Nominal production: `evidence/2026-09-28-gazebo-11-parts/gazebo_11_parts_success.mp4` (and `_10x`) is an older
-  layout in which only ur5e-1 and the KMR are present. The opening minutes of each `failure.mp4` show nominal
-  production in the current cell.
+- `nominal_production.mp4` (1:04, 20x): nominal production with all four UR robots and the KMR, recorded
+  2026-09-29, before the staging trays moved 0.30 m north on 2026-11-05. It is a copy of
+  `cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/assembly-20x.mp4`; the
+  full-length `assembly.mp4` and a 10x copy are in that folder. The opening minutes of each `failure.mp4` show
+  nominal production in the current cell. `evidence/2026-09-28-gazebo-11-parts/` holds an older run in which only
+  ur5e-1 and the KMR are present.
