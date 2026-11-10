@@ -573,6 +573,10 @@ class SweepIntersection(ValueError):
         self.pose = pose
 
 
+class FollowPathAborted(RuntimeError):
+    """Nav2's path follower aborted a base path that this controller had checked and sent."""
+
+
 def constant_heading_route(
     occupancy_map: Any,
     start: tuple[float, float, float],
@@ -1626,10 +1630,22 @@ def main() -> None:
             self._nav_goal_handle = handle
             return handle
 
-        def _compute_base_path(self, target: tuple[float, float, float], goal_handle: Any) -> Any:
+        def _compute_base_path(
+            self, target: tuple[float, float, float], goal_handle: Any,
+            *, follow_path_refusal: FollowPathAborted | None = None,
+        ) -> Any:
+            """Select a checked base path from the measured pose to the target.
+
+            Args:
+                target: Planar base pose to reach.
+                goal_handle: Action goal whose cancellation stops the search.
+                follow_path_refusal: Nav2's abort of the path selected before. The
+                    straight segment and the lattice are then skipped, and only a
+                    constant-heading route is searched.
+            """
             self._route_clearance = None
             start = self._check_motion(goal_handle)
-            if abs(normalize_angle(target[2] - start[2])) <= 0.05:
+            if follow_path_refusal is None and abs(normalize_angle(target[2] - start[2])) <= 0.05:
                 direct = NavPath()
                 direct.header.frame_id = "world"
                 # An omnidirectional base can translate without facing its travel
@@ -1657,23 +1673,26 @@ def main() -> None:
                 path.header.frame_id = "world"
                 path.poses = [self._pose_stamped(start), self._pose_stamped(target)]
             else:
-                request = ComputePathToPose.Goal()
-                request.start = self._pose_stamped(start)
-                request.goal = self._pose_stamped(target)
-                request.use_start = True
-                request.planner_id = "GridBased"
-                handle = self._send_motion_goal(self.compute_path_client, request, goal_handle)
-                result = self._wait_motion_future(handle.get_result_async(), goal_handle, 20.0)
-                self._nav_goal_handle = None
                 prepared = None
-                if result.status == GoalStatus.STATUS_SUCCEEDED:
-                    try:
-                        prepared = prepare_base_path(result.result.path, self._check_motion(goal_handle), target,
-                                                     self._occupancy_map)
-                    except ValueError as exc:
-                        refusal: Exception = exc
+                if follow_path_refusal is not None:
+                    refusal: Exception = follow_path_refusal
                 else:
-                    refusal = RuntimeError("No collision-free KMR base path was found")
+                    request = ComputePathToPose.Goal()
+                    request.start = self._pose_stamped(start)
+                    request.goal = self._pose_stamped(target)
+                    request.use_start = True
+                    request.planner_id = "GridBased"
+                    handle = self._send_motion_goal(self.compute_path_client, request, goal_handle)
+                    result = self._wait_motion_future(handle.get_result_async(), goal_handle, 20.0)
+                    self._nav_goal_handle = None
+                    if result.status == GoalStatus.STATUS_SUCCEEDED:
+                        try:
+                            prepared = prepare_base_path(result.result.path, self._check_motion(goal_handle),
+                                                         target, self._occupancy_map)
+                        except ValueError as exc:
+                            refusal = exc
+                    else:
+                        refusal = RuntimeError("No collision-free KMR base path was found")
                 if prepared is not None:
                     try:
                         self._validate_transport_sweeps(
@@ -1909,7 +1928,9 @@ def main() -> None:
                                         if intermediate_handoff else (GoalStatus.STATUS_SUCCEEDED,))
                     if response.status not in allowed_statuses:
                         detail = getattr(response.result, "error_msg", "") if response.result else ""
-                        raise RuntimeError(
+                        failure = (FollowPathAborted if response.status == GoalStatus.STATUS_ABORTED
+                                   else RuntimeError)
+                        raise failure(
                             f"KMR path execution failed: Nav2 status {response.status}"
                             f"{f' ({detail})' if detail else ''}"
                         )
@@ -2082,8 +2103,25 @@ def main() -> None:
             for index, waypoint in enumerate(goals):
                 if not base_path_is_clear(self._occupancy_map, (waypoint,)):
                     raise ValueError("KMR route waypoint intersects an obstacle")
+                final_waypoint = index == len(goals) - 1
                 path = self._compute_base_path(waypoint, goal_handle)
-                self._run_base_path(path, goal_handle, final_waypoint=index == len(goals) - 1)
+                try:
+                    self._run_base_path(path, goal_handle, final_waypoint=final_waypoint)
+                except FollowPathAborted as exc:
+                    if self._route_clearance is not None:
+                        raise
+                    # MPPI scores its own samples against its own costmap, so it can find no trajectory along a
+                    # lattice path this controller accepted. Brake, then search this controller's constant-heading
+                    # route from the measured pose; that route is sent once and its abort is final.
+                    self.get_logger().warning(f"{exc}; searching a constant-heading KMR route")
+                    self._path_speed_limit = None
+                    self._nav_goal_handle = None
+                    with self._lock:
+                        self._nav_command = None
+                        self._nav_command_monotonic = None
+                    self._wait_base_stopped(goal_handle)
+                    path = self._compute_base_path(waypoint, goal_handle, follow_path_refusal=exc)
+                    self._run_base_path(path, goal_handle, final_waypoint=final_waypoint)
                 self._wait_base_stopped(goal_handle)
             self._align_base_pose(goals[-1], goal_handle, len(goals) - 1,
                                   named=named, source_name=source_name,

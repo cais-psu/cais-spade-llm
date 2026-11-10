@@ -3453,6 +3453,55 @@ def test_base_route_replans_and_brakes_at_each_waypoint():
     assert node._navigation_active is True
 
 
+@pytest.mark.parametrize('own_route_aborts', [False, True])
+def test_base_route_drives_its_own_route_once_after_nav2_aborts_the_lattice_path(own_route_aborts):
+    """Brake and drive the constant-heading route once; Nav2 aborting that route too is final."""
+    import ast
+    import threading
+    from typing import Any
+    from unittest.mock import Mock
+
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_follow_base_goals')
+    target = (-4.70, 2.20, math.pi / 2)
+    calls = []
+
+    def compute(_point, _goal, *, follow_path_refusal=None):
+        source = 'lattice' if follow_path_refusal is None else 'own'
+        node._route_clearance = None if follow_path_refusal is None else ((0., 0., .025),)
+        calls.append(('plan', source))
+        return source
+
+    def run(path, _goal, **_kwargs):
+        calls.append(('execute', path))
+        if path == 'lattice' or own_route_aborts:
+            raise kmr_base.FollowPathAborted('KMR path execution failed: Nav2 status 6')
+
+    node = SimpleNamespace(
+        _occupancy_map=object(), _navigation_active=False, _route_clearance=None,
+        _compute_base_path=compute, _run_base_path=run,
+        _wait_base_stopped=lambda _goal: calls.append(('brake',)),
+        _align_base_pose=lambda target, _goal, _index, **_kw: calls.append(('align', target)),
+        _check_motion=lambda _goal: target, _resource_at=lambda _pose: 'M1',
+        position_tolerance=.035, yaw_tolerance=.02, get_logger=lambda: Mock(),
+        _lock=threading.Lock(), _nav_command=object(), _nav_command_monotonic=0.,
+        _nav_goal_handle=object(), _path_speed_limit=.5,
+    )
+    namespace = {'Any': Any, 'math': math, 'normalize_angle': kmr_base.normalize_angle,
+                 'base_path_is_clear': Mock(return_value=True),
+                 'FollowPathAborted': kmr_base.FollowPathAborted}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    retried = [('plan', 'lattice'), ('execute', 'lattice'), ('brake',), ('plan', 'own'), ('execute', 'own')]
+    if own_route_aborts:
+        with pytest.raises(kmr_base.FollowPathAborted):
+            namespace['_follow_base_goals'](node, SimpleNamespace(), (target,), named=False)
+        assert calls == retried
+    else:
+        assert namespace['_follow_base_goals'](node, SimpleNamespace(), (target,), named=False) == 'M1'
+        assert calls == [*retried, ('brake',), ('align', target)]
+    assert node._nav_command is None and node._nav_goal_handle is None and node._path_speed_limit is None
+
+
 def test_kmr_turning_lattice_segment_is_followed_only_as_fast_as_the_base_turns() -> None:
     straight = tuple((0.1 * index, 0.0, 1.571) for index in range(11))
     assert kmr_base.path_turn_speed_limit(straight, 1.5, 0.5) == 1.5
@@ -3706,6 +3755,36 @@ def test_kmr_long_straight_selection_and_blocked_m1_route(start, target, direct)
         assert not kmr_base.base_path_is_clear(node._occupancy_map, (start, target))
 
 
+def test_kmr_route_from_m2_to_m1_after_nav2_aborts_skips_the_lattice():
+    """After Nav2 aborts, search only the constant-heading route, around M1 from M2's stop."""
+    import ast
+    from unittest.mock import Mock
+
+    start, target = (-2.70, 2.20, math.pi / 2), (-4.70, 2.20, math.pi / 2)
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == '_compute_base_path')
+    namespace = dict(Any=object, math=math, normalize_angle=kmr_base.normalize_angle,
+                     NavPath=lambda: _kmr_test_path(), prepare_base_path=kmr_base.prepare_base_path,
+                     planar_pose=kmr_base.planar_pose, constant_heading_route=kmr_base.constant_heading_route,
+                     SweepIntersection=kmr_base.SweepIntersection)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    messages = []
+    node = SimpleNamespace(_check_motion=lambda _: start, _occupancy_map=_kmr_test_map(),
+        _validate_transport_sweeps=Mock(), _route_clearance=None, _send_motion_goal=Mock(),
+        _pose_stamped=lambda pose: _kmr_test_path(pose).poses[0],
+        get_logger=lambda: SimpleNamespace(info=messages.append))
+    refusal = kmr_base.FollowPathAborted('KMR path execution failed: Nav2 status 6')
+    selected = namespace['_compute_base_path'](node, target, object(), follow_path_refusal=refusal)
+    poses = tuple(kmr_base.planar_pose(point.pose) for point in selected.poses)
+    assert node._send_motion_goal.call_count == 0
+    assert poses[0] == pytest.approx(start) and poses[-1] == pytest.approx(target)
+    assert kmr_base.base_path_is_clear(node._occupancy_map, poses)
+    assert all(pose[2] == pytest.approx(math.pi / 2) for pose in poses)
+    assert node._route_clearance is not None
+    assert any('Nav2 status 6' in message and 'constant-heading KMR route' in message for message in messages)
+
+
 def test_kmr_cached_map_matches_uncached_sweeps_and_refreshes():
     """Index every occupied/unknown cell without changing footprint decisions."""
     original = _kmr_test_map()
@@ -3845,7 +3924,8 @@ def test_kmr_intermediate_stall_stops_nav2_before_checked_connection(failure):
                  'MoveBaseKMR': SimpleNamespace(Goal=MoveGoal),
                  'DockKMR': SimpleNamespace(Goal=DockGoal),
                  'FollowPath': SimpleNamespace(Goal=PathGoal),
-                 'GoalStatus': SimpleNamespace(STATUS_SUCCEEDED=4, STATUS_CANCELED=5),
+                 'GoalStatus': SimpleNamespace(STATUS_SUCCEEDED=4, STATUS_CANCELED=5, STATUS_ABORTED=6),
+                 'FollowPathAborted': kmr_base.FollowPathAborted,
                  'planar_pose': lambda value: value,
                  'prepare_base_path': lambda path, *_args: path,
                  'split_base_path': lambda path: (path,),
@@ -3856,7 +3936,9 @@ def test_kmr_intermediate_stall_stops_nav2_before_checked_connection(failure):
                  str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
     goal = SimpleNamespace(request=MoveGoal())
     if failure:
-        with pytest.raises((TimeoutError, ValueError, RuntimeError)):
+        expected = (kmr_base.FollowPathAborted if failure == 'nav2_aborted'
+                    else (TimeoutError, ValueError, RuntimeError))
+        with pytest.raises(expected):
             namespace['_run_base_path'](node, route, goal)
         assert 'checked_connection' not in events
     else:

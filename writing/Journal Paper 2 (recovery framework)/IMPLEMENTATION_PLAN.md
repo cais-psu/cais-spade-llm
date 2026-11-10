@@ -36,6 +36,22 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   this set has none of). Not compiled here (no LaTeX on the laptop); check the summary table's width in Overleaf.
 - Kept: the hand-trimmed Machining demo `draft_demo_trimmed_c9ed21daaf68` (replays with the checks it records).
   `check_retained_trimmed.py`'s second pass reads its parent `draft_b351abd8…`, now in the archive.
+- Gazebo videos (GAZEBO_QUEUE item 123, CCA bypassed as for the captures), all completed, in
+  `/home/jongh/recovery_review_1030/gazebo_diag/runs/`: `final_part_slippage` 4/4, `final_ur5e1` 4/4,
+  `final_conveyor` 7/7, `final_machining_r2` 14/14 (77:15, 20x copy 3:52).
+- Machining's first take `final_machining` (deleted after diagnosis, user 2026-11-09, 225 MB) stopped at event 3: the
+  KMR base controller accepted Nav2's lattice path
+  from M2's stop to M1's, MPPI found no trajectory it called collision free ("Optimizer fail to compute path"), and
+  the base never moved. The composition was not at fault; no earlier recording had driven the KMR from M2 to M1 (the
+  declared routes are Storage–M1 and Storage–M2, and the user wants the KMR to drive undeclared routes, not new ones).
+  Fix (user "go"): `kmr_base_controller.py` raises `FollowPathAborted` when Nav2 aborts a sent path, and
+  `_follow_base_goals` then brakes and drives the controller's own constant-heading route once
+  (`_compute_base_path(..., follow_path_refusal=...)` skips the straight segment and the lattice); an abort of that
+  route is final. Tests in `test_recovery_framework_gazebo.py` (retry once, final second abort, M2→M1 on the real
+  map); the three Gazebo test files pass (328). Installed by `make bootstrap-gazebo`, and copied into the
+  `wt_study2_7f6f712` snapshot, whose scene-asset hash must match the running controller.
+- In the rerun the controller's own check refused the lattice path on both drives (M2→M1 8 poses, M1→M2 11 poses,
+  2.5 cm least clearance), so the old fallback drove them and the new retry was not exercised in Gazebo.
 
 ## Primitive composition with MoveIt physical checks — November 6–7, 2026 — decided by the user; built offline in the `composition-physics` worktree, committed on `recovery-framework-journal` November 7 (overnight go); the open choices below were decided overnight and await the user's review
 
