@@ -8,7 +8,7 @@ One folder per scenario, each with the failure and the recovery from the same fa
 | `recovery.mp4`, `recovery_20x.mp4` | The recovery composition executed from the failure capture |
 
 Only the 20x copies and this file are in git. The full-length `failure.mp4` and `recovery.mp4` stay on disk
-(`.gitignore` in this folder); the originals are also in `/home/jongh/recovery_review_1030/gazebo_diag/runs/`.
+(`.gitignore` in this folder); the originals are also in `cais_spade_llm/monitor/environment_runs/recovery/gazebo_runs/runs/`.
 
 ## Scenarios
 

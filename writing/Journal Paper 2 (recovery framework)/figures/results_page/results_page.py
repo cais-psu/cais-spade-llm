@@ -12,6 +12,7 @@ Usage, from the repository root:
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import logging
 import statistics
@@ -316,10 +317,10 @@ _PLACEHOLDER_EXECUTION = {
 # Study 2's compositions: all 36 composed once on the gear-turn commit (round r9, user decision 2026-11-08); each log
 # names its composition directory, and its name is <scenario>_<model>_<rank>. Sol's and Terra's second Part slippage
 # attempts are in logs_r9b and stay out of Table 7, which holds one attempt per outline.
-COMPOSITION_LOGS = Path("/home/jongh/recovery_review_1030/study2_20261108/logs_r9")
+COMPOSITION_LOGS = EXPERIMENTS.parent / "study2_compositions" / "logs_r9"
 # User decisions 2026-11-08/09: Sol's Part slippage outlines were composed twice on the final commit, and Table 7
 # reports the second attempt for each of them, whatever it gave; the caption says so. Terra gets no second attempt.
-SECOND_ATTEMPT_LOGS = Path("/home/jongh/recovery_review_1030/study2_20261108/logs_r9b")
+SECOND_ATTEMPT_LOGS = EXPERIMENTS.parent / "study2_compositions" / "logs_r9b"
 SECOND_ATTEMPT = {"PS_sol_1", "PS_sol_2", "PS_sol_3"}
 COMPOSITION_SCENARIOS = {"PS": "Part slippage", "CONV": "Conveyor breakdown",
                          "MACH": "Machining breakdown during part processing", "UR5": "ur5e-1 breakdown"}
@@ -370,6 +371,14 @@ def composition_reference(ref: str) -> str:
     return f"/{head}"
 
 
+def _read_reply(path: Path) -> str:
+    """Read one composing turn's response record, as written (.txt) or compressed (.txt.gz)."""
+    if path.suffix == ".gz":
+        with gzip.open(path, "rt", errors="replace") as handle:
+            return handle.read()
+    return path.read_text(errors="replace")
+
+
 def _reply(text: str) -> dict:
     """Return a composing LLM's turn reply (decision, context_requests, primitive_steps) from its response record."""
     start = text.find("{")
@@ -404,8 +413,9 @@ def composition_row(log: Path) -> dict | None:
     if passed:
         program = json.loads((directory / "composition.json").read_text())["accepted_primitive_program"]
         primitives = sum(len(event.get("primitive_steps") or []) for event in program)
-    replies = [_reply(path.read_text(errors="replace"))
-               for path in sorted((directory / "recovery_primitves").glob("multi_turn_*_response_*.txt"))]
+    # Study 2's response records were gzip-compressed on 2026-11-10 to save disk space; they read the same.
+    replies = [_reply(_read_reply(path))
+               for path in sorted((directory / "recovery_primitves").glob("multi_turn_*_response_*.txt*"))]
     turns = [reply.get("decision") for reply in replies]
     # A lookup is one reference the composing LLM requested, as the outline stage counts its retrievals.
     requested = [ref for reply in replies if reply.get("decision") == "need_context"

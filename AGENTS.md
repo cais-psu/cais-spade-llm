@@ -68,6 +68,15 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   conventions the checks require) moved, not deleted, to
   `/home/jongh/recovery_archives/20261107_study1_before_prompt_fix/` before
   Study 1 restarts on the fixed prompt.
+  On 2026-11-10 the user had all of `/home/jongh/recovery_archives/` (every
+  archive named above) and the run worktrees deleted outright to free disk
+  space. The list is in
+  `/home/jongh/recovery_review_1030/deletion_list_20261110.json`.
+- The paper's results are consolidated in
+  `cais_spade_llm/monitor/environment_runs/recovery/` (since 2026-11-10): the
+  captures, Study 1 (`outline_experiments/`), the four reference outlines and
+  compositions, Study 2 (`study2_compositions/`) and the Gazebo runs behind the
+  paper videos (`gazebo_runs/`). Its `README.md` says what reads each part.
 - Protect active work and the current partial attempt still needed for debugging,
   including work owned by another chat or process. Remove abandoned attempts once
   their useful findings are recorded and their required dependencies are retained.
