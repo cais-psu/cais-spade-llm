@@ -22,6 +22,7 @@ No resource, place or part is named here: everything comes from the accepted rec
 from __future__ import annotations
 
 import logging
+import time
 from copy import deepcopy
 from typing import Any
 
@@ -289,8 +290,16 @@ def _composed_executor(agent, added: dict, program: dict):
                                                    *(added["places"].items())) if isinstance(value, str)}
         live: dict = {}
         rows: list[dict] = []
-        result = {"status": "completed", "resource_id": task["resource_id"], "event_name": task["event_name"],
-                  "task_id": task["task_id"]}
+        started = time.time()
+
+        def evidence(reason: str | None = None) -> dict:
+            observations = {"primitive_results": rows, "started_at_unix": started, "completed_at_unix": time.time()}
+            if reason is None:
+                observations["custody"] = deepcopy(getattr(agent, "workflow_custody", None))
+            return {"status": "completed" if reason is None else "failed", "resource_id": task["resource_id"],
+                    "event_name": task["event_name"], "task_id": task["task_id"], "observations": observations,
+                    **({} if reason is None else {"reason": reason})}
+
         primitives.task_parameters = bindings
         try:
             for index, step in enumerate(steps):
@@ -300,26 +309,23 @@ def _composed_executor(agent, added: dict, program: dict):
                 except ValueError as exc:
                     rows.append({"index": index, "primitive": step["primitive"], "success": False,
                                  "message": str(exc)})
-                    return {**result, "status": "failed", "reason": f"step {index}: {exc}",
-                            "observations": {"primitive_results": rows}}
+                    return evidence(f"step {index}: {exc}")
                 method = getattr(primitives, step["primitive"], None)
                 if method is None:
-                    return {**result, "status": "failed", "reason": f"step {index}: no {step['primitive']}",
-                            "observations": {"primitive_results": rows}}
+                    return evidence(f"step {index}: no {step['primitive']}")
+                began = time.time()
                 output = await method(**params)
                 rows.append({"index": index, "primitive": step["primitive"], "params": params,
+                             "seconds": round(time.time() - began, 1),
                              "success": output.get("success") is True, "message": output.get("message")})
                 if trace[index].get("event_fact_path"):
                     live[trace[index]["event_fact_path"]] = {
                         key: deepcopy(item) for key, item in output.items() if key not in {"observations"}}
                 if output.get("success") is not True:
-                    return {**result, "status": "failed",
-                            "reason": f"step {index} {step['primitive']}: {output.get('message')}",
-                            "observations": {"primitive_results": rows}}
+                    return evidence(f"step {index} {step['primitive']}: {output.get('message')}")
         finally:
             primitives.task_parameters = None
-        return {**result, "observations": {"primitive_results": rows,
-                                           "custody": deepcopy(getattr(agent, "workflow_custody", None))}}
+        return evidence()
 
     return execute
 

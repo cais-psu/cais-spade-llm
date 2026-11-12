@@ -6,6 +6,7 @@ accepted ur5e-1 breakdown records skip when the gitignored records are absent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from copy import deepcopy
@@ -14,7 +15,13 @@ from types import SimpleNamespace
 import pytest
 
 from cais_spade_llm.product.environment import EnvironmentProductContext
-from cais_spade_llm.recovery_framework import PRODUCT_PATH, ROOT, SCENE_PATH, read_json
+from cais_spade_llm.recovery_framework import (
+    PRODUCT_PATH,
+    ROOT,
+    SCENE_PATH,
+    model_growth,
+    read_json,
+)
 from cais_spade_llm.recovery_framework.model_growth import (
     composed_step_parameters,
     exclude_reported_faults,
@@ -265,3 +272,70 @@ def test_a_resource_with_a_fault_report_is_taken_out_of_production():
     assert exclude_reported_faults(SimpleNamespace(context=context)) == ["ur5e-1"]
     assert context.unavailable_resources == {"ur5e-1"} and cleared == {}
     assert context.resources["KMR"].executors == {"x": 1}
+
+
+class _ScriptedPrimitives:
+    """A KMR primitive interface that records each call and answers as the worker does."""
+
+    def __init__(self, agent, fail: str | None = None) -> None:
+        self.agent, self.fail = agent, fail
+        self.task_parameters = None
+        self.calls: list[tuple] = []
+
+    def __getattr__(self, name: str):
+        async def call(**params):
+            self.calls.append((name, params, deepcopy(self.task_parameters)))
+            if name == self.fail:
+                return {"success": False, "message": f"{name} refused"}
+            if name == "compute_pick_targets":
+                return {"success": True, "approach": [1.0] * 7, "seed": [0.0] * 7, "target": [2.0] * 7,
+                        "lift": [3.0] * 7, "lift_waypoints": [[3.0] * 7]}
+            if name == "compute_place_targets":
+                return {"success": True, "approach": [4.0] * 7, "transfer_waypoints": [[4.0] * 7],
+                        "target": [5.0] * 7, "retreat": [6.0] * 7, "transport": [7.0] * 7,
+                        "withdraw_waypoints": [[7.0] * 7]}
+            if name == "grasp_part":
+                self.agent.workflow_custody = {"attached": True, "grasp_transform": [0.0, 0.0, 0.03, 0, 0, 0, 1.0]}
+            if name == "release_part":
+                self.agent.workflow_custody = {"attached": False}
+            return {"success": True}
+
+        return call
+
+
+def _run_event(agent, composition: dict, outline_id: str, places: dict) -> tuple[dict, dict]:
+    program = next(row for row in composition["accepted_primitive_program"] if row["outline_id"] == outline_id)
+    execute = model_growth._composed_executor(agent, {"outline_id": outline_id, "places": places}, program)
+    task = {"resource_id": "KMR", "event_name": program["event_name"], "task_id": f"task-{outline_id}",
+            "parameters": {"part_name": LATER_PART}}
+    return task, asyncio.run(execute(task))
+
+
+def test_the_added_events_run_the_composed_steps_with_this_runs_values(records):
+    composition, _ = records
+    agent = SimpleNamespace(workflow_custody=None)
+    agent.kmr_primitives = _ScriptedPrimitives(agent)
+    for outline_id, places in (("RECOVERY_SEQ2", {"origin_resource_location": "M1"}),
+                               ("RECOVERY_SEQ3", {"destination_location": "Conveyor"})):
+        task, evidence = _run_event(agent, composition, outline_id, places)
+        assert evidence["status"] == "completed", evidence.get("reason")
+        assert model_growth._completed(task, evidence) is True
+        assert evidence["observations"]["completed_at_unix"] >= evidence["observations"]["started_at_unix"]
+    calls = agent.kmr_primitives.calls
+    assert {binding["part_name"] for _, _, binding in calls} == {LATER_PART}
+    assert next(params for name, params, _ in calls if name == "grasp_part") == {"part_name": LATER_PART}
+    approach = next(params for name, params, _ in calls if name == "move_cartesian")
+    assert approach == {"target": [1.0] * 7, "seed": [0.0] * 7}
+    place = next(params for name, params, _ in calls if name == "compute_place_targets")
+    assert place["transform"] == [0.0, 0.0, 0.03, 0, 0, 0, 1.0]
+    assert agent.kmr_primitives.task_parameters is None
+
+
+def test_a_refused_step_fails_the_added_event_and_clears_its_bindings(records):
+    composition, _ = records
+    agent = SimpleNamespace(workflow_custody=None)
+    agent.kmr_primitives = _ScriptedPrimitives(agent, fail="move_base")
+    task, evidence = _run_event(agent, composition, "RECOVERY_SEQ2", {"origin_resource_location": "M1"})
+    assert evidence["status"] == "failed" and "move_base refused" in evidence["reason"]
+    assert model_growth._completed(task, evidence) is False
+    assert agent.kmr_primitives.task_parameters is None
