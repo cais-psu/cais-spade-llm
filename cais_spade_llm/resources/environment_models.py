@@ -971,7 +971,9 @@ def feasibility(model: dict, task: dict, geometry: dict) -> tuple[str, list[str]
     status, reasons = _geometry_feasibility(model, geometry)
     if status == "INFEASIBLE":
         return status, reasons
-    if name in {"machine_part", "start_job"}:
+    # Any event that names a process and result the machine declares needs a current program that establishes it,
+    # whatever the event is called: a completion offered for a part the program cannot make is not a capability.
+    if params.get("process") in model.get("process_capabilities", {}) and "result" in params:
         process_status, process_reasons = _machining_feasibility(model, params)
         if process_status == "INFEASIBLE":
             return process_status, process_reasons

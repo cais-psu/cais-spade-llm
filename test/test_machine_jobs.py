@@ -985,6 +985,19 @@ def test_job_controlled_machining_plans_a_commanded_start_and_an_observed_comple
     assert feasibility(m1, tasks['start_job'], {})[0] != 'INFEASIBLE'
     circle = {**tasks['start_job'], 'parameters': {**tasks['start_job']['parameters'], 'result': 'circle'}}
     assert feasibility(m1, circle, {}) == ('INFEASIBLE', ['Current program cannot establish the requested result'])
+    # A completion names its process and result too, so the same program check applies whatever the event is
+    # called: M1's square program cannot complete a circle, and M2's circle program cannot complete a square.
+    # Without it, M2 offered intake for square pegs through complete_job and the round pegs waited.
+    finish_circle = {**tasks['complete_job'], 'parameters': {**tasks['complete_job']['parameters'], 'result': 'circle'}}
+    assert feasibility(m1, finish_circle, {}) == ('INFEASIBLE', ['Current program cannot establish the requested result'])
+    assert feasibility(m1, tasks['complete_job'], {})[0] != 'INFEASIBLE'
+    m2 = build_environment_models(json.loads(SCENE_PATH.read_text()))['M2']
+    on_m2 = {task['event_name']: task for task in candidates(m2, {}, part, desired, [desired])}
+    for name in ('start_job', 'complete_job'):
+        assert feasibility(m2, on_m2[name], {}) == ('INFEASIBLE', ['Current program cannot establish the requested result'])
+        round_peg = {**on_m2[name], 'parameters': {**on_m2[name]['parameters'], 'part_name': 'RGOCG4-50_Round_4mm',
+                                                   'result': 'circle'}}
+        assert feasibility(m2, round_peg, {})[0] != 'INFEASIBLE'
 
 def machine_capture(machine):
     """Build the recorded null snapshot and running worker state from one run."""
