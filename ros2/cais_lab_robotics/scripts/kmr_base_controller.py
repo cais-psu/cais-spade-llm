@@ -574,7 +574,10 @@ class SweepIntersection(ValueError):
 
 
 class FollowPathAborted(RuntimeError):
-    """Nav2's path follower aborted a base path that this controller had checked and sent."""
+    """Nav2's path follower aborted a base path that this controller had checked and sent.
+
+    Also raised when this controller stopped Nav2 on such a path because the base would not stop clear.
+    """
 
 
 def constant_heading_route(
@@ -802,6 +805,10 @@ def main() -> None:
             self._active_goal = False
             self._cancel_base_motion_requested = False
             self._base_abort_reason: str | None = None
+            # While Nav2 follows a path this controller sent, a stopping-check refusal holds the base and is handed to
+            # the path follower instead of ending the base action.
+            self._following_nav2_path = False
+            self._stopping_refusal: str | None = None
             self._motion_status: dict[str, Any] = {}
             self._docking_braking_status: dict[str, float] = {}
             self._motion_status_time = 0.0
@@ -1065,6 +1072,7 @@ def main() -> None:
                 not self._active_goal
                 or not (self._navigation_active or self._follow_path_active)
                 or self._cancel_base_motion_requested
+                or self._stopping_refusal is not None
             ):
                 self._last_hold_reason = None
                 self._stop()
@@ -1156,7 +1164,11 @@ def main() -> None:
                     )
                     self._motion_status['stopping_pose'] = list(sweep[-1])
                     if not base_path_is_clear(self._occupancy_map, sweep):
-                        self._abort_base_motion("KMR stopping footprint intersects an obstacle or map is unavailable")
+                        reason = "KMR stopping footprint intersects an obstacle or map is unavailable"
+                        if self._following_nav2_path and self._occupancy_map is not None:
+                            self._refuse_nav2_path(reason)
+                        else:
+                            self._abort_base_motion(reason)
                         return
                     stopping_sweeps.append(sweep)
                 self._validate_transport_sweeps(tuple(stopping_sweeps), timeout=self.command_timeout)
@@ -1213,6 +1225,21 @@ def main() -> None:
             self._stop()
             if self._nav_goal_handle is not None:
                 self._nav_goal_handle.cancel_goal_async()
+
+        def _refuse_nav2_path(self, reason: str) -> None:
+            """Hold the base at zero and hand the refusal to the path follower.
+
+            The follower stops Nav2 and raises ``FollowPathAborted``, so a coordinate move searches this controller's
+            constant-heading route from the measured pose once, as it does after Nav2's own abort.
+
+            Args:
+                reason: Why the commanded or measured motion would not stop clear.
+            """
+            if self._stopping_refusal is None:
+                self._stopping_refusal = reason
+                self.get_logger().warning(f"{reason}; stopping Nav2's path")
+            self._stop()
+            self._publish_motion_status()
 
         def _kmr_joint_state_cb(self, message: JointState) -> None:
             for name, position in zip(message.name, message.position):
@@ -1457,6 +1484,7 @@ def main() -> None:
                 self._active_goal = True
                 self._cancel_base_motion_requested = False
                 self._base_abort_reason = None
+                self._stopping_refusal = None
                 self._clearance_wait_started = None
                 self._motion_status = {}
                 self._docking_braking_status = {}
@@ -1852,6 +1880,7 @@ def main() -> None:
                 (tuple(planar_pose(point.pose) for point in path.poses),), goal_handle=goal_handle,
             )
             self.path_pub.publish(path)
+            self._stopping_refusal = None
             self._navigation_active = True
             segments = split_base_path(path)
             for segment_index, segment in enumerate(segments):
@@ -1896,30 +1925,41 @@ def main() -> None:
                     request.controller_id = "FollowPath"
                     request.goal_checker_id = ("docking_handoff_goal_checker"
                                                if final_handoff else "precise_goal_checker")
-                    handle = self._send_motion_goal(self.follow_path_client, request, goal_handle)
-                    future = handle.get_result_async()
-                    progress_pose = start
-                    progress_time = self.get_clock().now().nanoseconds / 1e9
-                    intermediate_handoff = False
-                    while not future.done():
-                        measured = self._check_motion(goal_handle)
-                        now = self.get_clock().now().nanoseconds / 1e9
-                        if simulation_elapsed(started, now) > 180.0:
-                            raise TimeoutError("KMR path execution timed out")
-                        if math.dist(measured[:2], progress_pose[:2]) >= self.position_tolerance:
-                            progress_pose, progress_time = measured, now
-                        if (docking_handoff and not final_handoff
-                                and math.dist(measured[:2], finish[:2]) <= self.docking_slow_distance
-                                and simulation_elapsed(progress_time, now) >= 1.0):
-                            # MPPI can settle outside its 6 cm goal region near an
-                            # obstacle. Stop Nav2 before taking over the checked
-                            # short connection, retaining the intermediate tolerance.
+                    self._following_nav2_path = True
+                    try:
+                        handle = self._send_motion_goal(self.follow_path_client, request, goal_handle)
+                        future = handle.get_result_async()
+                        progress_pose = start
+                        progress_time = self.get_clock().now().nanoseconds / 1e9
+                        intermediate_handoff = False
+                        while not future.done() and self._stopping_refusal is None:
+                            measured = self._check_motion(goal_handle)
+                            now = self.get_clock().now().nanoseconds / 1e9
+                            if simulation_elapsed(started, now) > 180.0:
+                                raise TimeoutError("KMR path execution timed out")
+                            if math.dist(measured[:2], progress_pose[:2]) >= self.position_tolerance:
+                                progress_pose, progress_time = measured, now
+                            if (docking_handoff and not final_handoff
+                                    and math.dist(measured[:2], finish[:2]) <= self.docking_slow_distance
+                                    and simulation_elapsed(progress_time, now) >= 1.0):
+                                # MPPI can settle outside its 6 cm goal region near an
+                                # obstacle. Stop Nav2 before taking over the checked
+                                # short connection, retaining the intermediate tolerance.
+                                self._wait_motion_future(handle.cancel_goal_async(), goal_handle, 5.0)
+                                self._wait_motion_future(future, goal_handle, 5.0)
+                                intermediate_handoff = True
+                                break
+                            self._publish_base_feedback(goal_handle, target)
+                            time.sleep(self.control_period)
+                    finally:
+                        self._following_nav2_path = False
+                    if self._stopping_refusal is not None:
+                        # The control tick holds the base at zero; Nav2 must stop before the caller may search this
+                        # controller's own route from the measured pose.
+                        if not future.done():
                             self._wait_motion_future(handle.cancel_goal_async(), goal_handle, 5.0)
                             self._wait_motion_future(future, goal_handle, 5.0)
-                            intermediate_handoff = True
-                            break
-                        self._publish_base_feedback(goal_handle, target)
-                        time.sleep(self.control_period)
+                        raise FollowPathAborted(f"KMR path execution stopped: {self._stopping_refusal}")
                     self._check_motion(goal_handle)
                     response = future.result()
                     if response is None:
@@ -2111,8 +2151,9 @@ def main() -> None:
                     if self._route_clearance is not None:
                         raise
                     # MPPI scores its own samples against its own costmap, so it can find no trajectory along a
-                    # lattice path this controller accepted. Brake, then search this controller's constant-heading
-                    # route from the measured pose; that route is sent once and its abort is final.
+                    # lattice path this controller accepted, or steer where this controller's stopping check refuses
+                    # to go. Brake, then search this controller's constant-heading route from the measured pose; that
+                    # route is sent once and its abort is final.
                     self.get_logger().warning(f"{exc}; searching a constant-heading KMR route")
                     self._path_speed_limit = None
                     self._nav_goal_handle = None

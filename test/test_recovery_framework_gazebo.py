@@ -1765,6 +1765,32 @@ def test_kmr_stop_does_not_refresh_commands_or_resume_cancellation(
             assert node._cancel_base_motion_requested
             assert canceled == [True, True]
 
+            # While Nav2 follows a path this controller sent, the same refusal holds the base at zero and is handed
+            # to the path follower, which stops Nav2 itself; the base action stays open.
+            node._cancel_base_motion_requested = False
+            node._base_abort_reason = None
+            node._navigation_active = True
+            node._following_nav2_path = True
+            node._nav_command_cb(Twist())
+            node._control_tick()
+            assert node._stopping_refusal == 'KMR stopping footprint intersects an obstacle or map is unavailable'
+            assert not node._cancel_base_motion_requested and node._base_abort_reason is None
+            assert canceled == [True, True]
+            assert (outputs[-1].linear.x, outputs[-1].linear.y, outputs[-1].angular.z) == (0.0, 0.0, 0.0)
+            node._odom_velocity = (0.0, 0.0, 0.0)
+            node._nav_command_cb(command)
+            node._control_tick()
+            assert (outputs[-1].linear.x, outputs[-1].linear.y, outputs[-1].angular.z) == (0.0, 0.0, 0.0)
+            # Without a map no route can be searched, so the refusal still ends the base action.
+            node._stopping_refusal = None
+            node._occupancy_map = None
+            node._nav_command_cb(command)
+            node._control_tick()
+            assert node._cancel_base_motion_requested and node._stopping_refusal is None
+            assert canceled == [True, True, True]
+            node._following_nav2_path = False
+            node._occupancy_map = _kmr_test_map(previous_machine_bounds=True)
+
             node._base_abort_reason = None
             node._cancel_base_motion_requested = False
             node._last_velocity_stamp = 200.
@@ -3848,7 +3874,8 @@ def test_kmr_recovery_state_retains_global_activity_with_closed_owned_gate():
     assert row['occupancy_map'] is None
 
 
-@pytest.mark.parametrize('failure', [None, 'cancel_timeout', 'nav2_aborted', 'blocked_connector', 'stale'])
+@pytest.mark.parametrize('failure', [None, 'cancel_timeout', 'nav2_aborted', 'blocked_connector', 'stale',
+                                     'stopping_refusal'])
 def test_kmr_intermediate_stall_stops_nav2_before_checked_connection(failure):
     """Recover the observed 11 cm stall without accepting an unchecked endpoint."""
     import ast
@@ -3894,6 +3921,10 @@ def test_kmr_intermediate_stall_stops_nav2_before_checked_connection(failure):
     def check(_goal):
         if failure == 'stale' and clock[0] >= .5:
             raise ValueError('KMR odometry is stale')
+        if failure == 'stopping_refusal' and clock[0] >= .3:
+            # The control tick refuses only while Nav2 follows this controller's path.
+            assert node._following_nav2_path
+            node._stopping_refusal = 'KMR stopping footprint intersects an obstacle or map is unavailable'
         return pose[0]
 
     def align(finish, _goal, _index, **kwargs):
@@ -3936,11 +3967,15 @@ def test_kmr_intermediate_stall_stops_nav2_before_checked_connection(failure):
                  str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
     goal = SimpleNamespace(request=MoveGoal())
     if failure:
-        expected = (kmr_base.FollowPathAborted if failure == 'nav2_aborted'
+        expected = (kmr_base.FollowPathAborted if failure in {'nav2_aborted', 'stopping_refusal'}
                     else (TimeoutError, ValueError, RuntimeError))
-        with pytest.raises(expected):
+        with pytest.raises(expected) as raised:
             namespace['_run_base_path'](node, route, goal)
         assert 'checked_connection' not in events
+        if failure == 'stopping_refusal':
+            # Nav2 is stopped before the refusal reaches the caller's constant-heading route search.
+            assert events == ['cancel', 'nav2_stopped'] and not node._following_nav2_path
+            assert 'stopping footprint' in str(raised.value)
     else:
         namespace['_run_base_path'](node, route, goal)
         assert events[:5] == ['cancel', 'nav2_stopped', 'stop', 'braked', 'checked_connection']

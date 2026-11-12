@@ -250,6 +250,14 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   Return from the same pose succeeded (472 s). Not the composition and not model growth: each grown cycle repeats this
   Return, so a full run makes it four times. The runner's `observed.base_pose` for a failed KMR event is the last
   successful step's cached pose, not a live read. Frames: `/home/jongh/recovery_review_1030/model_growth_20261111/b5_return_frames/`.
+- KMR base controller fix (user: "fix the controller"): while Nav2 follows a path the controller sent, its stopping
+  check no longer ends the base action. It holds the base at zero, the path follower stops Nav2 and raises
+  `FollowPathAborted`, and a coordinate move searches the controller's constant-heading route from the measured pose
+  once, as after Nav2's own abort; an abort on that route stays final. Its own rotations and alignments, a missing map,
+  the RViz goal and the FollowPath pass-through still abort. No place, resource or scenario names. Tests: the control
+  tick refusal, hold and no-map abort, and the follower's hand-off (`stopping_refusal` case). Installed with
+  `make bootstrap-gazebo`; the controller's source hash changes, which only the old evaluation-capture CLI compares
+  with the current file.
 
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.
