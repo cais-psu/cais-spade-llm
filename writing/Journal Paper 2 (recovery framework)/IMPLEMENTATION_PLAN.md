@@ -155,6 +155,35 @@ generalized"; work on Opus 5.5). Each checkpoint is one commit; revert to the on
   its first accepted event's stated start state (KMR idle, empty, at Storage); (3) a resting blocked pass with parts
   left and the runtime not stopped is negotiated again (at most 12 times, logged in `report.json` `rearms`). Gazebo
   queue item 124.
+- Regression (before/after worktrees, 22 suites that touch the changed code): 141 failed at `c316865`, 140 at
+  `1d97921`, none newly failing; the one difference is a test that passes now.
+- Gazebo run B, 2026-11-12 00:45–00:48: STOPPED at startup, before production. gzserver never offered `/spawn_entity`
+  (the robots were not spawned; "Waiting for core services: /compute_cartesian_path, /ATTACHLINK, /DETACHLINK"). Cause:
+  no X display. WSLg's X server has not run since the WSL restart of 2026-11-10 20:50 (`/tmp/.X11-unix` empty); with
+  `DISPLAY=:0` and no socket the X library falls back to TCP and hangs, so gzserver hung instead of failing. The cell's
+  cameras (`verify_camera`, `gazebo_camera_detector`) and the recorder (an X window grab) need a display; gzserver alone
+  starts without one. Installing Xvfb in user space was refused by the safety classifier. The launcher now checks the
+  display with a 10 s timeout and refuses with a clear message, and starts Xvfb itself if it is installed.
+  To run it: either restart WSL from an interactive Windows session (`wsl --shutdown`, then open Ubuntu) so WSLg comes
+  back with GPU rendering (then restart the `SchoolWslKeepAlive` task for the SSH chain), or `sudo apt install xvfb`
+  (software rendering, slower); then `tmux new -s growth_run_b2 "bash <gazebo_runs>/run_growth_b.sh growth_run_b2"` (it runs from the
+  `61db38c` worktree).
+- `afb7827` checkpoint 4: the added events' executor records its start, end and step seconds; two tests run the accepted
+  Retrieve and Deliver programs for KET8 through a scripted primitive interface (11 tests pass).
+- Independent review (three lenses, every finding checked again by a skeptic): eight findings, all confirmed, none
+  triggered by the ur5e-1 demonstration. `61db38c` checkpoint 5 makes each a refusal with its reason in the growth
+  report: a name already used by an event of the models or a `resource_state` value (the runtime binds by name; also a
+  second added event of one name); part values the added event would not carry (`current_process`,
+  `processCompleted`); a per-part value of the actor that cannot be bound to its part (the actor's own fields now take
+  the `{part_name}` template); a stated start that leaves out a field an earlier accepted event changed. The neighbour
+  lookup skips copies the growth added. 15 tests pass. Gate (e) after the fixes: ur5e-1 unchanged (3 KMR events added);
+  Conveyor breakdown adds 1 (ur5e-1's tray place), Machining 1 (the KMR's load into M2), Part slippage 1 (ur5e-3's
+  pick of the dropped gear), each left-out event with its reason. Offline run B after the fixes: 11/11 (one run needed
+  one re-arm at 7/11; one run finished all 11 parts with the outcome left `blocked` by a stale intake search).
+- Runner stage 2 (`.stage2_review`): a re-arm publishes the session status again so the final outcome is recorded
+  (review finding); each recovery event records its start for the video's recovery lane. Launcher and frozen worktree
+  now at `61db38c` (`/home/jongh/recovery_review_1030/wt_growth_run_61db38c`). Video builder ready, untested on run B
+  output: `/home/jongh/recovery_review_1030/rcim_video_build/talk/growth_video.py <run folder>`.
 
 ## Recovery UI and appendix set — November 9, 2026 — Study 2 video picks retained (user go "yes do it")
 
