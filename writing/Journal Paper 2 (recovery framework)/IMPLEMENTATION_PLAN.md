@@ -272,6 +272,13 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   failing; the one difference is the new `stopping_refusal` case, which passes. At `ab33aa5` the controller suites:
   720 passed, 2 failed (the safety files deleted in `c40aba2`, failing before). Next growth run: worktree
   `/home/jongh/recovery_review_1030/wt_growth_run_ab33aa5`, launcher `gazebo_runs/run_growth_b.sh`; not started.
+- Short Gazebo test at `ab33aa5` (user: "short test"; no production, no recording, no window): the KMR base controller
+  alone, sent run b5's goals (M1 dock, Deliver with its waypoints, Return to Storage), 3 cycles. 9 of 9 drives reached
+  their poses: Return 283, 239 and 231 s; Deliver 405-465 s (b5 recorded: 1917 s). The stopping check never fired, so
+  the fallback was not exercised live; it is covered by the tests and the offline probe. The b5 stop happened at a
+  real-time factor near 0.05 with recording; this test ran faster. Script and results:
+  `/home/jongh/recovery_review_1030/model_growth_20261111/controller_fix/` (`fallback_drive_test.py`, `gazebo_test_3/`;
+  attempts 1 and 2 failed on the script's launch environment and goal handling, not the KMR).
 
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.
