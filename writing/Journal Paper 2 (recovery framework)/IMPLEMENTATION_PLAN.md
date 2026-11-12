@@ -102,8 +102,10 @@ call: the accepted composition `composition_3075cbc4…` (outline `draft_6f500c9
    rule monitors. The user's go is needed before the first Gazebo start.
 5. Phase 4, video: footage beside the "Resources at work" chart (ur5e-1 red from the failure, the KMR's M1→Conveyor
    trips in their own colour, a recovery lane, a parts counter); end card "With recovery: 11/11 in T_B" (plus "No
-   recovery: x/11" only if run C is made); caption states the CCA bypass, that Eq. 6 is not claimed for the 11-part
-   order, and that model growth is beyond the paper's evaluated framework.
+   recovery: x/11" only if run C is made). The video does not mention the CCA bypass (user, November 12: "dont say
+   this in the video caption"); the bypass stays recorded here and in PAPER_FRAMEWORK.md. Whether the video says that
+   Eq. 6 is not claimed for the 11-part order and that model growth is beyond the paper's evaluated framework is the
+   user's call before the video is built.
 
 Risks: a KMR deadlock (it brings the next square peg to M1 while M1 holds a finished one); the KMR not idle at Storage
 when ur5e-1 fails (the first KMR event's start state); bigger pegs at the M1 fixture; KMR navigation; assembly-order
