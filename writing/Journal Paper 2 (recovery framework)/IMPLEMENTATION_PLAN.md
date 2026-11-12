@@ -135,6 +135,26 @@ generalized"; work on Opus 5.5). Each checkpoint is one commit; revert to the on
   in flight); seed 2 because a search for KET12 overlapped an unrelated commit and was never negotiated again (in that
   final state the KMR's own alternatives offer Retrieve FEASIBLE; the same seed later completed 11/11). The Gazebo
   runner therefore re-arms a blocked pass (the resume statements, logged) and must not freeze other resources' work.
+- RA probe (overnight scout, scratchpad `overnight/ra_probe`): `ra_feasibility.check_event` and `cca_safety.check_event`
+  accept Retrieve and Deliver re-bound to KET8, KET12 and KET16 at M1's fixture (FEASIBLE, SAFE); every part-dependent
+  number equals KET4's within micrometres (all four square pegs are 50 mm tall with the origin on the bottom face). The
+  accepted `part_order` 0 is refused when a part is ahead ("finds Conveyor's part_order.<P> 1, not 0"), which is why the
+  Conveyor's own calculation gives the order.
+- Scheduler behaviour (overnight scout): a finished square peg in M1 gets an 11-task path (Retrieve, Deliver, belt,
+  Buffer, ur5e-3); after Deliver the KMR's resource goal has the single bid Return; the KMR-holds-a-peg deadlock is
+  unreachable (intake offers a machine only while its `part_name` is None). Two pre-existing scheduler behaviours, not
+  changed: a lost wakeup in `work()` (a commit between a search returning and its processing marks the goal attempted at
+  the newer revision), and intake starving the round pegs while any square peg waits (`complete_job` offers are not
+  projected, so M2 offers square pegs).
+- Gazebo runner `gazebo_runs/throughput_run.py` (gitignored beside `diag_run.py`; stage backups `.stage0_scout`,
+  `.stage1_quiet_failure`). Stage 1 (runner-only): (1) no new frozen capture at the failure: the ur5e-1 trigger's capture
+  wants every other machine still trimming, but under the 11-part order M2 is empty when KET4 is finished (round pegs
+  wait for the square pegs), so `capture_machine_checkpoint` is skipped and the trigger stops the cell as for every
+  other scenario; (2) a quiet failure moment: from the checkpoint only ur5e-1's next task is held, and the trigger fires
+  at the first acknowledgement after which nothing is in flight and each resource acting in the accepted recovery is in
+  its first accepted event's stated start state (KMR idle, empty, at Storage); (3) a resting blocked pass with parts
+  left and the runtime not stopped is negotiated again (at most 12 times, logged in `report.json` `rearms`). Gazebo
+  queue item 124.
 
 ## Recovery UI and appendix set — November 9, 2026 — Study 2 video picks retained (user go "yes do it")
 
