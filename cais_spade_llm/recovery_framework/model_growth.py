@@ -203,8 +203,8 @@ def grow_runtime(runtime, composition: dict, observations: dict) -> dict:
 def bind_executors(runtime, composition: dict, report: dict) -> list[dict]:
     """Bind an executor that runs the accepted composition's steps to each added event.
 
-    The steps run on the acting resource's own primitive interface. Only a resource whose agent offers
-    ``kmr_primitives`` is driven here; another resource's added event is reported without an executor.
+    The steps run on the acting resource's own primitive interface, whichever resource it is
+    (``_primitive_interface``). An added event of a resource whose agent offers none is reported without an executor.
 
     Args:
         runtime: The live ``EnvironmentRuntime``.
@@ -219,26 +219,97 @@ def bind_executors(runtime, composition: dict, report: dict) -> list[dict]:
     rows = []
     for added in report["added"]:
         rid, name = added["resource_id"], added["event_name"]
-        agent = agents.get(rid)
-        if agent is None or getattr(agent, "kmr_primitives", None) is None:
+        interface = _primitive_interface(agents.get(rid))
+        if interface is None:
             rows.append({"event_name": name, "resource_id": rid, "bound": False,
-                         "reason": f"{rid}'s agent has no primitive interface this executor drives"})
+                         "reason": f"{rid}'s agent offers no interface that runs one primitive of a composed program"})
             continue
         program = programs[added["outline_id"]]
         runtime.context.resources[rid].bind_executor(
-            name, _composed_executor(agent, added, program), _completed, validate_start=_ready)
-        rows.append({"event_name": name, "resource_id": rid, "bound": True})
+            name, _composed_executor(interface, added, program), _completed, validate_start=_ready)
+        rows.append({"event_name": name, "resource_id": rid, "bound": True, "interface": type(interface).__name__})
     return rows
+
+
+class _WorkerPrimitives:
+    """Primitives of an agent that sends each one to its own worker with the task's parameters."""
+
+    def __init__(self, agent) -> None:
+        self.agent = agent
+
+    def begin(self, task: dict, bindings: dict) -> None:
+        """Name the task's part and places on every request of this program."""
+        self.agent.kmr_primitives.task_parameters = bindings
+
+    def end(self) -> None:
+        """Clear the task's parameters after the program."""
+        self.agent.kmr_primitives.task_parameters = None
+
+    async def run(self, primitive: str, params: dict) -> dict:
+        """Run one primitive and return its output with ``success``."""
+        method = getattr(self.agent.kmr_primitives, primitive, None)
+        if method is None:
+            return {"success": False, "message": f"the resource has no primitive {primitive}"}
+        return await method(**params)
+
+    def attachment(self) -> dict | None:
+        """Return the resource's current attachment evidence, or None."""
+        return getattr(self.agent, "workflow_custody", None)
+
+
+class _ControllerPrimitives:
+    """Primitives of an agent that runs each one on its own controller, one motion at a time."""
+
+    def __init__(self, agent) -> None:
+        self.agent = agent
+
+    def begin(self, task: dict, bindings: dict) -> None:
+        """Name the task and its part on the controller, as the resource's nominal executor does."""
+        controller = self.agent._controller
+        controller._simulation_task_id = task["task_id"]
+        controller._simulation_task_run_id = task.get("run_id")
+        controller._simulation_task_part = bindings.get("part_name")
+        controller._simulation_fault_request = None
+        controller._simulation_fault_evidence = None
+
+    def end(self) -> None:
+        """Nothing is kept on the controller after the program."""
+
+    async def run(self, primitive: str, params: dict) -> dict:
+        """Run one primitive and return its output with ``success``."""
+        lock = self.agent._robot_motion_lock
+        if not lock.acquire(blocking=False):
+            return {"success": False, "message": "the resource already has an active motion"}
+        try:
+            return await self.agent._execute_primitive(primitive, params)
+        finally:
+            lock.release()
+
+    def attachment(self) -> dict | None:
+        """This interface reports no attachment evidence; a program that reads it is refused at that step."""
+        return None
+
+
+def _primitive_interface(agent):
+    """Return how an agent runs one primitive of a composed program, or None when it offers no such interface."""
+    if agent is None:
+        return None
+    if getattr(agent, "kmr_primitives", None) is not None:
+        return _WorkerPrimitives(agent)
+    if callable(getattr(agent, "_execute_primitive", None)) and getattr(agent, "_controller", None) is not None:
+        return _ControllerPrimitives(agent)
+    return None
 
 
 def composed_step_parameters(program: dict, index: int, part: str | None, live: dict, evidence: dict | None) -> dict:
     """Return one composed step's parameters for this use of the event.
 
     Numbers the accepted composition resolved stay as it saved them, except the values that execution itself
-    produces: a reference to an event fact (``/event_facts/...``) written by one of the program's own calculation
-    steps takes that step's output from this run, and a reference to the acting resource's attachment evidence
+    produces: a reference to an event fact written by one of the program's own calculation steps takes that step's
+    output from this run, and a reference to the acting resource's attachment evidence
     (``/resources/<jid>/resource_evidence/attachment/...``) takes the resource's current attachment. A literal equal
-    to the event's own part names this use's part.
+    to the event's own part names this use's part. References are read in both notations the composition accepts
+    (``/a/b`` and ``a.b``).
 
     Args:
         program: The accepted composition's row for the event.
@@ -254,25 +325,26 @@ def composed_step_parameters(program: dict, index: int, part: str | None, live: 
         ValueError: A referenced live value is not available.
     """
     authored = program["primitive_steps"][index].get("params") or {}
-    trace = program["composition_validation"]["trace"][index]
-    saved = trace.get("resolved_params") or {}
-    attachment = f"/resources/{program['resource_jid']}/resource_evidence/attachment/"
-    facts = {_fact_reference(row["event_fact_path"]): row["event_fact_path"]
-             for row in program["composition_validation"]["trace"] if row.get("event_fact_path")}
+    saved = program["composition_validation"]["trace"][index].get("resolved_params") or {}
+    facts = _calculated_facts(program)
+    attachment = _attachment_tokens(program)
 
     def value(written: Any, resolved: Any) -> Any:
         if isinstance(written, dict) and isinstance(written.get("context_ref"), str):
             reference = written["context_ref"]
-            for prefix, path in facts.items():
-                if reference.startswith(prefix + "/"):
+            tokens = _reference_tokens(reference)
+            for fact, path in facts:
+                if tokens[:len(fact)] == fact:
                     if path not in live:
                         raise ValueError(f"{reference} is read before its calculation step ran")
-                    return _walk(live[path], reference[len(prefix) + 1:], reference)
-            if reference.startswith(attachment):
+                    return _walk(live[path], tokens[len(fact):], reference)
+            if tokens[:len(attachment)] == attachment:
                 if not evidence:
                     raise ValueError(f"{reference} has no current attachment evidence")
-                return _walk(evidence, reference[len(attachment):], reference)
+                return _walk(evidence, tokens[len(attachment):], reference)
             return deepcopy(resolved)
+        if isinstance(written, dict) and isinstance(resolved, dict):
+            return {key: value(written.get(key), item) for key, item in resolved.items()}
         if isinstance(written, list) and isinstance(resolved, list) and len(written) == len(resolved):
             return [value(item, saved_item) for item, saved_item in zip(written, resolved, strict=True)]
         if part is not None and program.get("part_name") is not None and written == program["part_name"]:
@@ -282,8 +354,28 @@ def composed_step_parameters(program: dict, index: int, part: str | None, live: 
     return {name: value(authored.get(name), resolved) for name, resolved in saved.items()}
 
 
-def _composed_executor(agent, added: dict, program: dict):
-    primitives = agent.kmr_primitives
+def unreadable_part_facts(program: dict) -> list[str]:
+    """Return the references of a program that name its part and cannot be read again for another part.
+
+    A reference to one of the program's own calculation outputs or to the acting resource's attachment evidence is
+    read again on each use. Any other reference that names the event's part was resolved once, for that part, from
+    the facts served to the composition; an added event has no way to read it for the part of a later use.
+    """
+    part = program.get("part_name")
+    if part is None:
+        return []
+    facts, attachment = _calculated_facts(program), _attachment_tokens(program)
+    found = []
+    for step in program["primitive_steps"]:
+        for reference in _references(step.get("params")):
+            tokens = _reference_tokens(reference)
+            if (part in tokens and tokens[:len(attachment)] != attachment
+                    and not any(tokens[:len(fact)] == fact for fact, _ in facts) and reference not in found):
+                found.append(reference)
+    return found
+
+
+def _composed_executor(interface, added: dict, program: dict):
     steps = program["primitive_steps"]
     trace = program["composition_validation"]["trace"]
     if [step["primitive"] for step in steps] != [row["primitive"] for row in trace]:
@@ -300,26 +392,22 @@ def _composed_executor(agent, added: dict, program: dict):
         def evidence(reason: str | None = None) -> dict:
             observations = {"primitive_results": rows, "started_at_unix": started, "completed_at_unix": time.time()}
             if reason is None:
-                observations["custody"] = deepcopy(getattr(agent, "workflow_custody", None))
+                observations["custody"] = deepcopy(interface.attachment())
             return {"status": "completed" if reason is None else "failed", "resource_id": task["resource_id"],
                     "event_name": task["event_name"], "task_id": task["task_id"], "observations": observations,
                     **({} if reason is None else {"reason": reason})}
 
-        primitives.task_parameters = bindings
+        interface.begin(task, bindings)
         try:
             for index, step in enumerate(steps):
                 try:
-                    params = composed_step_parameters(program, index, part, live,
-                                                      getattr(agent, "workflow_custody", None))
+                    params = composed_step_parameters(program, index, part, live, interface.attachment())
                 except ValueError as exc:
                     rows.append({"index": index, "primitive": step["primitive"], "success": False,
                                  "message": str(exc)})
                     return evidence(f"step {index}: {exc}")
-                method = getattr(primitives, step["primitive"], None)
-                if method is None:
-                    return evidence(f"step {index}: no {step['primitive']}")
                 began = time.time()
-                output = await method(**params)
+                output = await interface.run(step["primitive"], params)
                 rows.append({"index": index, "primitive": step["primitive"], "params": params,
                              "seconds": round(time.time() - began, 1),
                              "success": output.get("success") is True, "message": output.get("message")})
@@ -329,7 +417,7 @@ def _composed_executor(agent, added: dict, program: dict):
                 if output.get("success") is not True:
                     return evidence(f"step {index} {step['primitive']}: {output.get('message')}")
         finally:
-            primitives.task_parameters = None
+            interface.end()
         return evidence()
 
     return execute
@@ -355,6 +443,9 @@ def _activity(models: dict, event: dict, program: dict | None, actor: str, names
     """
     if program is None:
         raise GrowthRefusal("the accepted composition has no program for it")
+    if unreadable := unreadable_part_facts(program):
+        raise GrowthRefusal(f"its program reads {unreadable}, facts of its part that an added event cannot read "
+                            "again for another part")
     part = event.get("part_name")
     start_state = event.get("expected_start_state") or {}
     end_state = event.get("expected_end_state") or {}
@@ -622,12 +713,34 @@ def _owned(copy: dict) -> dict:
             if key in copy}
 
 
-def _fact_reference(path: str) -> str:
-    return "/" + path.replace(".", "/", 2)
+def _references(value: Any) -> list[str]:
+    """Return every reference an authored parameter value holds."""
+    if isinstance(value, dict):
+        if isinstance(value.get("context_ref"), str):
+            return [value["context_ref"]]
+        return [reference for item in value.values() for reference in _references(item)]
+    if isinstance(value, list):
+        return [reference for item in value for reference in _references(item)]
+    return []
 
 
-def _walk(value: Any, path: str, reference: str) -> Any:
-    for token in path.split("/") if path else []:
+def _reference_tokens(reference: str) -> list[str]:
+    """Split a reference as ``resolve_composition_value`` does: by ``/`` when it starts with one, else by ``.``."""
+    return reference[1:].split("/") if reference.startswith("/") else reference.split(".")
+
+
+def _calculated_facts(program: dict) -> list[tuple[list[str], str]]:
+    """Return the event facts the program's own calculation steps write, as reference tokens with their path."""
+    return [(row["event_fact_path"].split(".", 2), row["event_fact_path"])
+            for row in program["composition_validation"]["trace"] if row.get("event_fact_path")]
+
+
+def _attachment_tokens(program: dict) -> list[str]:
+    return ["resources", program["resource_jid"], "resource_evidence", "attachment"]
+
+
+def _walk(value: Any, tokens: list[str], reference: str) -> Any:
+    for token in tokens:
         if isinstance(value, dict) and token in value:
             value = value[token]
         elif isinstance(value, list) and token.isdigit() and int(token) < len(value):

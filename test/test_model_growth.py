@@ -305,7 +305,8 @@ class _ScriptedPrimitives:
 
 def _run_event(agent, composition: dict, outline_id: str, places: dict) -> tuple[dict, dict]:
     program = next(row for row in composition["accepted_primitive_program"] if row["outline_id"] == outline_id)
-    execute = model_growth._composed_executor(agent, {"outline_id": outline_id, "places": places}, program)
+    execute = model_growth._composed_executor(model_growth._primitive_interface(agent),
+                                              {"outline_id": outline_id, "places": places}, program)
     task = {"resource_id": "KMR", "event_name": program["event_name"], "task_id": f"task-{outline_id}",
             "parameters": {"part_name": LATER_PART}}
     return task, asyncio.run(execute(task))
@@ -415,3 +416,77 @@ def test_a_second_event_at_the_same_place_copies_the_owners_own_entry_again():
                                   {**take, "event_name": "Take the round peg out of M2 again"}], values)
     copied = [row["copied_from"]["M2"] for row in report["added"] if row["resource_id"] == "KMR"]
     assert len(copied) == 2 and copied[0] == copied[1]
+
+
+def _controller_agent(outputs: dict):
+    """An agent with a robot's primitive interface: one controller, one motion at a time."""
+    calls: list[tuple] = []
+
+    async def execute_primitive(primitive: str, params: dict) -> dict:
+        calls.append((primitive, params))
+        return {"success": True, **deepcopy(outputs.get(primitive, {}))}
+
+    agent = SimpleNamespace(_controller=SimpleNamespace(), _robot_motion_lock=threading.Lock(),
+                            _execute_primitive=execute_primitive)
+    return agent, calls
+
+
+def _place_program(reference: str) -> dict:
+    """A two-step program: calculate the place targets, then move to a referenced coordinate of them."""
+    return {"outline_id": "SYNTHETIC", "event_name": "Put the part on the tray", "part_name": "KET4_Square_4mm",
+            "resource_jid": "synthetic-robot@localhost",
+            "primitive_steps": [
+                {"primitive": "compute_place_targets", "params": {"part_name": "KET4_Square_4mm"}},
+                {"primitive": "move_cartesian", "params": {"x": {"context_ref": reference}}}],
+            "composition_validation": {"trace": [
+                {"primitive": "compute_place_targets", "resolved_params": {"part_name": "KET4_Square_4mm"},
+                 "event_fact_path": "event_facts.place_targets.KET4_Square_4mm"},
+                {"primitive": "move_cartesian", "resolved_params": {"x": 0.25}}]}}
+
+
+@pytest.mark.parametrize("reference", ["/event_facts/place_targets/KET4_Square_4mm/approach_pose/x",
+                                       "event_facts.place_targets.KET4_Square_4mm.approach_pose.x"])
+def test_a_controller_resource_runs_an_added_event_with_this_runs_values(reference):
+    agent, calls = _controller_agent({"compute_place_targets": {"approach_pose": {"x": 0.75}}})
+    interface = model_growth._primitive_interface(agent)
+    assert type(interface).__name__ == "_ControllerPrimitives"
+    execute = model_growth._composed_executor(interface, {"outline_id": "SYNTHETIC", "places": {}},
+                                              _place_program(reference))
+    task = {"resource_id": "robot", "event_name": "Put the part on the tray", "task_id": "task-1", "run_id": "run-1",
+            "parameters": {"part_name": LATER_PART}}
+    evidence = asyncio.run(execute(task))
+    assert model_growth._completed(task, evidence) is True
+    assert calls == [("compute_place_targets", {"part_name": LATER_PART}), ("move_cartesian", {"x": 0.75})]
+    assert (agent._controller._simulation_task_id, agent._controller._simulation_task_part) == ("task-1", LATER_PART)
+    assert agent._robot_motion_lock.locked() is False
+
+
+def test_a_step_is_refused_when_this_runs_calculation_lacks_the_fact_it_reads():
+    agent, calls = _controller_agent({"compute_place_targets": {"place_tcp_z": 1.0}})
+    execute = model_growth._composed_executor(
+        model_growth._primitive_interface(agent), {"outline_id": "SYNTHETIC", "places": {}},
+        _place_program("/event_facts/place_targets/KET4_Square_4mm/approach_pose/x"))
+    task = {"resource_id": "robot", "event_name": "Put the part on the tray", "task_id": "task-1",
+            "parameters": {"part_name": LATER_PART}}
+    evidence = asyncio.run(execute(task))
+    assert evidence["status"] == "failed" and "is not in this run's output" in evidence["reason"]
+    assert [name for name, _ in calls] == ["compute_place_targets"]
+
+
+def test_a_busy_controller_fails_the_step_and_an_agent_without_an_interface_gets_no_executor():
+    agent, _ = _controller_agent({})
+    agent._robot_motion_lock.acquire()
+    output = asyncio.run(model_growth._primitive_interface(agent).run("move_cartesian", {"x": 0.0}))
+    assert output == {"success": False, "message": "the resource already has an active motion"}
+    assert model_growth._primitive_interface(SimpleNamespace()) is None
+    assert model_growth._primitive_interface(None) is None
+
+
+def test_a_program_reading_a_fact_of_its_part_it_cannot_read_again_is_left_out():
+    program = _place_program("/event_facts/place_targets/KET4_Square_4mm/approach_pose/x")
+    assert model_growth.unreadable_part_facts(program) == []
+    program["primitive_steps"].append(
+        {"primitive": "grasp_part", "params": {"model_name": {"context_ref": "/parts/KET4_Square_4mm/target/model_name"},
+                                               "transform": {"context_ref": "/resources/synthetic-robot@localhost/"
+                                                                            "resource_evidence/attachment/grasp_transform"}}})
+    assert model_growth.unreadable_part_facts(program) == ["/parts/KET4_Square_4mm/target/model_name"]
