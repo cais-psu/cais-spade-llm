@@ -186,6 +186,19 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   under "No hidden rules in recovery events". Do not add to what stays. A
   change to `expected_start_state` or `condition_changes` stops saved outlines
   loading, so check that before freezing code for a run.
+- One narrow exception (user decision, 2026-11-11), for the supplementary
+  model-growth demonstration only: after an accepted recovery has run, the
+  KMR's accepted events of the ur5e-1 breakdown recovery may be added to its
+  model, and the scheduler binds the part of each later use, as it does for
+  every nominal event. Every other value of the KMR stays as the LLM stated
+  it. M1 and the Conveyor take part by their own declared models, as they do
+  for ur5e-1's pick at M1 and place at loading position 1 (their conditions,
+  and the Conveyor's order of the part on the belt, which the accepted event
+  stated for an empty belt). Each use is checked again (RA Eq. 12 for that
+  part, CCA Eq. 13). The added events keep the LLM's names and content; do
+  not replace them with nominal tasks at new places. It does not apply to
+  outline or composition checks, or to any value of a proposed event.
+  Definition: PAPER_FRAMEWORK.md, "Model growth after recovery".
 
 ## Comments and docstrings
 

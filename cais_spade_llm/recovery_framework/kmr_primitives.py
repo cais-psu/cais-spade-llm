@@ -18,6 +18,9 @@ class KMRPrimitives:
 
     def __init__(self, agent) -> None:
         self.agent = agent
+        # Parameters of the task whose program is running: sent with each primitive request, so the worker names
+        # the task's part and places as it does for a nominal task. None outside such a program.
+        self.task_parameters: dict | None = None
 
     async def _call(self, primitive: str, parameters: dict) -> dict:
         agent = self.agent
@@ -56,6 +59,8 @@ class KMRPrimitives:
         if runtime is not None and runtime.stopped:
             return {'success': False, 'message': 'KMR execution is stopped'}
         request.update(mode='primitive', primitive=primitive, primitive_parameters=parameters)
+        if self.task_parameters:
+            request['function_parameters'] = deepcopy(self.task_parameters)
         agent._kmr_execution_request = deepcopy(request)
         try:
             result = await agent.worker.run(request)

@@ -491,6 +491,48 @@ Edits still to write into the paper from earlier reviews are recorded above: the
 (October 24–26), nonblocking validation (October 25), Eq. 13 under uncontrollable events (October
 26), the definition of "connected to the remaining product plan", and the termination wording.
 
+## Model growth after recovery (supplementary demonstration; approved by the user, November 11, 2026)
+
+Not part of the paper's evaluated framework or results. It serves only the supplementary throughput
+video: ur5e-1 breakdown with the 11-part order. Plan and status: IMPLEMENTATION_PLAN.md, "Model growth
+after recovery".
+
+- What: after an accepted recovery has run, the accepted events of resources that keep working are added
+  to their models, $G_i \leftarrow G_i^R$, and the scheduler may use them for later parts. In the ur5e-1
+  breakdown these are the KMR's three events of `composition_3075cbc4…`: retrieve the completed part at
+  M1, deliver it to Conveyor loading position 1, return to Storage. ur5e-1's retract is not added: it
+  acts on the failed resource.
+- Values: the scheduler binds the part, as for every nominal event. Every other value of the KMR stays as
+  the LLM stated it (base pose, conveyor slot, named poses). Each added event keeps the accepted event's
+  name and runs the composition's primitive steps; only the references to KET4 (pick targets, grasped
+  part) refer to the task's part. The KMR's conditions come from the accepted event's stated start and
+  end states and from the declared primitive preconditions (for example, a free place target), never
+  from a new rule.
+- Shared events (user decision, November 11): an added event is the KMR's side only. M1 and the Conveyor
+  take part by their own declared models, exactly as they do when ur5e-1 picks at M1 and places at
+  loading position 1. M1 has completed that part. The Conveyor is idle with the loading position free,
+  reserves it for the place, and records where the part lands in its order. The accepted event stated
+  the Conveyor's order of KET4 as 0, which held because the belt was empty at that moment
+  (`capture_4f9097aa…`); on a later use the Conveyor's declared order calculation gives the number, as
+  for every robot's load. What the accepted event stated for M1 and the Conveyor belongs to a stopped
+  cell at one moment and is not copied. AGENTS.md records the part binding and this as the one exception
+  to "No hidden rules in recovery events".
+- Rejected (user, November 11): adding M1 and the Conveyor as places of the KMR's nominal tasks
+  (`pick_part`, `place_release`) in place of the accepted events. An event is its content (conditions,
+  changes, primitive program) and its name is a label; the KMR's content must stay the LLM's.
+- Checks on every use: RA feasibility (Algorithm 1, Eq. 12) for that part, since only KET4 was verified,
+  and CCA admission (Eq. 13).
+- Eq. 6 after growth: the remaining production uses nominal and added events,
+  $\exists s_N\in(E\cup E^R)^*: s_F s^R s_N\in L_m(G^R)$. It is not claimed for the 11-part order: the
+  check passes 400,000 states with one more peg than the recovery's own end state (measurement in
+  IMPLEMENTATION_PLAN.md). A simulated scheduler run of the order stands in for it, and the video says so.
+- ur5e-1 stays out after the recovery: its own fault report says the gripper needs repair, and a nominal
+  event whose primitives cannot run on that state is not available (nonblocking section above).
+- Gazebo runs: run B (failure, recovery, growth, resume to completion) is the user's choice; run C
+  (failure, no recovery, resume with ur5e-1 out and no growth) is optional; run A (nominal baseline) is
+  later. The live CCA is bypassed as in
+  every paper Gazebo run, so each run's recorded events are replayed through the rule monitors afterwards.
+
 ## Scope guard for implementation
 
 - **Outline stage.** It proposes task-level recovery events and their end states, stated as

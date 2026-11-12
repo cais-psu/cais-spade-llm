@@ -1283,13 +1283,13 @@ def project_transition(
         )
     _apply_resource_effects(models, valuation, after, event, params,
                             defer_resource_guards=defer_resource_guards)
-    if (task["event_name"] == "place_release" + tasks.FINISH_SUFFIX
-            and params.get("destination_location") == "Conveyor"):
+    loading = _conveyor_loading_position(models, event)
+    if loading is not None:
         derived = conveyor_load_parameters(
             models["Conveyor"],
             valuation["Conveyor"],
             params["part_name"],
-            params["loading_position"],
+            loading,
         )
         after["Conveyor"].update(
             {field.removeprefix("next_"): value for field, value in derived.items()}
@@ -1325,6 +1325,21 @@ def project_transition(
             continue
         predicted[name].update(product_state_from_custody(name, owner, after[owner], product_name))
     return after, predicted
+
+
+def _conveyor_loading_position(models: dict, event: dict) -> str | None:
+    """Return the loading position at which an event's Conveyor side puts the event's part, or None.
+
+    Where a part comes to rest decides the belt order of every resident part (``conveyor_load_parameters``). It
+    applies to whichever event the Conveyor's own copy declares putting the part at a loading position, whatever the
+    acting resource's event is named.
+    """
+    if "Conveyor" not in event["participants"]:
+        return None
+    copy = next(entry for entry in models["Conveyor"]["events"] if entry["event_id"] == event["event_id"])
+    place = (copy["updates"].get("part_location.{part_name}") or {}).get("set")
+    positions = {row["loading_position"] for row in models["Conveyor"]["assignments"]["loading_positions"].values()}
+    return place if place in positions else None
 
 
 def finish_task(models: dict, task: dict) -> dict | None:

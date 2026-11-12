@@ -1,5 +1,114 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Model growth after recovery: throughput demonstration — November 11, 2026 — Phase 0 approved by the user; Phase 1 design settled with the user, no code yet; Phases 2–4 not started
+
+For the supplementary throughput video (advisor's request). ur5e-1's gripper fails at KET4 in M1 during the 11-part
+order; after the accepted recovery the KMR keeps its three recovery events and also carries KET8, KET12 and KET16 from
+M1 to the Conveyor, while ur5e-1 stays out. Nominal production cannot cover ur5e-1 on its own: the KMR's nominal model
+picks only at Storage, and the scheduler never plans `select_program` (a trim needs the machine's current program, so
+M2 stays on circle). Definition in PAPER_FRAMEWORK.md, "Model growth after recovery"; the exception in AGENTS.md. No LLM
+call: the accepted composition `composition_3075cbc4…` (outline `draft_6f500c9f…`) is reused unchanged.
+
+| Run | What | Status |
+|---|---|---|
+| B | Failure, accepted recovery, growth, ur5e-1 out, resume; target 11/11 | First (user: "i want b"), after Phase 1 |
+| C | Failure, no recovery; resume with ur5e-1 out and no growth; measures x/11 | Optional, one flag |
+| A | Nominal 11-part baseline on the current cell (the September 29 run predates the tray move) | Later (user) |
+
+1. Phase 0, definition: done November 11; the shared-event wording corrected the same day (below).
+2. Phase 1, offline: `recovery_framework/model_growth.py` and `test/test_model_growth.py`.
+   - Design (user, November 11): each added event is the KMR's side of the accepted event as the LLM stated it, under
+     the LLM's event name, with the part bound by the scheduler. M1 and the Conveyor take part by their own declared
+     models, as for ur5e-1's pick at M1 and place at loading position 1 (their conditions, the loading reservation, the
+     Conveyor's order of the part). The accepted event stated `part_order.KET4_Square_4mm = 0` for an empty belt; that
+     value and the rest of what it stated for M1 and the Conveyor are not copied. The added events run the accepted
+     composition's primitive steps on the KMR.
+   - Rejected by the user: adding M1 and the Conveyor as places of the KMR's nominal tasks. It replaces the LLM's
+     events with nominal ones; a name is a label, the content is the event.
+   - The growth reads the accepted outline and composition records. No resource, place or part name is written into
+     the code. The runtime finds the Conveyor's loading logic by nominal event names today
+     (`environment_models.py`), so that lookup must also reach the added events.
+   - Gates shown to the user before the runner: (a) path discovery for KET8 finished in M1 with ur5e-1 out; (b) a
+     simulated scheduler run of the 11-part order with ur5e-1 out under several timings, 11/11 and no deadlock; (c) an
+     RA Eq. 12 probe for KET8, KET12 and KET16 at M1 and Conveyor slot 1; (d) the nominal models unchanged when
+     nothing is grown; (e) the growth applied to all four accepted recoveries, listing what each adds or leaves out.
+   - Eq. 6 measurement (November 11, `/home/jongh/recovery_review_1030/model_growth_20261111/`, checker unchanged, only
+     the search budget raised): the recovery's own end state (2 parts with work left) explores 34,504 states in 55 s;
+     with one more round peg it passes 400,000 states (state limit, 1,016 s), with two the same (1,334 s); peak
+     2.2 GB. Eq. 6 is therefore not claimed for the 11-part order; gate (b) stands in for it and the video says so.
+   - **Build plan (final, November 11; code references from that day's read-only code map, saved maps in the session
+     scratchpad).** Nothing below is built yet.
+     1. `cais_spade_llm/recovery_framework/model_growth.py`, `grow(models, record, names, in_production)`: for each row
+        of the composition's `accepted_outline_prefix` whose `resource_jid` names a resource in production, add one
+        activity with `nominal_des._activity` (start = the event's name, finish = the name + `_done`).
+        - The actor's side, from the event only: guards from `expected_start_state` and updates from
+          `expected_end_state` on the actor's declared state variables. The event's own `part_name` value becomes the
+          `part_name` parameter (`PART_PARAMETER`, `equals_from_param`, `set_from_param`). The running state is the
+          event's name, appended to the actor's `resource_state` domain. `capability` is the part's stated start and
+          end `part_location` (the resource's `resource_location` for an event with no part). A stated value on a
+          variable the actor's model does not declare (the KMR's `pose`) stays in the program and is listed in the
+          report.
+        - Each neighbour's side, from the neighbour's own model: among its entries for a part taken from or put at its
+          place by another resource (the lookup of `environment_models.received_values`), the finish whose updates
+          give the event's stated `neighbor_end_state` on the neighbour's own variables. Copied unchanged: that
+          finish's guards and updates, the start conditions of its activity, and the start that makes any reservation
+          the finish requires (the Conveyor's `loading_reserved_by`) with its other participants' guards (Buffer
+          `zone_1_part`). `part_order` is not copied. A neighbour that declares no such entry leaves the event out.
+        - On the start copies: `program` (`steps` = the row's `primitive_steps`; `entry_state` and `success_state` =
+          the stated start and end `resource_state`), `function_name` = the event's name, `program_status` =
+          `implemented`. Then recompute `local_event_alphabet`, `controllable_event_alphabet`,
+          `observable_event_alphabet`, `participants` and `neighbors` as `build_environment_models` does, and run
+          `validate_environment_composition` and `validate_function_contracts`.
+        - It returns a report: each event added or left out, with the reason. No resource, place or part name in code.
+     2. `environment_models.project_transition`, the one change to code that nominal runs use: the Conveyor's two
+        loading rules (lines 1275–1296) fire by what the event's Conveyor copy declares, not by the names
+        `place_approach` and `place_release_done`. The loading-area check fires when the copy reserves the area
+        (position `loading_positions[<holder>]`); the belt order when the copy sets `part_location.{part_name}` to a
+        loading position. A test shows that on the nominal models both fire for exactly the same events and positions
+        as before.
+     3. Executor, `bind_added_executors(runtime, report)`: `EnvironmentResourceContext.bind_executor` per added name on
+        the actor; one worker request per stored step (mode `primitive`, `function_parameters` part_name,
+        origin_resource_location, destination_location, as `diag_run.run_kmr_event` adds them). Parameters are the
+        saved `resolved_params`, except three slots that take this run's values: a string equal to the row's
+        `part_name`; a reference `/event_facts/<key>/<row part>/…`, which takes this run's output of the program's own
+        `compute_pick_targets` or `compute_place_targets` step (the trace's `event_fact_path`); and the grasp reference
+        `…/resource_evidence/attachment/grasp_transform`, which takes this run's grasp. KMR only: an added event of
+        another resource type is reported as having no executor.
+     4. ur5e-1 out of production: the scheduler reads no fault report. The runner applies the existing switch
+        (`context.unavailable_resources`, executors cleared, as `ConveyorFault.trigger` does) to every resource the
+        capture's `fault_reports` names.
+     5. Checks per use, as they can be run: before the run, `ra_feasibility.check_event` (generic in `part_name`) for
+        KET8, KET12 and KET16 on the capture's state with that part finished in M1; during the run, the nominal
+        admission (function contract, conditions, feasibility) and the primitives' own checks; CCA admission on in the
+        simulated run, bypassed in Gazebo and replayed afterwards. `cca_safety.check_event` has no entry that takes a
+        runtime task. PAPER_FRAMEWORK's "checks on every use" is reworded to this once the user agrees.
+     6. `test/test_model_growth.py`: growth from the real records (three KMR activities under the LLM's names, ur5e-1's
+        event left out with its reason); nominal models unchanged when nothing is grown; KET8 through Retrieve,
+        Deliver and Return on an empty belt (order 0) and behind a round peg (order 1); refusals when M1 has not
+        completed, the loading position is occupied or the belt moves; contracts valid and `candidates` offers the
+        new starts; the executor's parameter substitution. Then the existing suites, `check_retained.py`,
+        `poetry check` and compileall.
+     7. Gates (a) to (e) with an offline driver of `EnvironmentProductLoop` on simulated completions, shown to the
+        user before Phase 2.
+   - Limits to state with the results: the growth reopens only the part; the Conveyor's copied reservation keeps its
+     own holder value (ur5e-1's), which is sound only while ur5e-1 is out; a repaired ur5e-1 is not designed; the
+     executor covers the KMR only.
+3. Phase 2, runner `gazebo_runs/throughput_run.py` from `diag_run.py`: 11-part order, failure at checkpoint
+   `after_M1_processing_before_pick`, composition replay with the 1 cm check, growth, ur5e-1 removed from the permitted
+   resources, resume (un-stop, reopen the model, revision + 1, retained paths cleared); `--no-recovery` for run C;
+   `--dry`.
+4. Phase 3, Gazebo per GAZEBO_QUEUE.md from a frozen worktree: run B (run C only if the user asks). Fix only runner or
+   live gaps; never edit the composition, and report if the composition is wrong. Replay the run's events through the
+   rule monitors. The user's go is needed before the first Gazebo start.
+5. Phase 4, video: footage beside the "Resources at work" chart (ur5e-1 red from the failure, the KMR's M1→Conveyor
+   trips in their own colour, a recovery lane, a parts counter); end card "With recovery: 11/11 in T_B" (plus "No
+   recovery: x/11" only if run C is made); caption states the CCA bypass, that Eq. 6 is not claimed for the 11-part
+   order, and that model growth is beyond the paper's evaluated framework.
+
+Risks: a KMR deadlock (it brings the next square peg to M1 while M1 holds a finished one); the KMR not idle at Storage
+when ur5e-1 fails (the first KMR event's start state); bigger pegs at the M1 fixture; KMR navigation; assembly-order
+rules not enforced live.
+
 ## Recovery UI and appendix set — November 9, 2026 — Study 2 video picks retained (user go "yes do it")
 
 The Recovery UI and `appendix/appendix_set.json` now hold, per scenario, the passed Study 1 Framework outline with the
