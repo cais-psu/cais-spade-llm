@@ -279,6 +279,16 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   real-time factor near 0.05 with recording; this test ran faster. Script and results:
   `/home/jongh/recovery_review_1030/model_growth_20261111/controller_fix/` (`fallback_drive_test.py`, `gazebo_test_3/`;
   attempts 1 and 2 failed on the script's launch environment and goal handling, not the KMR).
+- `growth_run_b6` (17:15, `ab33aa5`, recorded from production start) STOPPED 18:18, production_blocked. The failure
+  fell at 17:41 and matched the capture (KMR base 0.2 mm). Recovery events 1-4 completed: Retrieve 464 s, Deliver
+  426 s, Return 195 s (no fallback needed). Growth added the KMR's three events; after resume KET4 and RGOCG4 were
+  assembled (5 of 11 with the gears). The first grown event, Retrieve for KET8 (`environment_82`), failed at step 4
+  `move_cartesian`: "KMR Cartesian waypoint IK failed: -31" (MoveIt found no solution for a waypoint). The
+  executor bound KET8 and read the step's target live from `compute_pick_targets`: (-4.1299, 1.8195, 1.185), within
+  0.5 mm and about 0.2 deg of KET4's. The recovery's own step 4 used the composition's saved target for KET4 (exactly
+  downward). Not seen in any earlier run. Cause not found yet: a geometric limit of the live target against the step's
+  saved IK seed and joint-step window, a collision in the planning scene (state after nominal carries), or the IK's
+  100 ms search under production load. Video 61 min (`run.mp4`).
 
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.
