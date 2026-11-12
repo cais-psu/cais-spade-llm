@@ -289,6 +289,18 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   downward). Not seen in any earlier run. Cause not found yet: a geometric limit of the live target against the step's
   saved IK seed and joint-step window, a collision in the planning scene (state after nominal carries), or the IK's
   100 ms search under production load. Video 61 min (`run.mp4`).
+- b6 cause, from the run's own records (no new Gazebo session needed): the KMR arm's joint configuration. Every KMR
+  arm motion is a Cartesian chain that starts from the current joints, and `move_home`/`transport` restore only the
+  TCP pose, so the 7-joint arm keeps whatever elbow position the last motion left. Through every nominal task before
+  the failure the KMR came home at its parked configuration (-0.01, 0.26, 0.01, -1.09, 0.00, 1.79, 0.00). The first
+  nominal task after the recovery already started from a twisted elbow (-2.41, -0.45, 1.92, -1.09, 0.44, 1.86, -0.32),
+  the same TCP pose; the recovery events left it there (most likely the Deliver, base facing south and the arm
+  reaching over the belt; the runner does not record the recovery steps' joints). Nominal tasks still worked from the
+  twisted elbow, but the KMR's nominal place into M1 then needed joint_a3 at 2.97 rad, its limit (2.9668). The grown
+  Retrieve's approach into M1 (1 cm higher, a slightly different yaw) needed it past the limit: no IK (-31). The
+  recovery's own Retrieve started from the parked elbow. Not the composition, not model growth's binding (the live
+  KET8 target is right); a general gap in the KMR worker: nothing returns the arm's elbow to its declared
+  configuration. Fix not decided.
 
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.
