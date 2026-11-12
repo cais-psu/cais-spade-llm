@@ -339,3 +339,79 @@ def test_a_refused_step_fails_the_added_event_and_clears_its_bindings(records):
     assert evidence["status"] == "failed" and "move_base refused" in evidence["reason"]
     assert model_growth._completed(task, evidence) is False
     assert agent.kmr_primitives.task_parameters is None
+
+
+def _synthetic(context: EnvironmentProductContext, events: list[dict], values: dict | None = None) -> dict:
+    """Grow the models with synthetic accepted events of the KMR and M2, each with a one-step program."""
+    jids = {rid: f"synthetic-{index}@localhost" for index, rid in enumerate(context.models)}
+    observations = {"jids": jids, "failure": {"resource_values_before": values or context.snapshot()}}
+    rows = []
+    for index, event in enumerate(events):
+        event = {"outline_id": f"SYNTHETIC_{index}", "part_name": None, "neighbor_end_state": {}, **event}
+        event["resource_jid"] = jids[event.pop("resource")]
+        rows.append(event)
+    program = {"primitive_steps": [{"primitive": "move_to_named_pose", "params": {"pose_name": "transport"}}],
+               "composition_validation": {"trace": [{"primitive": "move_to_named_pose",
+                                                     "resolved_params": {"pose_name": "transport"}}]}}
+    composition = {"accepted_outline_prefix": rows,
+                   "accepted_primitive_program": [program | {"outline_id": row["outline_id"],
+                                                             "resource_jid": row["resource_jid"]} for row in rows]}
+    names = resource_names(observations)
+    return grow_models(context.models, composition, names, states_before_events(observations, rows, names),
+                       set(context.models))
+
+
+def test_an_event_named_after_an_existing_event_or_another_added_one_is_left_out():
+    context = _context()
+    drive = {"resource": "KMR",
+             "expected_start_state": {"resource_state": "placed", "held_part": None, "resource_location": None},
+             "expected_end_state": {"resource_state": "idle", "resource_location": "Storage"}}
+    report = _synthetic(context, [{**drive, "event_name": "move_home"},
+                                  {**drive, "event_name": "Drive the KMR home"},
+                                  {**drive, "event_name": "Drive the KMR home"}])
+    assert [row["event_name"] for row in report["added"]] == ["Drive the KMR home"]
+    assert [row["outline_id"] for row in report["left_out"]] == ["SYNTHETIC_0", "SYNTHETIC_2"]
+    assert all("already names an event" in row["reason"] for row in report["left_out"])
+
+
+def test_an_event_whose_start_leaves_out_what_an_earlier_event_changed_is_left_out():
+    context = _context()
+    report = _synthetic(context, [
+        {"resource": "KMR", "event_name": "Drive the KMR to M1", "expected_start_state": {"resource_state": "idle"},
+         "expected_end_state": {"resource_state": "idle", "resource_location": "M1"}},
+        {"resource": "KMR", "event_name": "Park the KMR arm", "expected_start_state": {"resource_state": "idle"},
+         "expected_end_state": {"resource_state": "idle"}},
+    ])
+    left, = report["left_out"]
+    assert left["outline_id"] == "SYNTHETIC_1" and "leaves out ['resource_location']" in left["reason"]
+
+
+def test_an_event_stating_values_of_its_part_that_the_model_does_not_carry_is_left_out():
+    context = _context()
+    report = _synthetic(context, [
+        {"resource": "M2", "event_name": "Hold the round job", "part_name": "RGOCG4-50_Round_4mm",
+         "expected_start_state": {"resource_state": "running", "current_process": {"process": "trim"}},
+         "expected_end_state": {"resource_state": "paused", "current_process": {"process": "trim"}}},
+    ])
+    left, = report["left_out"]
+    assert "['current_process'] of its part" in left["reason"]
+
+
+def test_a_second_event_at_the_same_place_copies_the_owners_own_entry_again():
+    context = _context()
+    part = "RGOCG8-50_8mm"
+    values = context.snapshot()
+    values["M2"].update(resource_state="completed", part_name=part)
+    take = {"resource": "KMR", "part_name": part,
+            "expected_start_state": {"held_part": None, "part_location": "M2", "resource_location": "Storage",
+                                     "resource_state": "idle"},
+            "expected_end_state": {"resource_location": "M2", "resource_state": "carrying", "held_part": part,
+                                   "part_location": "KMR"},
+            "neighbor_end_state": {"M2": {"part_name": None, "resource_state": "idle"}}}
+    finish = {"resource": "M2", "event_name": "Finish another round peg on M2", "part_name": part,
+              "expected_start_state": {"resource_state": "running"},
+              "expected_end_state": {"resource_state": "completed", "part_name": part}}
+    report = _synthetic(context, [{**take, "event_name": "Take the round peg out of M2"}, finish,
+                                  {**take, "event_name": "Take the round peg out of M2 again"}], values)
+    copied = [row["copied_from"]["M2"] for row in report["added"] if row["resource_id"] == "KMR"]
+    assert len(copied) == 2 and copied[0] == copied[1]

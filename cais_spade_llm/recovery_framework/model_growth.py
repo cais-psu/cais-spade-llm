@@ -105,16 +105,21 @@ def grow_models(
     programs = {row["outline_id"]: row for row in composition.get("accepted_primitive_program") or []}
     grown = deepcopy(models)
     report: dict[str, list] = {"added": [], "left_out": []}
+    # Fields each resource had a change stated for by an earlier accepted event, added or not.
+    changed_before: dict[str, set[str]] = {}
     for index, event in enumerate(composition["accepted_outline_prefix"]):
         actor = names.get(event["resource_jid"], event["resource_jid"])
         row = {"outline_id": event["outline_id"], "event_name": event["event_name"], "resource_id": actor,
                "part_name": event.get("part_name")}
+        earlier = set(changed_before.get(actor, ()))
+        for rid, stated in _stated_changes(event, names).items():
+            changed_before.setdefault(rid, set()).update(stated)
         if actor not in in_production:
             report["left_out"].append({**row, "reason": f"{actor} is not in production"})
             continue
         try:
             entries, details = _activity(grown, event, programs.get(event["outline_id"]), actor, names,
-                                         states[index], composition.get("source_outline_draft"))
+                                         states[index], composition.get("source_outline_draft"), earlier)
         except GrowthRefusal as exc:
             report["left_out"].append({**row, "reason": str(exc)})
             continue
@@ -343,7 +348,11 @@ async def _ready(task: dict, valuation: dict, geometry: dict) -> bool:
 
 
 def _activity(models: dict, event: dict, program: dict | None, actor: str, names: dict[str, str],
-              before: dict, source_draft: str | None) -> tuple[dict[str, list[dict]], dict]:
+              before: dict, source_draft: str | None, earlier: set[str]) -> tuple[dict[str, list[dict]], dict]:
+    """Build the added activity's entries, or refuse the event with the fact that stops it.
+
+    ``earlier`` holds the actor's fields that an earlier accepted event stated a change for.
+    """
     if program is None:
         raise GrowthRefusal("the accepted composition has no program for it")
     part = event.get("part_name")
@@ -352,8 +361,12 @@ def _activity(models: dict, event: dict, program: dict | None, actor: str, names
     declared = models[actor]["state_variables"]
     if "domain" not in declared.get("resource_state", {}):
         raise GrowthRefusal(f"{actor} declares no resource_state domain for its running state")
-    guards = {field: _rule(value, part, names, "equals") for field, value in start_state.items() if field in declared}
-    updates = {field: _rule(value, part, names, "set") for field, value in end_state.items() if field in declared}
+    running = event["event_name"]
+    _check_addable(models, event, actor, earlier)
+    own_start = {_templated(field, part): value for field, value in start_state.items()}
+    own_end = {_templated(field, part): value for field, value in end_state.items()}
+    guards = {field: _rule(value, part, names, "equals") for field, value in own_start.items() if field in declared}
+    updates = {field: _rule(value, part, names, "set") for field, value in own_end.items() if field in declared}
     if "resource_state" not in updates:
         raise GrowthRefusal("its stated end state has no resource_state, so its finish would not end the activity")
     for field, rule in [*guards.items(), *updates.items()]:
@@ -372,7 +385,6 @@ def _activity(models: dict, event: dict, program: dict | None, actor: str, names
                 if rid in target and target[rid] != copy:
                     raise GrowthRefusal(f"two declared sides disagree for {rid}")
                 target[rid] = copy
-    running = event["event_name"]
     bindings = {"resource_id": {"equals": actor}}
     if part is not None:
         bindings["part_name"] = deepcopy(PART_PARAMETER)
@@ -419,9 +431,46 @@ def _activity(models: dict, event: dict, program: dict | None, actor: str, names
         "places": places,
         "copied_from": {side["owner"]: side["copied_from"] for side in sides},
         "not_copied": {side["owner"]: side["not_copied"] for side in sides if side["not_copied"]},
-        "stated_outside_the_model": sorted((set(start_state) | set(end_state)) - set(declared) - {"part_location"}),
+        "stated_outside_the_model": sorted((set(own_start) | set(own_end)) - set(declared) - {"part_location"}),
     }
     return entries, details
+
+
+def _check_addable(models: dict, event: dict, actor: str, earlier: set[str]) -> None:
+    """Refuse an event whose added activity would not be the accepted event, or would clash with the models.
+
+    Args:
+        models: Every resource's model, with the events this growth has added so far.
+        event: The accepted outline event.
+        actor: The resource that performs it.
+        earlier: The actor's fields that an earlier accepted event stated a change for.
+
+    Raises:
+        GrowthRefusal: The name is taken, it states values of its part the added event would not carry, a per-part
+            value cannot be bound to its part, or its stated start leaves out what an earlier event changed.
+    """
+    running, part = event["event_name"], event.get("part_name")
+    start_state = event.get("expected_start_state") or {}
+    stated = {*start_state, *(event.get("expected_end_state") or {})}
+    declared = models[actor]["state_variables"]
+    # The runtime finds executors, feasibility rules and reservations by event name, whatever the resource.
+    named = {entry["event_name"] for model in models.values() for entry in model["events"]}
+    if running in named or running + FINISH_SUFFIX in named:
+        raise GrowthRefusal(f"its name {running!r} already names an event of the models, and the runtime binds "
+                            "executors and rules by event name")
+    if running in declared["resource_state"]["domain"]:
+        raise GrowthRefusal(f"its name {running!r} is already a resource_state value of {actor}")
+    part_values = {field for model in models.values() for entry in model["events"]
+                   for field in (*(entry.get("product_guards") or {}), *(entry.get("product_effects") or {}))}
+    if uncarried := sorted(stated & part_values):
+        raise GrowthRefusal(f"it states {uncarried} of its part, which the added event would not carry")
+    if unbound := sorted(field for field in stated if _templated(field, part) not in declared
+                         and "." in field and field.split(".", 1)[0] + ".{part_name}" in declared):
+        raise GrowthRefusal(f"it states {unbound} of {actor}, a per-part value the added event cannot bind to its part")
+    own_start = {_templated(field, part) for field in start_state}
+    if unstated := sorted(field for field in earlier if field in declared and field not in own_start):
+        raise GrowthRefusal(f"its stated start leaves out {unstated} of {actor}, which an earlier accepted event "
+                            "changed; on its own it would be offered where the recovery never ran it")
 
 
 def _declared_side(models: dict, owner: str, stated: dict, part: str | None, actor: str,
@@ -443,7 +492,9 @@ def _declared_side(models: dict, owner: str, stated: dict, part: str | None, act
     matches = []
     for finish in models[owner]["events"]:
         bindings = finish["parameter_bindings"]
-        if ("start_event_id" not in finish or (bindings.get(binding) or {}).get("equals") != place
+        # Only the owner's own declared entries count, not copies this or an earlier growth added.
+        if ("start_event_id" not in finish or "recovery_source" in finish
+                or (bindings.get(binding) or {}).get("equals") != place
                 or bindings["resource_id"]["equals"] == owner):
             continue
         given = {field: _given(rule, part) for field, rule in finish["updates"].items()}
