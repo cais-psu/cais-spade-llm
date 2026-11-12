@@ -228,6 +228,18 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
 | ur5e-1 breakdown | `draft_6f500c9f…` (Sol, `batch_…1b4787`) | `composition_3075cbc4…` (`386b8cd`) | 4/4 |
 | Machining breakdown | `draft_91d5a2aa…` (Sol, `batch_…4eb465`) | `composition_040388ef…` (`386b8cd`) | 14/14 |
 
+- Gazebo run `growth_run_b5` started 10:30 from `a50b2df`, recording from the start of production (user: show the whole
+  thing, nominal production → failure → KMR recovery → all 11 pegs). `growth_run_b3` failed at startup (Nav2 lifecycle
+  manager hung after configuring `map_server`; no leftovers; one-off), `growth_run_b4` was stopped to switch the
+  recording. In b5 the KMR idled at Storage while M1 trimmed KET4 (about 30 min wall) because of an intake bug.
+- `7332f27` intake fix (user: run b5 as is, fix for future runs): the machine program check applies to every machine
+  event whose parameters name a declared process and a result, not only `start_job`; `complete_job` had let M2 offer
+  square pegs, which starved the round pegs. Offline: nominal 11/11, RGOCG4 goes to M2 while M1 trims KET4, run B
+  11/11 with quiet failure staging (the offline gate now stages the failure as the runner does; with plain freeze the
+  KMR was caught mid-delivery and the run ended 10/11). Wider regression suites still to run, after b5. A future Gazebo
+  run needs a frozen worktree at `7332f27` or later; with parallel work the failure falls later (after the KMR is back
+  at Storage).
+
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.
 - Copied, not moved: the drafts from `outline_experiments` (never deleted) into `outline_drafts`, the compositions from
