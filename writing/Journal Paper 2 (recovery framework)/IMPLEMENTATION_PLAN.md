@@ -36,8 +36,8 @@ call: the accepted composition `composition_3075cbc4…` (outline `draft_6f500c9
      the search budget raised): the recovery's own end state (2 parts with work left) explores 34,504 states in 55 s;
      with one more round peg it passes 400,000 states (state limit, 1,016 s), with two the same (1,334 s); peak
      2.2 GB. Eq. 6 is therefore not claimed for the 11-part order; gate (b) stands in for it and the video says so.
-   - **Build plan (final, November 11; code references from that day's read-only code map, saved maps in the session
-     scratchpad).** Nothing below is built yet.
+   - **Build plan (final, November 11; code references from that day's read-only code map; the saved maps were lost
+     with the session scratchpad on November 12).** Built overnight; what changed while building is in the log below.
      1. `cais_spade_llm/recovery_framework/model_growth.py`, `grow(models, record, names, in_production)`: for each row
         of the composition's `accepted_outline_prefix` whose `resource_jid` names a resource in production, add one
         activity with `nominal_des._activity` (start = the event's name, finish = the name + `_done`).
