@@ -1667,9 +1667,10 @@ def main() -> None:
             Args:
                 target: Planar base pose to reach.
                 goal_handle: Action goal whose cancellation stops the search.
-                follow_path_refusal: Nav2's abort of the path selected before. The
-                    straight segment and the lattice are then skipped, and only a
-                    constant-heading route is searched.
+                follow_path_refusal: Nav2's abort of the path selected before, or
+                    this controller's stop of it. The straight segment and the
+                    lattice are then skipped, and only a constant-heading route is
+                    searched; it starts with a turn in place at the measured pose.
             """
             self._route_clearance = None
             start = self._check_motion(goal_handle)
@@ -1737,14 +1738,16 @@ def main() -> None:
                     if isinstance(refusal, SweepIntersection):
                         avoid.append(tuple(refusal.pose[:2]))
                         self.get_logger().info(f"KMR route search avoids arm contact {len(avoid)}: {refusal}")
-                    found = constant_heading_route(self._occupancy_map, self._check_motion(goal_handle), target,
-                                                   avoid=tuple(avoid))
+                    measured = self._check_motion(goal_handle)
+                    found = constant_heading_route(self._occupancy_map, measured, target, avoid=tuple(avoid))
                     if found is None:
                         raise refusal
                     route, clearance = found
                     path = NavPath()
                     path.header.frame_id = "world"
-                    path.poses = [self._pose_stamped(pose) for pose in route]
+                    # The route holds the target heading from its first pose. A base stopped at another heading, as
+                    # after a stop mid-turn, first turns in place at the measured pose, inside the same checked sweep.
+                    path.poses = [self._pose_stamped(pose) for pose in (measured, *route)]
                     prepared = prepare_base_path(path, self._check_motion(goal_handle), target, self._occupancy_map)
                     try:
                         self._validate_transport_sweeps(

@@ -258,6 +258,15 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   tick refusal, hold and no-map abort, and the follower's hand-off (`stopping_refusal` case). Installed with
   `make bootstrap-gazebo`; the controller's source hash changes, which only the old evaluation-capture CLI compares
   with the current file.
+- Second part: the constant-heading route held the target heading from its first pose, and `prepare_base_path`
+  refuses a start more than 0.30 rad off the path's first heading, so the fallback (also the one after Nav2's own
+  abort) worked only from a base already facing the target ("KMR moved after planning"). The fallback path now begins
+  at the measured pose and turns in place there, inside the same checked sweep. Offline probe on the current map, the
+  Return to the Storage dock from 188 clear starts west of the Deliver pose (4 headings): as built 45 routes (only the
+  starts facing the target), now 153; the rest turn into the Conveyor or Storage, or have no route, and still end the
+  move. Every clear start where b5 stopped (west of the Conveyor, facing east or west) gets a route. From the Deliver pose
+  itself a turn in place sweeps the Conveyor, so a stop there still ends the move. Probe and results:
+  `/home/jongh/recovery_review_1030/model_growth_20261111/controller_fix/fallback_probe*`.
 
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.

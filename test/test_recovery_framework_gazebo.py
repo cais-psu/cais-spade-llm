@@ -3781,12 +3781,11 @@ def test_kmr_long_straight_selection_and_blocked_m1_route(start, target, direct)
         assert not kmr_base.base_path_is_clear(node._occupancy_map, (start, target))
 
 
-def test_kmr_route_from_m2_to_m1_after_nav2_aborts_skips_the_lattice():
-    """After Nav2 aborts, search only the constant-heading route, around M1 from M2's stop."""
+def _kmr_fallback_path(start, target, refusal):
+    """Run the controller's constant-heading search from a measured pose, as after Nav2's path was stopped."""
     import ast
     from unittest.mock import Mock
 
-    start, target = (-2.70, 2.20, math.pi / 2), (-4.70, 2.20, math.pi / 2)
     tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
     method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
                   and n.name == '_compute_base_path')
@@ -3800,15 +3799,38 @@ def test_kmr_route_from_m2_to_m1_after_nav2_aborts_skips_the_lattice():
         _validate_transport_sweeps=Mock(), _route_clearance=None, _send_motion_goal=Mock(),
         _pose_stamped=lambda pose: _kmr_test_path(pose).poses[0],
         get_logger=lambda: SimpleNamespace(info=messages.append))
-    refusal = kmr_base.FollowPathAborted('KMR path execution failed: Nav2 status 6')
     selected = namespace['_compute_base_path'](node, target, object(), follow_path_refusal=refusal)
-    poses = tuple(kmr_base.planar_pose(point.pose) for point in selected.poses)
+    return node, tuple(kmr_base.planar_pose(point.pose) for point in selected.poses), messages
+
+
+def test_kmr_route_from_m2_to_m1_after_nav2_aborts_skips_the_lattice():
+    """After Nav2 aborts, search only the constant-heading route, around M1 from M2's stop."""
+    start, target = (-2.70, 2.20, math.pi / 2), (-4.70, 2.20, math.pi / 2)
+    refusal = kmr_base.FollowPathAborted('KMR path execution failed: Nav2 status 6')
+    node, poses, messages = _kmr_fallback_path(start, target, refusal)
     assert node._send_motion_goal.call_count == 0
     assert poses[0] == pytest.approx(start) and poses[-1] == pytest.approx(target)
     assert kmr_base.base_path_is_clear(node._occupancy_map, poses)
     assert all(pose[2] == pytest.approx(math.pi / 2) for pose in poses)
     assert node._route_clearance is not None
     assert any('Nav2 status 6' in message and 'constant-heading KMR route' in message for message in messages)
+
+
+def test_kmr_fallback_route_first_turns_in_place_at_the_measured_heading():
+    """Run b5 stopped mid-turn west of the Conveyor on the way back to Storage: the route turns there, then holds."""
+    start, target = (-5.80, 0.45, 0.0), (-5.54, 2.13, math.pi / 2)
+    refusal = kmr_base.FollowPathAborted(
+        'KMR path execution stopped: KMR stopping footprint intersects an obstacle or map is unavailable')
+    node, poses, _ = _kmr_fallback_path(start, target, refusal)
+    assert node._send_motion_goal.call_count == 0
+    assert poses[0] == pytest.approx(start) and poses[-1] == pytest.approx(target)
+    turn = [pose for pose in poses if math.dist(pose[:2], start[:2]) < 1e-8]
+    assert turn[-1][2] == pytest.approx(math.pi / 2)
+    assert all(pose[2] == pytest.approx(math.pi / 2) for pose in poses[len(turn):])
+    assert kmr_base.base_path_is_clear(node._occupancy_map, poses)
+    # At the Deliver pose a turn in place would sweep the Conveyor, so there is no route and the move ends.
+    with pytest.raises(ValueError, match='footprint intersects'):
+        _kmr_fallback_path((-4.05, -0.35, -math.pi / 2), target, refusal)
 
 
 def test_kmr_cached_map_matches_uncached_sweeps_and_refreshes():
