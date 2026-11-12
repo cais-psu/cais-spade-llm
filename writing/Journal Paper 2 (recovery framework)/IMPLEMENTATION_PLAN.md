@@ -267,6 +267,11 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   move. Every clear start where b5 stopped (west of the Conveyor, facing east or west) gets a route. From the Deliver pose
   itself a turn in place sweeps the Conveyor, so a stop there still ends the move. Probe and results:
   `/home/jongh/recovery_review_1030/model_growth_20261111/controller_fix/fallback_probe*`.
+- Regression for the intake fix and the controller's first part, 22 suites (the 21 that import `environment_models`
+  or `model_growth`, and the controller's), worktrees `a50b2df` against `d0cfb64`: 119 failed in both, none newly
+  failing; the one difference is the new `stopping_refusal` case, which passes. At `ab33aa5` the controller suites:
+  720 passed, 2 failed (the safety files deleted in `c40aba2`, failing before). Next growth run: worktree
+  `/home/jongh/recovery_review_1030/wt_growth_run_ab33aa5`, launcher `gazebo_runs/run_growth_b.sh`; not started.
 
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.
