@@ -1,6 +1,6 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
-## Model growth after recovery: throughput demonstration — November 11, 2026 — Phase 0 approved by the user; Phase 1 design settled with the user, no code yet; Phases 2–4 not started
+## Model growth after recovery: throughput demonstration — November 11, 2026 — Phase 0 approved by the user; Phase 1 built overnight November 11–12 (user go: build, run Gazebo, record, fix and commit each point); Phases 2–4 in progress
 
 For the supplementary throughput video (advisor's request). ur5e-1's gripper fails at KET4 in M1 during the 11-part
 order; after the accepted recovery the KMR keeps its three recovery events and also carries KET8, KET12 and KET16 from
@@ -108,6 +108,33 @@ call: the accepted composition `composition_3075cbc4…` (outline `draft_6f500c9
 Risks: a KMR deadlock (it brings the next square peg to M1 while M1 holds a finished one); the KMR not idle at Storage
 when ur5e-1 fails (the first KMR event's start state); bigger pegs at the M1 fixture; KMR navigation; assembly-order
 rules not enforced live.
+
+Overnight log, November 11–12 (user go before bed: "after the offline stuffs run also the gazebo and also record the
+video ... you make the call whether it needs to be fixed ... commit each point ... most important thing is to make it
+generalized"; work on Opus 5.5). Each checkpoint is one commit; revert to the one before a fix to undo it.
+- `1d97921` checkpoint 1: `model_growth.py`, the Conveyor belt order by declaration in `project_transition`,
+  `KMRPrimitives.task_parameters`, `test/test_model_growth.py` (9 passed). Decisions taken overnight (reversible): the
+  Conveyor's reservation copied unchanged (holder `ur5e-1`); the loading-area check at `place_approach` left as it is
+  (the Deliver's finish projection refuses an occupied position); among M1's entries that give the stated change
+  (completed, paused, stopped, loaded), the one whose guards held when the accepted event ran (completed).
+- Gate (e), the same growth on the four accepted recoveries (`composition_*` in `draft_compositions`), each with the
+  resources its capture reports faulted taken out: ur5e-1 breakdown adds the KMR's three events and leaves out ur5e-1's
+  retract (not in production); Conveyor breakdown adds 4 and leaves out 3 (two KMR drives state no `resource_state`;
+  the Buffer `zone_1` place has no Buffer entry for a part put there by a resource); Machining adds 7 and leaves out 7;
+  Part slippage adds ur5e-3's pick and place of the dropped gear and leaves out 2. Script and output:
+  `/tmp/claude-1001/.../scratchpad/overnight/gates/gate_e_four_recoveries.{py,json}`.
+- Checkpoint 2: `grow_runtime` refuses only when a pending task involves a resource whose model would change (at
+  the failure M2's job may still be pending; it is not a participant of the added events).
+- Gate (b), offline with the real scheduler and simulated executors (harness by the overnight scout, scripts in the
+  session scratchpad `overnight/harness`, `overnight/gates/run_b_offline.py`): nominal 11/11 on seeds 1–3; run C (no
+  recovery, ur5e-1 out) 3/11 on seeds 1–3; run B (failure at KET4 in M1, the four accepted events' end states, growth,
+  ur5e-1 out, resume) 11/11 on seeds 1–3 at the nominal timing (task delays up to 0.3 s): the KMR carries KET8, KET12
+  and KET16 Storage → M1, then Retrieve → Deliver → Return each time; ur5e-1 does nothing after the failure. With
+  delays up to 0.5 s two runs blocked: seed 3 because ur5e-4's pick_grasp was in flight at the failure freeze, which
+  cancels it and leaves ur5e-4 in `grasping` (the real failure stop does the same; the real capture had only M2's job
+  in flight); seed 2 because a search for KET12 overlapped an unrelated commit and was never negotiated again (in that
+  final state the KMR's own alternatives offer Retrieve FEASIBLE; the same seed later completed 11/11). The Gazebo
+  runner therefore re-arms a blocked pass (the resume statements, logged) and must not freeze other resources' work.
 
 ## Recovery UI and appendix set — November 9, 2026 — Study 2 video picks retained (user go "yes do it")
 

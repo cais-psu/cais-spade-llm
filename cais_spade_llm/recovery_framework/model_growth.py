@@ -164,18 +164,27 @@ def grow_runtime(runtime, composition: dict, observations: dict) -> dict:
         The growth report, with the executors bound.
 
     Raises:
-        RuntimeError: The runtime is running or has a pending task.
+        RuntimeError: The runtime is running, or a pending task involves a resource whose model would change.
     """
     context = runtime.context
     names = resource_names(observations)
     events = composition["accepted_outline_prefix"]
     with context.admission_lock:
-        if not runtime.stopped or context.pending_tasks:
-            raise RuntimeError("Grow the models only while the run is stopped with no pending task")
+        if not runtime.stopped:
+            raise RuntimeError("Grow the models only while the run is stopped")
         in_production = set(context.models) - set(context.unavailable_resources)
-        report = grow_models(context.models, composition, names, states_before_events(observations, events, names),
+        grown = {rid: deepcopy(model) for rid, model in context.models.items()}
+        report = grow_models(grown, composition, names, states_before_events(observations, events, names),
                              in_production)
         changed = {rid for added in report["added"] for rid in added["participants"]}
+        # A pending task was prepared against its participants' model revisions; growing those would strand it.
+        busy = sorted(task["task_id"] for task in context.pending_tasks.values()
+                      if changed & set(context._task_participants(task)))
+        if busy:
+            raise RuntimeError(f"Pending tasks involve resources whose models would change: {busy}")
+        for rid, model in grown.items():
+            context.models[rid].clear()
+            context.models[rid].update(model)
         for rid in changed:
             context.resources[rid].revision += 1
         context.revision += 1
