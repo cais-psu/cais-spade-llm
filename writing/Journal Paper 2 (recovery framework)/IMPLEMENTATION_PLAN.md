@@ -239,6 +239,17 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   KMR was caught mid-delivery and the run ended 10/11). Wider regression suites still to run, after b5. A future Gazebo
   run needs a frozen worktree at `7332f27` or later; with parallel work the failure falls later (after the KMR is back
   at Storage).
+- `growth_run_b5` STOPPED 12:40 at recovery event 4, Return to Storage. Recovery events 1-3 completed (Retract 30 s,
+  Retrieve 29 min, Deliver 36 min wall); KET4 on the belt at loading position 1. Return: `move_base` from the Deliver
+  pose (facing the belt) to the Storage dock turns the base 180 deg, so the controller skips its straight segment and
+  sends the lattice path to Nav2's MPPI follower. The base backed off the belt and turned about 90 deg in 36 sim seconds
+  (11 wall minutes, RTF ~0.05 while recording), then the base controller's stopping check (padded footprint swept along
+  the commanded or measured velocity) met an obstacle in its map and aborted the goal. The motion status at the abort
+  is not saved, so the obstacle is not known. The controller's fallback (brake, then its own constant-heading route)
+  runs only when Nav2 aborts the path, not on its own stopping-check abort. On 9 November (`final_ur5e1`) the same
+  Return from the same pose succeeded (472 s). Not the composition and not model growth: each grown cycle repeats this
+  Return, so a full run makes it four times. The runner's `observed.base_pose` for a failed KMR event is the last
+  successful step's cached pose, not a live read. Frames: `/home/jongh/recovery_review_1030/model_growth_20261111/b5_return_frames/`.
 
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.
