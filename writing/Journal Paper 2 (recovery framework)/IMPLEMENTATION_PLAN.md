@@ -124,11 +124,11 @@ generalized"; work on Opus 5.5). Each checkpoint is one commit; revert to the on
   retract (not in production); Conveyor breakdown adds 4 and leaves out 3 (two KMR drives state no `resource_state`;
   the Buffer `zone_1` place has no Buffer entry for a part put there by a resource); Machining adds 7 and leaves out 7;
   Part slippage adds ur5e-3's pick and place of the dropped gear and leaves out 2. Script and output:
-  `/tmp/claude-1001/.../scratchpad/overnight/gates/gate_e_four_recoveries.{py,json}`.
+  `/home/jongh/recovery_review_1030/model_growth_20261111/offline/gates/gate_e_four_recoveries.{py,json}`.
 - Checkpoint 2: `grow_runtime` refuses only when a pending task involves a resource whose model would change (at
   the failure M2's job may still be pending; it is not a participant of the added events).
-- Gate (b), offline with the real scheduler and simulated executors (harness by the overnight scout, scripts in the
-  session scratchpad `overnight/harness`, `overnight/gates/run_b_offline.py`): nominal 11/11 on seeds 1–3; run C (no
+- Gate (b), offline with the real scheduler and simulated executors (harness by the overnight scout; scripts in
+  `/home/jongh/recovery_review_1030/model_growth_20261111/offline/{harness,gates}`): nominal 11/11 on seeds 1–3; run C (no
   recovery, ur5e-1 out) 3/11 on seeds 1–3; run B (failure at KET4 in M1, the four accepted events' end states, growth,
   ur5e-1 out, resume) 11/11 on seeds 1–3 at the nominal timing (task delays up to 0.3 s): the KMR carries KET8, KET12
   and KET16 Storage → M1, then Retrieve → Deliver → Return each time; ur5e-1 does nothing after the failure. With
@@ -137,7 +137,7 @@ generalized"; work on Opus 5.5). Each checkpoint is one commit; revert to the on
   in flight); seed 2 because a search for KET12 overlapped an unrelated commit and was never negotiated again (in that
   final state the KMR's own alternatives offer Retrieve FEASIBLE; the same seed later completed 11/11). The Gazebo
   runner therefore re-arms a blocked pass (the resume statements, logged) and must not freeze other resources' work.
-- RA probe (overnight scout, scratchpad `overnight/ra_probe`): `ra_feasibility.check_event` and `cca_safety.check_event`
+- RA probe (overnight scout, `/home/jongh/recovery_review_1030/model_growth_20261111/offline/ra_probe`): `ra_feasibility.check_event` and `cca_safety.check_event`
   accept Retrieve and Deliver re-bound to KET8, KET12 and KET16 at M1's fixture (FEASIBLE, SAFE); every part-dependent
   number equals KET4's within micrometres (all four square pegs are 50 mm tall with the origin on the bottom face). The
   accepted `part_order` 0 is refused when a part is ahead ("finds Conveyor's part_order.<P> 1, not 0"), which is why the
@@ -186,6 +186,34 @@ generalized"; work on Opus 5.5). Each checkpoint is one commit; revert to the on
   (review finding); each recovery event records its start for the video's recovery lane. Launcher and frozen worktree
   now at `61db38c` (`/home/jongh/recovery_review_1030/wt_growth_run_61db38c`). Video builder ready, untested on run B
   output: `/home/jongh/recovery_review_1030/rcim_video_build/talk/growth_video.py <run folder>`.
+- November 12 morning. The user restarted WSL (WSLg display back). The restart emptied `/tmp`, so the session
+  scratchpad was lost: the scouts' harness, RA probe and runner drafts and the gate scripts were recovered from the
+  workflow transcripts or rewritten into `/home/jongh/recovery_review_1030/model_growth_20261111/offline/` (the offline
+  run B on the recovered harness: 11/11). The scouts' run outputs and the before/after regression logs are gone; their
+  numbers are the ones recorded above.
+- Gazebo run `growth_run_b2`, 09:36–09:56, CANCELLED at the user's word ("stop i am not ready yet"): startup worked;
+  the failure fell at the quiet moment on KET4 in M1 (0 acknowledgements waited, KMR base 6 mm from the capture,
+  KET4 0.0 m), the frozen capture was skipped as designed, RECOVERY_SEQ1 and RECOVERY_SEQ2 completed. Run folder kept
+  (`runs/growth_run_b2`, no video segment). The user wants the generalization gaps closed before the next start.
+- `b4ff6c3`: the definition states how the reuse is checked as it is run (user: enough for this demonstration, "the
+  paper is for cca in recovery"). `709cc46`: the video does not mention the CCA bypass (user).
+- `b07ec88` general executor: the added events run on the acting resource's own primitive interface (the worker
+  primitives of `kmr_primitives`, or a controller's `_execute_primitive` with the motion lock and the task named on
+  the controller as the nominal robot executor does); references in both notations; a program reading a fact of its
+  part outside its own calculations and attachment evidence is left out; a step whose live calculation lacks the fact
+  it reads is refused. Finding from the recorded runs (`runs/final_*/report.json`, live against saved outputs): the
+  KMR's live `compute_pick_targets` and `compute_place_targets` return the same keys the composed steps read; a ur5e
+  robot's live calculations do not (`approach_pose`, `target_pose` and others are missing or the output is empty), so
+  a robot's added pick or place would be refused at that step today. Gate (e) now: ur5e-1 unchanged; Part slippage
+  adds nothing (its pick reads `/parts/gear_small/target/model_name`); Conveyor adds ur5e-1's tray place; Machining
+  adds the KMR's load into M2. 20 tests pass.
+- The neighbour's entry is the one that took part in the accepted event: among the owner's entries giving the stated
+  change, only one had its guards true in the state the accepted event ran in (M1 `completed`). It is read from the
+  record, not chosen.
+- Not done, by design of what exists: a machine's or the Conveyor's composed steps are saved functions, not
+  primitives, and no machine or Conveyor event qualifies for growth in the four recoveries (they state part values
+  the model does not carry, or no `resource_state`), so no interface is written for them; they are reported without
+  an executor.
 
 ## Recovery UI and appendix set — November 9, 2026 — Study 2 video picks retained (user go "yes do it")
 
