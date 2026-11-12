@@ -520,8 +520,17 @@ after recovery".
 - Rejected (user, November 11): adding M1 and the Conveyor as places of the KMR's nominal tasks
   (`pick_part`, `place_release`) in place of the accepted events. An event is its content (conditions,
   changes, primitive program) and its name is a label; the KMR's content must stay the LLM's.
-- Checks on every use: RA feasibility (Algorithm 1, Eq. 12) for that part, since only KET4 was verified,
-  and CCA admission (Eq. 13).
+- Checks of the reuse, as they are run (user, November 12: enough for this demonstration; the paper's
+  claim is RA and CCA validation of the recovery itself, which the accepted outline and composition
+  passed):
+  - before the run, RA feasibility (Algorithm 1, Eq. 12) and CCA safety (Eq. 13) for each later part
+    (KET8, KET12, KET16) on the capture's state with that part finished in M1: FEASIBLE and SAFE;
+  - during the run, the nominal admission of each use (function contract, every participant's
+    conditions, feasibility) and the primitives' own checks;
+  - the live CCA is bypassed in Gazebo, as in every paper run, so the run's recorded events are
+    replayed through the rule monitors afterwards (mutex rules are geometric and are not fully checked
+    from events).
+  No RA or CCA check runs live on each use.
 - Eq. 6 after growth: the remaining production uses nominal and added events,
   $\exists s_N\in(E\cup E^R)^*: s_F s^R s_N\in L_m(G^R)$. It is not claimed for the 11-part order: the
   check passes 400,000 states with one more peg than the recovery's own end state (measurement in

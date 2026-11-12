@@ -194,8 +194,10 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   it. M1 and the Conveyor take part by their own declared models, as they do
   for ur5e-1's pick at M1 and place at loading position 1 (their conditions,
   and the Conveyor's order of the part on the belt, which the accepted event
-  stated for an empty belt). Each use is checked again (RA Eq. 12 for that
-  part, CCA Eq. 13). The added events keep the LLM's names and content; do
+  stated for an empty belt). The reuse is checked for each later part before
+  the run (RA Eq. 12, CCA Eq. 13) and by the nominal admission during it; no
+  RA or CCA check runs live on each use (user, 2026-11-12: enough for this
+  demonstration). The added events keep the LLM's names and content; do
   not replace them with nominal tasks at new places. It does not apply to
   outline or composition checks, or to any value of a proposed event.
   Definition: PAPER_FRAMEWORK.md, "Model growth after recovery".
