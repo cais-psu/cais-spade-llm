@@ -301,6 +301,76 @@ def resolve_waypoints(*, start_pose: Sequence[float], start_joints: Sequence[flo
     return result
 
 
+def resolve_self_motion(*, pose: Sequence[float], start_joints: Sequence[float], goal_joints: Sequence[float],
+                        names: Sequence[str], limits: dict,
+                        solve_ik: Callable[[list[float], list[float]], Sequence[float]],
+                        joint_step: float = .05, maximum_joint_step: float = .35) -> list[dict]:
+    """Move a redundant arm toward goal joints while every sample holds the same tool pose.
+
+    Each sample seeds IK with the previous solution moved at most ``joint_step`` toward the goal, and IK returns a
+    configuration that holds ``pose``; the last sample is seeded with the goal itself. A branch jump, a missing
+    solution, or a sample that comes no closer to the goal refuses the motion. Like ``resolve_waypoints``, it never
+    searches for an alternative and checks no collisions itself: the controller's IK and validation do.
+    """
+    _validate_limits(names, limits)
+    if (len(start_joints) != len(names) or len(goal_joints) != len(names)
+            or any(not math.isfinite(value) or not limits[name]['lower'] <= value <= limits[name]['upper']
+                   for joints in (start_joints, goal_joints) for name, value in zip(names, joints))
+            or not math.isfinite(joint_step) or joint_step <= 0
+            or not math.isfinite(maximum_joint_step) or maximum_joint_step <= 0):
+        raise ValueError('Self-motion requires finite bounded joints and positive joint spacing')
+
+    def remaining(joints: Sequence[float]) -> float:
+        return math.dist(joints, goal_joints)
+
+    previous = list(start_joints)
+    joints = [previous]
+    # Every sample moves at least a tenth of a step closer, so this bounds the samples.
+    for _ in range(math.ceil(10 * remaining(previous) / joint_step) + 1):
+        largest = max(abs(goal - value) for goal, value in zip(goal_joints, previous))
+        if largest <= joint_step:
+            joints.append(continuous_joints(solve_ik(list(pose), list(goal_joints)), previous, names, limits,
+                                            maximum_joint_step))
+            return _segment_timing(joints, names, limits)
+        seed = [value + (goal - value) * joint_step / largest for goal, value in zip(goal_joints, previous)]
+        solution = continuous_joints(solve_ik(list(pose), seed), previous, names, limits, maximum_joint_step)
+        if remaining(solution) > remaining(previous) - joint_step / 10:
+            raise ValueError('Self-motion comes no closer to its goal joints')
+        joints.append(solution)
+        previous = solution
+    raise ValueError('Self-motion did not reach its goal joints')
+
+
+def timed_joint_path(waypoints: Sequence[Sequence[float]], names: Sequence[str], limits: dict,
+                     sample_step: float = .02) -> list[dict]:
+    """Time straight joint-space segments between waypoints, stopping at each one.
+
+    Each segment is sampled every ``sample_step`` radians of its largest joint change so the controller's collision
+    checks can see every sample; nothing here checks collisions or searches for another path.
+    """
+    _validate_limits(names, limits)
+    if (len(waypoints) < 2 or not math.isfinite(sample_step) or sample_step <= 0
+            or any(len(joints) != len(names) or any(
+                not math.isfinite(value) or not limits[name]['lower'] <= value <= limits[name]['upper']
+                for name, value in zip(names, joints)) for joints in waypoints)):
+        raise ValueError('A joint path requires two or more finite bounded waypoints and a positive step')
+    result, elapsed = [], 0.
+    for start, end in zip(waypoints, waypoints[1:]):
+        largest = max(abs(b - a) for a, b in zip(start, end))
+        if largest == 0:
+            continue
+        count = math.ceil(largest / sample_step)
+        positions = [[a + (b - a) * index / count for a, b in zip(start, end)] for index in range(count + 1)]
+        timed = _segment_timing(positions, names, limits)
+        for row in timed[(1 if result else 0):]:
+            row['time_from_start'] += elapsed
+            result.append(row)
+        elapsed = result[-1]['time_from_start']
+    if not result:
+        raise ValueError('A joint path requires a waypoint that moves')
+    return result
+
+
 def robot_trajectory(names: Sequence[str], rows: list[dict]):
     """Build the owned controller's ROS trajectory after complete waypoint conversion."""
     from builtin_interfaces.msg import Duration

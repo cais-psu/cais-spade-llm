@@ -32,6 +32,36 @@ def joint_limits(path: Path, names: Sequence[str], accelerations: Sequence[float
     return limits
 
 
+def shoulder_flip(joints: Sequence[float], goal: Sequence[float], names: Sequence[str],
+                  limits: dict) -> list[list[float]] | None:
+    """Joint waypoints that renumber a flipped KMR shoulder, or None when the arm is not flipped.
+
+    On the KMR's iiwa arm joint_a1 and joint_a3 turn about one axis whenever joint_a2 is 0, so (a1 + pi, -a2, a3 - pi)
+    places every link as (a1, a2, a3) does. When that renumbering lies closer to the goal joints, the arm tilts
+    joint_a2 to 0, turns joint_a1 and joint_a3 by pi in opposite directions (only the shoulder link turns, in place),
+    and tilts joint_a2 back: the arm ends where it began, numbered like the goal. Only the first three joints move.
+
+    Args:
+        joints: Current arm joints, joint_a1 first.
+        goal: Joints the arm should be numbered like, such as the declared parked configuration.
+        names: Arm joint names, matching both lists.
+        limits: Joint limits by name.
+
+    Returns:
+        The current joints, the upright and turned shoulder, and the renumbered joints; or None.
+    """
+    first, second, third = joints[:3]
+    turned = None
+    for turn in (math.pi, -math.pi):
+        candidate = [first + turn, -second, third - turn, *joints[3:]]
+        if bounded_joints(names, candidate, limits) and (
+                turned is None or math.dist(candidate, goal) < math.dist(turned, goal)):
+            turned = candidate
+    if turned is None or math.dist(turned, goal) >= math.dist(joints, goal):
+        return None
+    return [list(joints), [first, 0., third, *joints[3:]], [turned[0], 0., turned[2], *joints[3:]], turned]
+
+
 def seconds(duration: Any) -> float:
     """Read a ROS duration without importing ROS into the UI or tests."""
     return duration.sec + duration.nanosec / 1e9

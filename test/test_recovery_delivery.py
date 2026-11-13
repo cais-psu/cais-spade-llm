@@ -2294,14 +2294,16 @@ def test_KMR_home_does_not_move_an_already_parked_arm(inputs, part):
     kmr, config = scene['KMR'], scene['KMR']['task_execution']
     measured = [-8.745, 1.875, 1.16, 1., 0., 0., 0.]
     state = SimpleNamespace(name=[*kmr['arm_joint_names'], kmr['gripper_joint']],
-                            position=[.1]*7 + [kmr['gripper_stroke_m']])
+                            position=[*kmr['parked_arm_configuration'], kmr['gripper_stroke_m']])
     tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
     methods = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
-               and n.name in {'move_home', 'move_to_pose'}]
+               and n.name in {'move_home', 'move_to_pose', 'restore_parked_elbow', 'arm_joints'}]
     namespace = dict(math=math, config=config, kmr=kmr, scene=scene, valuation={'KMR': {'held_part': None}},
         request={'inputs': {'product_order': {'parts': [part]}}}, storage_home=kmr_gazebo.storage_home,
         tcp=lambda: measured, transport_pose=lambda current: current.copy(),
         gripper=Mock(), operations=[], fresh_state=lambda: state, rotate=rotate,
+        observed_state=lambda: SimpleNamespace(joint_state=state),
+        _PARKED_ELBOW_TOLERANCE_RAD=kmr_gazebo._PARKED_ELBOW_TOLERANCE_RAD,
         execute_plan=Mock(), plan_motion=Mock(side_effect=AssertionError('Unnecessary arm trajectory')))
     exec(compile(ast.Module(body=methods, type_ignores=[]), str(kmr_gazebo.__file__), 'exec'), namespace)
     result = namespace['move_home']()
@@ -2310,6 +2312,60 @@ def test_KMR_home_does_not_move_an_already_parked_arm(inputs, part):
     assert result['tcp_pose'] == measured
     namespace['plan_motion'].assert_not_called()
     namespace['execute_plan'].assert_not_called()
+
+
+@pytest.mark.parametrize('obstructed', [False, True])
+def test_KMR_home_turns_a_renumbered_shoulder_back_and_parks_the_elbow(inputs, obstructed):
+    """Run b6: a recovery left the shoulder renumbered at home, and a later reach into M1 needed joint_a3 past its
+    limit. Home now turns the shoulder back, then walks the elbow to the parked joints with the TCP held."""
+    import ast
+    import math
+    from pathlib import Path
+    from cais_spade_llm.recovery_framework import ROOT, kmr_gazebo
+    from cais_spade_llm.recovery_framework.geometry import rotate
+    from cais_spade_llm.recovery_framework.kmr_motion import joint_limits, shoulder_flip
+
+    scene = inputs['scene']
+    kmr, config = scene['KMR'], scene['KMR']['task_execution']
+    names, parked = kmr['arm_joint_names'], kmr['parked_arm_configuration']
+    limits = joint_limits(ROOT / 'ros2/cais_lab_robotics/urdf/KMR_recovery.urdf.xacro', names,
+                          config['joint_acceleration_limits'])
+    measured = [-6.04, 1.88, 1.16, 1., 0., 0., 0.]
+    flipped = [-2.4103, -.4488, 1.9195, -1.0912, .4393, 1.8589, -.3208]
+    state = SimpleNamespace(name=[*names, kmr['gripper_joint']], position=[*flipped, kmr['gripper_stroke_m']])
+    executed = []
+
+    def execute_plan(plan):
+        executed.append(plan)
+        joints = shoulder_flip(flipped, parked, names, limits)[3] if plan == 'flip_plan' else list(parked)
+        state.position = [*joints, kmr['gripper_stroke_m']]
+
+    plan_shoulder_flip = Mock(side_effect=ValueError('KMR shoulder renumbering is obstructed: [(a, b)]')
+                              if obstructed else None, return_value='flip_plan')
+    tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
+    methods = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+               and n.name in {'move_home', 'move_to_pose', 'restore_parked_elbow', 'arm_joints'}]
+    namespace = dict(math=math, config=config, kmr=kmr, scene=scene, valuation={'KMR': {'held_part': None}},
+        request={'inputs': {'product_order': {'parts': ['KET8_Square_8mm']}}}, storage_home=kmr_gazebo.storage_home,
+        tcp=lambda: measured, transport_pose=lambda current: current.copy(), gripper=Mock(), operations=[],
+        fresh_state=lambda: state, rotate=rotate, observed_state=lambda: SimpleNamespace(joint_state=state),
+        _PARKED_ELBOW_TOLERANCE_RAD=kmr_gazebo._PARKED_ELBOW_TOLERANCE_RAD, shoulder_flip=shoulder_flip,
+        limits=limits, plan_shoulder_flip=plan_shoulder_flip, execute_plan=execute_plan,
+        plan_motion=Mock(return_value='walk_plan'), node=SimpleNamespace(get_logger=lambda: Mock()))
+    exec(compile(ast.Module(body=methods, type_ignores=[]), str(kmr_gazebo.__file__), 'exec'), namespace)
+    result = namespace['move_home']()
+    record = next(row for row in namespace['operations'] if row['operation'] == 'parked_elbow')
+    assert record['from_joints'] == flipped
+    if obstructed:
+        # No checked motion: the arm stays as it is and the refusal is recorded.
+        assert executed == [] and record['success'] is False and 'obstructed' in record['reason']
+        namespace['plan_motion'].assert_not_called()
+    else:
+        assert executed == ['flip_plan', 'walk_plan']
+        assert namespace['plan_motion'].call_args.kwargs == {'parked_elbow': True}
+        assert record['success'] is True and record['joints'] == list(parked)
+        assert record['shoulder_flip'][1][1] == 0.
+    assert result['home_pose_observed'] and result['tcp_pose'] == measured
 
 
 @pytest.mark.parametrize('condition', [
@@ -2391,7 +2447,8 @@ def test_KMR_saved_pick_approach_avoids_initial_raise_only_when_already_position
     namespace = dict(math=math, config=config, stopped=False, fresh_state=fresh_state,
         part='KET4_Square_4mm',
         tcp=lambda: actual, transport_pose=lambda: target, transfer_waypoints=lambda *_: [],
-        plan_motion=plan_motion, execute_plan=execute_plan, observed_state=lambda: 'measured')
+        plan_motion=plan_motion, execute_plan=execute_plan, observed_state=lambda: 'measured',
+        valuation={'KMR': {'held_part': None}}, request={}, restore_parked_elbow=Mock())
     tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
     methods = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
                and n.name in {'move_to_named_pose','move_to_pose','compute_pick_dock_pose','check_primitive'}]

@@ -1663,6 +1663,45 @@ def test_explicit_waypoints_reject_ik_branch_changes_and_unavailable_poses():
     assert solve.call_count == 1
 
 
+def test_self_motion_walks_the_joints_to_the_goal_while_every_sample_holds_the_pose():
+    from cais_spade_llm.resources.robot.cartesian_waypoints import resolve_self_motion
+
+    # A two-joint arm whose tool pose depends only on a + b: every pose has a line of joint solutions.
+    limits = {name: {'lower': -3., 'upper': 3., 'velocity': 1., 'acceleration': 2.} for name in ('a', 'b')}
+    pose = [.5, 0., 0., 1., 0., 0., 0.]
+    seeds = []
+    def solve(target, seed):
+        seeds.append(seed)
+        shift = (target[0] - sum(seed)) / 2
+        return [seed[0] + shift, seed[1] + shift]
+    rows = resolve_self_motion(pose=pose, start_joints=[2.4, -1.9], goal_joints=[.25, .25], names=['a', 'b'],
+                               limits=limits, solve_ik=solve)
+    assert rows[0]['positions'] == [2.4, -1.9]
+    assert rows[-1]['positions'] == pytest.approx([.25, .25])
+    assert all(sum(row['positions']) == pytest.approx(.5) for row in rows)
+    assert all(max(abs(b - a) for a, b in zip(left['positions'], right['positions'])) <= .35
+               for left, right in zip(rows, rows[1:]))
+    assert seeds[-1] == [.25, .25]
+    assert rows[0]['velocities'] == rows[-1]['velocities'] == [0., 0.]
+
+
+def test_self_motion_refuses_when_ik_holds_the_joints_or_finds_no_solution():
+    from cais_spade_llm.resources.robot.cartesian_waypoints import resolve_self_motion
+
+    limits = {name: {'lower': -3., 'upper': 3., 'velocity': 1., 'acceleration': 2.} for name in ('a', 'b')}
+    pose = [.5, 0., 0., 1., 0., 0., 0.]
+    with pytest.raises(ValueError, match='no closer'):
+        resolve_self_motion(pose=pose, start_joints=[2.4, -1.9], goal_joints=[.25, .25], names=['a', 'b'],
+                            limits=limits, solve_ik=lambda _target, _seed: [2.4, -1.9])
+    solve = Mock(side_effect=ValueError('KMR Cartesian waypoint IK failed: -31'))
+    with pytest.raises(ValueError, match='-31'):
+        resolve_self_motion(pose=pose, start_joints=[2.4, -1.9], goal_joints=[.25, .25], names=['a', 'b'],
+                            limits=limits, solve_ik=solve)
+    with pytest.raises(ValueError, match='finite bounded'):
+        resolve_self_motion(pose=pose, start_joints=[2.4, -1.9], goal_joints=[3.5, .25], names=['a', 'b'],
+                            limits=limits, solve_ik=solve)
+
+
 def test_waypoint_resource_never_calls_a_motion_planner_when_recording_is_missing(cartesian_motion_controller):
     controller, target, response = cartesian_motion_controller
     response.fraction = .8
@@ -1671,6 +1710,75 @@ def test_waypoint_resource_never_calls_a_motion_planner_when_recording_is_missin
     controller._execute_simulation_motion_plan.assert_not_called()
     controller._resolve_cartesian_waypoints.assert_not_called()
     assert controller._last_command_evidence['command_sent'] is False
+
+
+def _kmr_arm_links(joints):
+    """The KMR iiwa arm's link frames from its URDF joint origins and axes (no rotation offsets in this arm)."""
+    import re
+    import xml.etree.ElementTree as ET
+    from cais_spade_llm.recovery_framework import ROOT
+
+    text = (ROOT / 'ros2/cais_lab_robotics/urdf/KMR_recovery.urdf.xacro').read_text()
+    rows = [ET.fromstring(re.search(rf'<joint name="joint_a{index}".*?</joint>', text).group(0)) for index in range(1, 8)]
+
+    def multiply(a, b):
+        return [[sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+    def turn(axis, angle):
+        c, s = math.cos(angle), math.sin(angle)
+        x, y, z = axis
+        return [[c + x*x*(1-c), x*y*(1-c) - z*s, x*z*(1-c) + y*s, 0.], [y*x*(1-c) + z*s, c + y*y*(1-c), y*z*(1-c) - x*s, 0.],
+                [z*x*(1-c) - y*s, z*y*(1-c) + x*s, c + z*z*(1-c), 0.], [0., 0., 0., 1.]]
+
+    frame, frames = [[float(i == j) for j in range(4)] for i in range(4)], []
+    for row, angle in zip(rows, joints, strict=True):
+        assert row.find('origin').get('rpy') == '0 0 0'
+        x, y, z = map(float, row.find('origin').get('xyz').split())
+        frame = multiply(multiply(frame, [[1., 0., 0., x], [0., 1., 0., y], [0., 0., 1., z], [0., 0., 0., 1.]]),
+                         turn(list(map(float, row.find('axis').get('xyz').split())), angle))
+        frames.append(frame)
+    return frames
+
+
+def test_kmr_shoulder_flip_renumbers_the_shoulder_without_moving_the_arm():
+    from cais_spade_llm.recovery_framework import ROOT
+    from cais_spade_llm.recovery_framework.kmr_motion import joint_limits, shoulder_flip
+
+    names = [f'joint_a{index}' for index in range(1, 8)]
+    limits = joint_limits(ROOT / 'ros2/cais_lab_robotics/urdf/KMR_recovery.urdf.xacro', names, [1.] * 7)
+    parked = [0., .2638, 0., -1.0887, 0., 1.7891, 0.]
+    # Recorded at home in run b6 after a recovery: the shoulder renumbered, joint_a3 later at its limit.
+    flipped = [-2.4103, -.4488, 1.9195, -1.0912, .4393, 1.8589, -.3208]
+    path = shoulder_flip(flipped, parked, names, limits)
+    assert path[0] == flipped
+    assert path[1] == [-2.4103, 0., 1.9195, *flipped[3:]]
+    assert path[2][1] == 0. and path[2][0] + path[2][2] == pytest.approx(flipped[0] + flipped[2])
+    assert path[3] == pytest.approx([flipped[0] + math.pi, .4488, flipped[2] - math.pi, *flipped[3:]])
+    assert all(joints[3:] == flipped[3:] for joints in path)
+    assert shoulder_flip(parked, parked, names, limits) is None
+    # Every link sits where it was (within the arm's 0.44 mm shoulder offset); from link 3 on each also turns exactly
+    # as before, and only the two shoulder links are turned by pi about the vertical axis.
+    for index, (before, after) in enumerate(zip(_kmr_arm_links(flipped), _kmr_arm_links(path[3]), strict=True)):
+        assert math.dist([row[3] for row in before[:3]], [row[3] for row in after[:3]]) < .002
+        if index >= 2:
+            assert [row[:3] for row in before[:3]] == [pytest.approx(row[:3], abs=1e-9) for row in after[:3]]
+    # Upright, joint_a1 and joint_a3 turn about one axis: the forearm and wrist do not move while they counter-turn.
+    upright, turned = _kmr_arm_links(path[1]), _kmr_arm_links(path[2])
+    assert math.dist([row[3] for row in upright[6][:3]], [row[3] for row in turned[6][:3]]) < .002
+
+
+def test_timed_joint_path_stops_at_each_waypoint_and_skips_still_segments():
+    from cais_spade_llm.resources.robot.cartesian_waypoints import timed_joint_path
+
+    limits = {name: {'lower': -3., 'upper': 3., 'velocity': 1., 'acceleration': 2.} for name in ('a', 'b')}
+    rows = timed_joint_path([[0., 0.], [0., 0.], [.5, 0.], [.5, -.3]], ['a', 'b'], limits)
+    assert rows[0]['positions'] == [0., 0.] and rows[-1]['positions'] == pytest.approx([.5, -.3])
+    assert all(b['time_from_start'] > a['time_from_start'] for a, b in zip(rows, rows[1:]))
+    assert all(max(abs(y - x) for x, y in zip(a['positions'], b['positions'])) <= .020001 for a, b in zip(rows, rows[1:]))
+    corner = next(row for row in rows if row['positions'] == pytest.approx([.5, 0.]))
+    assert corner['velocities'] == pytest.approx([0., 0.])
+    with pytest.raises(ValueError, match='moves'):
+        timed_joint_path([[0., 0.], [0., 0.]], ['a', 'b'], limits)
 
 
 def test_KMR_transfer_waypoints_preserve_downward_tilt_without_posture_commands():

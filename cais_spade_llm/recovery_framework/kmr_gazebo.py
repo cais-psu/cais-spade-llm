@@ -21,12 +21,14 @@ from cais_spade_llm.recovery_framework.kmr_tasks import (
     KMR_MOVE_VARIANTS, capability_decompositions, delivery_bindings, execute_composition,
 )
 from cais_spade_llm.recovery_framework.kmr_motion import (
-    bounded_joints, joint_limits, retime_trajectory, trajectory_cost,
+    bounded_joints, joint_limits, retime_trajectory, shoulder_flip, trajectory_cost,
 )
 from cais_spade_llm.resources.robot.simulation_timing import MotionDeadline
 from cais_spade_llm.resources.gazebo_programs import saved_robot_definition
 
 _log = logging.getLogger(__name__)
+# An empty arm whose joints are all this close to the declared parked configuration needs no elbow motion at home.
+_PARKED_ELBOW_TOLERANCE_RAD = .05
 _SCENE_IDENTITY_PARAMETERS = (
     'launch_id', 'scene_fingerprint', 'scene_asset_fingerprint', 'performance_settings',
 )
@@ -758,7 +760,8 @@ def run(request: dict, session: dict | None = None) -> dict:
             raise ValueError('KMR configuration FK is unavailable')
         return pose_values(result.pose_stamped[0].pose)
 
-    def plan_motion(state, target=None, joints=None, cartesian=False, hold_arm_base=False, waypoints=None):
+    def plan_motion(state, target=None, joints=None, cartesian=False, hold_arm_base=False, waypoints=None,
+                    parked_elbow=False):
         nonlocal planning_seconds
         planning_started = time.monotonic()
         if config.get('cartesian_motion_only'):
@@ -769,17 +772,21 @@ def run(request: dict, session: dict | None = None) -> dict:
             values = dict(zip(state.joint_state.name, state.joint_state.position))
             initial = [values[name] for name in kmr['arm_joint_names']]
             start = configuration_pose(state, initial)
-            from cais_spade_llm.resources.robot.cartesian_waypoints import fixed_orientation_waypoints
+            if parked_elbow:
+                # The TCP holds its observed pose; only the redundant arm's joints move toward the parked ones.
+                targets = [list(start)]
+            else:
+                from cais_spade_llm.resources.robot.cartesian_waypoints import fixed_orientation_waypoints
 
-            middle = config['cartesian_waypoints'].get('transfer_orientation_waypoint_xyzw_in_base_frame')
-            if middle is not None:
-                middle = compose(entity('KMR'), [0., 0., 0., *middle])[3:]
-            targets = (deepcopy([*waypoints, target]) if waypoints else
-                       fixed_orientation_waypoints(
-                           start, target, [], rotation_point=transport_pose()[:3],
-                           angular_step=config['cartesian_waypoints'].get('angular_step_rad', .05),
-                           rotation_midpoint=middle,
-                       )) or [list(target)]
+                middle = config['cartesian_waypoints'].get('transfer_orientation_waypoint_xyzw_in_base_frame')
+                if middle is not None:
+                    middle = compose(entity('KMR'), [0., 0., 0., *middle])[3:]
+                targets = (deepcopy([*waypoints, target]) if waypoints else
+                           fixed_orientation_waypoints(
+                               start, target, [], rotation_point=transport_pose()[:3],
+                               angular_step=config['cartesian_waypoints'].get('angular_step_rad', .05),
+                               rotation_midpoint=middle,
+                           )) or [list(target)]
             waypoints, target = targets[:-1], targets[-1]
             if any(pose is None or len(pose) != 7 or not all(math.isfinite(v) for v in pose)
                    or not math.isclose(sum(v*v for v in pose[3:]), 1., abs_tol=1e-5)
@@ -789,7 +796,9 @@ def run(request: dict, session: dict | None = None) -> dict:
                    for pose in [start, *targets]):
                 raise ValueError('KMR Cartesian waypoints must keep the gripper downward')
         if config.get('cartesian_motion_only'):
-            from cais_spade_llm.resources.robot.cartesian_waypoints import resolve_waypoints, robot_trajectory
+            from cais_spade_llm.resources.robot.cartesian_waypoints import (
+                resolve_self_motion, resolve_waypoints, robot_trajectory,
+            )
 
             settings = config['cartesian_waypoints']
             avoid_collisions = config.get('avoid_collisions') is not False
@@ -819,18 +828,25 @@ def run(request: dict, session: dict | None = None) -> dict:
             # states and does not enforce the request's absolute jump threshold.
             # Resolve the declared poses ourselves so a branch jump is rejected
             # before interpolation can turn it into an unintended arm detour.
-            rows = resolve_waypoints(
-                start_pose=start, start_joints=initial, waypoints=targets,
-                names=kmr['arm_joint_names'], limits=limits, solve_ik=solve_ik,
-                linear_step=settings['linear_step_m'],
-                angular_step=settings.get('angular_step_rad', .05),
-                maximum_joint_step=settings['max_joint_step_rad'],
-            )
+            if parked_elbow:
+                rows = resolve_self_motion(
+                    pose=start, start_joints=initial, goal_joints=kmr['parked_arm_configuration'],
+                    names=kmr['arm_joint_names'], limits=limits, solve_ik=solve_ik,
+                    maximum_joint_step=settings['max_joint_step_rad'],
+                )
+            else:
+                rows = resolve_waypoints(
+                    start_pose=start, start_joints=initial, waypoints=targets,
+                    names=kmr['arm_joint_names'], limits=limits, solve_ik=solve_ik,
+                    linear_step=settings['linear_step_m'],
+                    angular_step=settings.get('angular_step_rad', .05),
+                    maximum_joint_step=settings['max_joint_step_rad'],
+                )
             trajectory = robot_trajectory(kmr['arm_joint_names'], rows)
             info = {'operation': 'cartesian_path', 'success': True, 'target': deepcopy(target),
                     'avoid_collisions': avoid_collisions, 'collision_checks_bypassed': not avoid_collisions,
                     'fraction': 1., 'error_code': 1, 'waypoint_count': len(targets),
-                    'joint_target': None, 'ik_samples': len(rows)}
+                    'joint_target': None, 'ik_samples': len(rows), 'parked_elbow': parked_elbow}
             planning_seconds += time.monotonic()-planning_started
         elif cartesian:
             query = GetCartesianPath.Request()
@@ -1030,7 +1046,84 @@ def run(request: dict, session: dict | None = None) -> dict:
         if pose_name != 'transport':
             raise ValueError('Unknown KMR arm pose')
         selected = compute_pick_dock_pose()
-        return move_to_pose(selected['transport'], waypoints=selected['waypoints'])
+        result = move_to_pose(selected['transport'], waypoints=selected['waypoints'])
+        if (valuation.get('KMR', {}).get('held_part') is None
+                and (request.get('custody') or {}).get('attached') is not True):
+            restore_parked_elbow()
+            result['tcp_pose'] = tcp()
+        return result
+
+    def arm_joints(state):
+        values = dict(zip(state.joint_state.name, state.joint_state.position))
+        return [values[name] for name in kmr['arm_joint_names']]
+
+    def plan_shoulder_flip(state, waypoints):
+        """Time the shoulder renumbering and check every sample against the planning scene."""
+        from cais_spade_llm.resources.robot.cartesian_waypoints import (
+            robot_trajectory, timed_joint_path, trajectory_samples,
+        )
+
+        trajectory = robot_trajectory(kmr['arm_joint_names'], timed_joint_path(waypoints, kmr['arm_joint_names'], limits))
+        retime_trajectory(trajectory.joint_trajectory, limits, config['velocity_scaling'], config['acceleration_scaling'])
+        queries = [GetStateValidity.Request(group_name=config['planning_group'],
+                                            robot_state=updated_state(state, kmr['arm_joint_names'], positions))
+                   for positions in trajectory_samples(trajectory.joint_trajectory, maximum_joint_step=.02)]
+        for response in service_batch(GetStateValidity, '/check_state_validity', queries):
+            if not response.valid:
+                raise ValueError('KMR shoulder renumbering is obstructed: '
+                                 f'{[(c.contact_body_1, c.contact_body_2) for c in response.contacts]}')
+        info = {'operation': 'shoulder_flip', 'success': True, 'target': None, 'joint_waypoints': deepcopy(waypoints),
+                'avoid_collisions': True, 'collision_checks_bypassed': False, 'checked_states': len(queries),
+                'trajectory': {'joint_names': list(trajectory.joint_trajectory.joint_names),
+                               'points': [{'positions': list(point.positions),
+                                           'time_from_start': point.time_from_start.sec
+                                           + point.time_from_start.nanosec / 1e9}
+                                          for point in trajectory.joint_trajectory.points]}}
+        return trajectory, info
+
+    def restore_parked_elbow():
+        """Return the empty arm to its declared parked joints with the least arm motion.
+
+        Every KMR arm motion continues from the current joints, and home or transport restores only the TCP pose, so
+        the seven-joint arm keeps the joints its last motion left. In run b6 a recovery left the shoulder renumbered
+        (joint_a1 -2.41, joint_a2 -0.45, joint_a3 1.92 rad at home), and a later approach into M1 needed joint_a3 past
+        its limit. A renumbered shoulder is first turned back (shoulder_flip: joint_a2 tilts to 0 and back, the arm
+        ends where it began); then the elbow walks to the parked joints while the TCP holds its pose. When no checked
+        motion exists for a step, the arm stays where it is and the refusal is recorded.
+        """
+        state = observed_state()
+        current = arm_joints(state)
+        parked = kmr['parked_arm_configuration']
+        offset = max(abs(a - b) for a, b in zip(current, parked, strict=True))
+        if offset <= _PARKED_ELBOW_TOLERANCE_RAD:
+            return
+        record = {'operation': 'parked_elbow', 'from_joints': current, 'max_offset_rad': offset}
+        waypoints = shoulder_flip(current, parked, kmr['arm_joint_names'], limits)
+        if waypoints is not None:
+            try:
+                plan = plan_shoulder_flip(state, waypoints)
+            except ValueError as exc:
+                node.get_logger().warning(f'[KMR] shoulder stays renumbered: {exc}')
+                operations.append({**record, 'success': False, 'reason': str(exc)})
+                return
+            before = tcp()
+            execute_plan(plan)
+            # The renumbered shoulder places the TCP where it was; anything else means the arm model is not the one
+            # shoulder_flip assumes.
+            if math.dist(tcp()[:3], before[:3]) > config['position_tolerance_m']:
+                raise ValueError('KMR shoulder renumbering moved the TCP')
+            record['shoulder_flip'] = waypoints
+            state = observed_state()
+        try:
+            plan = plan_motion(state, parked_elbow=True)
+        except ValueError as exc:
+            node.get_logger().warning(f'[KMR] elbow stays off its parked joints: {exc}')
+            operations.append({**record, 'success': False, 'reason': str(exc), 'joints': arm_joints(state)})
+            return
+        execute_plan(plan)
+        joints = arm_joints(observed_state())
+        operations.append({**record, 'success': True, 'joints': joints,
+                           'max_offset_from_parked_rad': max(abs(a - b) for a, b in zip(joints, parked, strict=True))})
 
     def move_relative(offset):
         """Move the TCP by a measured world-frame Cartesian offset."""
@@ -1056,10 +1149,11 @@ def run(request: dict, session: dict | None = None) -> dict:
         gripper(kmr['gripper_stroke_m'])
         before = len(operations)
         move_to_pose(target)
+        restore_parked_elbow()
         actual = tcp()
         state = fresh_state()
         joints = dict(zip(state.name, state.position))
-        plans = [row for row in operations[before:] if row.get('operation') == 'cartesian_path']
+        plans = [row for row in operations[before:] if row.get('operation') in {'cartesian_path', 'shoulder_flip'}]
         planned_joints = (plans[-1]['trajectory']['points'][-1]['positions'] if plans else
                           [joints[name] for name in kmr['arm_joint_names']])
         error = max(abs(joints[name]-value) for name,value in zip(kmr['arm_joint_names'],planned_joints,strict=True))

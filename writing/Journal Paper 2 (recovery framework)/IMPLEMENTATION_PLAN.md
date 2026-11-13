@@ -301,6 +301,21 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   recovery's own Retrieve started from the parked elbow. Not the composition, not model growth's binding (the live
   KET8 target is right); a general gap in the KMR worker: nothing returns the arm's elbow to its declared
   configuration. Fix not decided.
+- Why the elbow twisted (b6 video): the Deliver event has the base face south at the belt ("using a south-facing base
+  heading"), so the arm reaches over the KMR's back to place KET4 (17:55); reaching behind leans the shoulder back and
+  turns joint_a1 to -138 deg, and the way back to transport continued from those joints. The b6 joints are the same arm
+  as (0.73, 0.45, -1.22, ...) with joint_a1 and joint_a3 numbered pi the other way (`shoulder_flip` identity, checked
+  on the URDF in a test).
+- KMR arm reset (user: "i will keep the reset i saw"): with an empty gripper, at home and at the empty transport pose,
+  an arm more than 0.05 rad off its declared parked joints first turns a renumbered shoulder back (`shoulder_flip`:
+  joint_a2 tilts to 0, joint_a1 and joint_a3 turn pi in opposite directions, joint_a2 tilts back; every 0.02 rad sample
+  checked against the planning scene; the TCP must end within the position tolerance), then walks the elbow to the
+  parked joints with the TCP held (`resolve_self_motion`, the worker's IK, collision and FK checks). A refused step
+  leaves the arm as it is and is recorded. A gripper-held walk alone cannot undo the renumbering (Gazebo test
+  `gazebo_elbow_1`: "comes no closer"). Recorded demo from b6's joints (`gazebo_reset_demo_2`, shown to the user as an
+  artifact): 393 states checked against the cell's 102 obstacles, TCP moved 0.9 mm, parked exactly; robot time 6.3 s
+  + 2.2 s. Tests: 6 new; touched suites 129 failed before and after, none newly failing. Scripts and clips:
+  `/home/jongh/recovery_review_1030/model_growth_20261111/elbow_fix/`.
 
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.
