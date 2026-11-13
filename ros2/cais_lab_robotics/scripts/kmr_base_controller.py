@@ -224,11 +224,13 @@ def base_state_stop_reason(
     arm_updated: float | None,
     arm_timeout: float,
     arm_parked: bool,
+    arm_refusal: str | None = None,
 ) -> str | None:
     """Explain a failed base feedback gate, using simulation time.
 
     Gazebo may pause or run slowly. A pause must freeze feedback age, while
     missing observations during advancing simulation time still stop the base.
+    ``arm_refusal`` names the arm, gripper or custody check that failed, when known.
     """
 
     if odom_updated is None or now - odom_updated > odom_timeout:
@@ -236,8 +238,13 @@ def base_state_stop_reason(
     if arm_updated is None or now - arm_updated > arm_timeout:
         return "KMR arm state is stale"
     if not arm_parked:
-        return "KMR arm left its parked configuration"
+        return arm_refusal or "KMR arm left its parked configuration"
     return None
+
+
+# The delivery worker renews its custody of a carried part about every 0.1 s of wall time. A renewal that has not
+# arrived for 0.75 s holds the base until it does, as a stale velocity command does: a busy computer delays it.
+LATE_CUSTODY_REASON = "KMR transport custody update is late"
 
 
 def occupancy_grid_footprint_is_clear(
@@ -1083,6 +1090,8 @@ def main() -> None:
             if reason is not None:
                 self._abort_base_motion(reason)
                 return
+            if self._arm_parked_refusal() == LATE_CUSTODY_REASON:
+                reason = LATE_CUSTODY_REASON
             if reason is None and (
                 command is None or command_updated is None
                 or now - command_updated > self.command_timeout
@@ -1292,8 +1301,17 @@ def main() -> None:
             )
 
         def _arm_is_parked(self) -> bool:
+            return self._arm_parked_refusal() is None
+
+        def _arm_parked_refusal(self, *, require_fresh_custody: bool = True) -> str | None:
+            """Return why the arm does not hold the configuration the base may move with, or None when it does.
+
+            Empty, the arm holds its parked configuration with the gripper open. Carrying, it holds the carrying
+            configuration with the gripper closed on a Storage part, under custody from this launch and scene that
+            the delivery worker keeps renewing. ``require_fresh_custody=False`` leaves out the renewal's age.
+            """
             if not self._arm_state_is_fresh():
-                return False
+                return "KMR arm state is stale"
             custody = self._transport_custody
             carrying = bool(custody and custody.get('attached') is True)
             configuration = (self.kmr['task_execution']['carrying_arm_configuration']
@@ -1311,30 +1329,37 @@ def main() -> None:
                 if (not isinstance(configuration, list) or len(configuration) != 7
                         or any(not isinstance(value, (int, float)) or not math.isfinite(value)
                                for value in configuration)):
-                    return False
-            expected = dict(zip(self.kmr["arm_joint_names"], configuration))
-            arm_parked = all(
-                name in self._arm_positions
-                and abs(self._arm_positions[name] - float(position))
-                <= self.arm_parked_tolerance
-                for name, position in expected.items()
-            )
+                    return "KMR transport custody states no valid carrying arm configuration"
+            for name, position in zip(self.kmr["arm_joint_names"], configuration):
+                if name not in self._arm_positions:
+                    return f"KMR arm joint {name} is not measured"
+                offset = abs(self._arm_positions[name] - float(position))
+                if not offset <= self.arm_parked_tolerance:
+                    return (f"KMR arm left its parked configuration: {name} is {offset:.3f} rad off "
+                            f"(tolerance {self.arm_parked_tolerance} rad)")
             width = self._arm_positions.get(self.kmr["gripper_joint"])
             if width is None:
-                return False
+                return "KMR gripper width is not measured"
             if not custody or custody.get('attached') is not True:
-                return arm_parked and abs(width - float(self.kmr["gripper_stroke_m"])) <= .006
+                if not abs(width - float(self.kmr["gripper_stroke_m"])) <= .006:
+                    return f"KMR gripper is {width:.4f} m wide, not open at {self.kmr['gripper_stroke_m']} m"
+                return None
+            if require_fresh_custody and (
+                    self._transport_custody_monotonic is None
+                    or time.monotonic() - self._transport_custody_monotonic >= .75):
+                return LATE_CUSTODY_REASON
+            part = custody.get('part_name')
+            if part not in self.storage_parts:
+                return f"KMR transport custody names {part}, not a Storage part"
+            if (custody.get('launch_id') != self.get_parameter('launch_id').value
+                    or custody.get('scene_fingerprint') != self.get_parameter('scene_fingerprint').value):
+                return "KMR transport custody comes from another launch or scene"
             closed_width = self.kmr['task_execution'].get('closed_gripper_width_m_by_part', {}).get(
-                custody.get('part_name'), self.kmr['task_execution']['closed_gripper_width_m'],
+                part, self.kmr['task_execution']['closed_gripper_width_m'],
             )
-            return bool(arm_parked and custody
-                        and self._transport_custody_monotonic is not None
-                        and time.monotonic() - self._transport_custody_monotonic < .75
-                        and custody.get('attached') is True
-                        and custody.get('part_name') in self.storage_parts
-                        and custody.get('launch_id') == self.get_parameter('launch_id').value
-                        and custody.get('scene_fingerprint') == self.get_parameter('scene_fingerprint').value
-                        and abs(width - closed_width) <= .006)
+            if not abs(width - closed_width) <= .006:
+                return f"KMR gripper is {width:.4f} m wide, not closed on {part} at {closed_width} m"
+            return None
 
         def _transport_cb(self, message: String) -> None:
             try:
@@ -1353,15 +1378,18 @@ def main() -> None:
                     self._publish_motion_status()
 
         def _state_stop_reason(self) -> str | None:
+            """Return why base motion must end now, or None; a late custody renewal only holds the base."""
             if self._transport_custody and self._transport_custody.get('error'):
                 return 'KMR custody lost: '+str(self._transport_custody['error'])
+            refusal = self._arm_parked_refusal(require_fresh_custody=False)
             return base_state_stop_reason(
                 self.get_clock().now().nanoseconds / 1e9,
                 self._odom_simulation_time,
                 self.odom_timeout,
                 self._arm_state_simulation_time,
                 self.arm_state_timeout,
-                self._arm_is_parked(),
+                refusal is None,
+                refusal,
             )
 
         def _ensure_initial_arm_parked(self) -> None:

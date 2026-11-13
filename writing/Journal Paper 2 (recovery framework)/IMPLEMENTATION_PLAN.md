@@ -316,6 +316,17 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   artifact): 393 states checked against the cell's 102 obstacles, TCP moved 0.9 mm, parked exactly; robot time 6.3 s
   + 2.2 s. Tests: 6 new; touched suites 129 failed before and after, none newly failing. Scripts and clips:
   `/home/jongh/recovery_review_1030/model_growth_20261111/elbow_fix/`.
+- Run b7 (`51ccf46`, recorded, 21:04-22:25): recovery 4/4, growth added the KMR's three events, the arm reset held
+  (the first grown Retrieve, KET8 out of M1, passed where b6 stopped); STOPPED at 6/11 in the first grown Deliver (KET8):
+  185 s into the drive the base controller ended `move_base` with "KMR arm left its parked configuration". That check
+  also requires the worker's custody renewal (sent about every 0.1 s, GetEntityState first) to be under 0.75 s old in
+  wall time, and named none of its conditions. The video shows no arm or part motion; seconds before, the base held
+  twice for late velocity commands (a busy laptop). The recorder drops a whole segment on a >2 s stall: 22:05-22:14 is
+  lost (stall at 22:13; 1-2 s stalls at 22:03 came from this chat scanning Study 1 records during the run).
+- Fix (user: "are you able to fix it?"): a late custody renewal now holds the base like a late velocity command and the
+  motion resumes when it arrives; a carrying arm off its joints, a wrong gripper width, custody from another launch or
+  a moved part still end the motion, and the refusal names the check (`_arm_parked_refusal`). Tests: the controller
+  file 287 passed; the other files that read the controller fail the same 2 before and after.
 
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.

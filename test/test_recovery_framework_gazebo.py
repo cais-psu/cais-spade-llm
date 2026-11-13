@@ -1695,6 +1695,34 @@ def test_kmr_stop_does_not_refresh_commands_or_resume_cancellation(
             node._odom_cb(odometry)
             node._control_tick()
             assert outputs[-1].linear.x > 0.0
+
+            # Carrying a part, a late custody renewal holds the base, as a late command does, and the motion
+            # goes on when the renewal arrives.
+            node._transport_custody = {
+                'attached': True, 'part_name': node.kmr['task_execution']['part_name'],
+                'launch_id': node.get_parameter('launch_id').value,
+                'scene_fingerprint': node.get_parameter('scene_fingerprint').value,
+            }
+            node._arm_positions.update(zip(
+                node.kmr['arm_joint_names'], node.kmr['task_execution']['carrying_arm_configuration'],
+            ))
+            node._arm_positions[node.kmr['gripper_joint']] = node.kmr['task_execution']['closed_gripper_width_m']
+            node._transport_custody_monotonic = 999.0
+            assert node._state_stop_reason() is None
+            node._control_tick()
+            assert outputs[-1].linear.x == 0.0
+            assert not node._cancel_base_motion_requested
+            assert node._last_hold_reason == kmr_base.LATE_CUSTODY_REASON
+            node._transport_custody_monotonic = 1000.0
+            node._nav_command_cb(command)
+            odometry.header.stamp.nanosec += 10_000_000
+            node._odom_cb(odometry)
+            node._control_tick()
+            assert outputs[-1].linear.x > 0.0
+            assert node._last_hold_reason is None
+            node._transport_custody = None
+            node._arm_positions.update(zip(node.kmr['arm_joint_names'], node.kmr['parked_arm_configuration']))
+            node._arm_positions[node.kmr['gripper_joint']] = node.kmr['gripper_stroke_m']
             node._follow_path_active = True
             node._cancel_base_motion_requested = True
             node._control_tick()
@@ -3237,8 +3265,8 @@ def test_kmr_loaded_transport_requires_fresh_matching_custody_and_closed_gripper
 
     tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
     method = next(node for node in ast.walk(tree)
-                  if isinstance(node, ast.FunctionDef) and node.name == '_arm_is_parked')
-    namespace = {'time': time}
+                  if isinstance(node, ast.FunctionDef) and node.name == '_arm_parked_refusal')
+    namespace = {'time': time, 'math': math, 'LATE_CUSTODY_REASON': kmr_base.LATE_CUSTODY_REASON}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
     kmr = json.loads(ROBOTS_PATH.read_text())['KMR']
     positions = dict(zip(kmr['arm_joint_names'], kmr['parked_arm_configuration']))
@@ -3250,7 +3278,11 @@ def test_kmr_loaded_transport_requires_fresh_matching_custody_and_closed_gripper
         _transport_custody_monotonic=None,
         get_parameter=lambda name: SimpleNamespace(value={'launch_id': 'launch', 'scene_fingerprint': 'scene'}[name]),
     )
-    parked = namespace['_arm_is_parked']
+    refusal = namespace['_arm_parked_refusal']
+
+    def parked(node) -> bool:
+        return refusal(node) is None
+
     assert parked(node)
     positions[kmr['gripper_joint']] = kmr['task_execution']['closed_gripper_width_m']
     assert not parked(node)
@@ -3278,10 +3310,13 @@ def test_kmr_loaded_transport_requires_fresh_matching_custody_and_closed_gripper
         assert not parked(node)
         node._transport_custody[key] = correct
     node._transport_custody_monotonic = time.monotonic()-1
-    assert not parked(node)
+    assert refusal(node) == kmr_base.LATE_CUSTODY_REASON
+    assert refusal(node, require_fresh_custody=False) is None
     node._transport_custody_monotonic = time.monotonic()
     positions[kmr['arm_joint_names'][0]] += .2
-    assert not parked(node)
+    assert refusal(node).startswith(f"KMR arm left its parked configuration: {kmr['arm_joint_names'][0]} is 0.200 rad off")
+    positions[kmr['arm_joint_names'][0]] = float('nan')
+    assert refusal(node, require_fresh_custody=False).startswith('KMR arm left its parked configuration')
 
 
 @pytest.mark.parametrize('rate', [250, 500, 1000])
@@ -3638,8 +3673,8 @@ def test_KMR_empty_waypoint_transport_requires_matching_simulation_evidence(inva
 
     tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
     method = next(node for node in ast.walk(tree)
-                  if isinstance(node, ast.FunctionDef) and node.name == '_arm_is_parked')
-    namespace = {'time': time, 'math': math}
+                  if isinstance(node, ast.FunctionDef) and node.name == '_arm_parked_refusal')
+    namespace = {'time': time, 'math': math, 'LATE_CUSTODY_REASON': kmr_base.LATE_CUSTODY_REASON}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
     kmr = json.loads(ROBOTS_PATH.read_text())['KMR']
     kmr['task_execution']['avoid_collisions'] = not bypass
@@ -3670,7 +3705,7 @@ def test_KMR_empty_waypoint_transport_requires_matching_simulation_evidence(inva
                            _arm_state_is_fresh=lambda: invalid != 'feedback',
                            _transport_custody=custody,
                            get_parameter=lambda name: SimpleNamespace(value=parameters[name]))
-    assert namespace['_arm_is_parked'](node) is (invalid is None and not bypass)
+    assert (namespace['_arm_parked_refusal'](node) is None) is (invalid is None and not bypass)
 
 
 @pytest.mark.parametrize("failure", [None, "collision", "unavailable", "stale", "canceled", "timeout"])
