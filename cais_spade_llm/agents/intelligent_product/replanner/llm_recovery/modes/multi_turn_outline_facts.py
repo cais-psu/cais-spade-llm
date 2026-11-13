@@ -641,6 +641,8 @@ def declared_received_states(jid: str, prepared: dict) -> list[str]:
         events = outcome_models(models).get(evidence.get("resource_id"), {}).get("events", [])
     else:
         events = _environment_model_events(entry)
+    # The resource's own declared responses, as Exit declares a part taken off it, read like those events.
+    events = [*events, *(entry.get("part_responses") or [])]
     changes: dict[tuple[str, str], dict[str, str | None]] = {}
     for event in events:
         bindings, updates = event.get("parameter_bindings", {}), event.get("updates") or {}

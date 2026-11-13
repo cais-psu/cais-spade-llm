@@ -466,6 +466,17 @@ def _declare_states(models: dict, scene: dict) -> None:
         scope="part",
     )
     exit_model["marked_state_conditions"] = [_equals(resource_state="occupied", part_name=product)]
+    # Exit's own response to a part taken off it. Normal production never takes one off, so no robot event at Exit
+    # declares it; a recovery that parks a part on Exit may take it back. The RA checks a stated Exit value against
+    # it (received_values) and writes none.
+    exit_model["part_responses"] = [
+        {
+            "name": "a part taken from Exit",
+            "parameter_bindings": {"origin_resource_location": {"equals": "Exit"}},
+            "guards": {"resource_state": {"equals": "occupied"}, "part_name": {"equals_from_param": "part_name"}},
+            "updates": _sets(resource_state="empty", part_name=None),
+        }
+    ]
 
 
 def _kmr_task_states(name: str, variant: str = "") -> tuple[str, str]:

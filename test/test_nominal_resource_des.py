@@ -2492,6 +2492,15 @@ def test_a_part_put_into_or_taken_from_a_place_leaves_what_the_receiving_model_d
     # Exit's guard on where the part is belongs to the place check; Exit's own state becomes occupied.
     assert received("Exit", "Exit", "part_name", {"resource_state": "empty", "part_name": None}) == (
         {"resource_state": "occupied", "part_name": part}, [])
+    # A part taken off Exit leaves it empty, as Exit's own response declares; no robot event at Exit declares it.
+    assert received("Exit", "Exit", "part_name", {"resource_state": "occupied", "part_name": part}, taken=True) == (
+        {"resource_state": "empty", "part_name": None}, [])
+    assert received("Exit", "Exit", "part_name", {"resource_state": "empty", "part_name": None}, taken=True) == ({}, [
+        {"event_name": "a part taken from Exit",
+         "failed": [{"field": "resource_state", "operator": "equals", "expected": "occupied", "actual": "empty"},
+                    {"field": "part_name", "operator": "equals", "expected": part, "actual": None}]}])
+    assert not any((event["parameter_bindings"].get("origin_resource_location") or {}).get("equals") == "Exit"
+                   for model in models.values() for event in model["events"])
     # The printer's last output taken leaves it idle; with another output still on its bed it stays completed.
     printer = "3D Printing Station"
     outputs = {"output.gear_small": False, "output.gear_medium": False, "output.gear_large": True}

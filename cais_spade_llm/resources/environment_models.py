@@ -110,10 +110,12 @@ def received_values(models: dict, owner: str, place: Any, slot: str | None, part
     A resource's model carries other resources' events at its places: a part released into a machine leaves the
     machine loaded, and a part taken out of it leaves it idle. The consequence belongs to the resource that
     receives or gives up the part, so whichever resource places or takes it, the declared values are the same
-    (the event's actor is not matched). The resource's own guards on that event, and its declared collection
-    guards over its other outputs, must hold on ``values``. A guard or update on a part variable concerns where
-    the part is, which the place or pick check decides, so only the resource's own variables count. Code writes
-    none of these values: a check finds them, and the event states them or is refused.
+    (the event's actor is not matched). Where no other resource's event at that place carries it, the resource
+    declares its response itself (``part_responses``), as Exit does for a part taken off it. The resource's own
+    guards on that event or response, and its declared collection guards over its other outputs, must hold on
+    ``values``. A guard or update on a part variable concerns where the part is, which the place or pick check
+    decides, so only the resource's own variables count. Code writes none of these values: a check finds them,
+    and the event states them or is refused.
 
     Args:
         models: Every resource's runtime model, per resource id.
@@ -131,14 +133,17 @@ def received_values(models: dict, owner: str, place: Any, slot: str | None, part
         The owner's declared values after the event, and the guards that do not hold, one list per declared
         event at that place; both empty where the owner's model declares nothing for that place.
     """
-    if not (models.get(owner) or {}).get("events"):
+    model = models.get(owner) or {}
+    if not model.get("events") and not model.get("part_responses"):
         return {}, []
-    declared = models[owner].get("state_variables") or {}
+    declared = model.get("state_variables") or {}
     part_fields = {field for field, declaration in declared.items() if declaration.get("scope") == "part"}
     binding = "origin_resource_location" if taken else "destination_location"
     params = {"part_name": part}
     refused: list[dict] = []
-    for event in tasks.outcome_models(models).get(owner, {}).get("events") or []:
+    declarations = [*(tasks.outcome_models(models).get(owner, {}).get("events") or []),
+                    *(model.get("part_responses") or [])]
+    for event in declarations:
         bindings = event.get("parameter_bindings") or {}
         updates, guards = event.get("updates") or {}, event.get("guards") or {}
         if ((bindings.get(binding) or {}).get("equals") != place or not updates
@@ -172,7 +177,7 @@ def received_values(models: dict, owner: str, place: Any, slot: str | None, part
                 failed.append({"field": _bound(field, params), "operator": operator.removesuffix("_from_param"),
                                "expected": deepcopy(expected), "actual": deepcopy(actual)})
         if failed:
-            refused.append({"event_name": event["event_name"], "failed": failed})
+            refused.append({"event_name": event.get("event_name") or event["name"], "failed": failed})
             continue
         return ({_bound(field, params): deepcopy(rule["set"]) if "set" in rule else part
                  for field, rule in updates.items()

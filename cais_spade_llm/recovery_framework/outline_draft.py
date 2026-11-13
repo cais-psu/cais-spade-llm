@@ -185,15 +185,21 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
                                                 if rid in jids}
     from cais_spade_llm.resources.environment_models import build_environment_models
 
+    runtime_models = build_environment_models(scene) if scene.get("resource_programs") else {}
     # A place a resource's runtime model declares a completion for adds that entry to the part's record.
     completions: dict[str, dict[str, list]] = {}
-    for rid, model in (build_environment_models(scene) if scene.get("resource_programs") else {}).items():
+    for rid, model in runtime_models.items():
         for event in model.get("events") or []:
             added = (event.get("product_effects") or {}).get("processCompleted")
             place = ((event.get("parameter_bindings") or {}).get("destination_location") or {}).get("equals")
             if added and isinstance(place, str) and rid in jids:
                 completions.setdefault(jids[rid], {}).setdefault(place, deepcopy(added))
     prepared["declared_place_completions"] = completions
+    # A resource's own response to a part put at or taken from its places, as Exit declares a part taken off it,
+    # from the runtime model the RA reads, so the facts state what the check holds a stated value against.
+    for rid, model in runtime_models.items():
+        if model.get("part_responses") and jids.get(rid) in prepared["recovery_resources"]:
+            prepared["recovery_resources"][jids[rid]]["part_responses"] = deepcopy(model["part_responses"])
     prepared["assembly_targets"] = deepcopy(
         (observations.get("inputs") or {}).get("geometry", {}).get("parts", {}).get("assembly_target_map", {}))
     measured = (observations.get("physical_evidence") or {}).get("resources") or {}
