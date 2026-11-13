@@ -327,6 +327,23 @@ This replaces the November 3 rule that only Opus 5.5 gives the appendix answers:
   motion resumes when it arrives; a carrying arm off its joints, a wrong gripper width, custody from another launch or
   a moved part still end the motion, and the refusal names the check (`_arm_parked_refusal`). Tests: the controller
   file 287 passed; the other files that read the controller fail the same 2 before and after.
+- Run b8 (`dbade3d`, recorded, 22:48-01:27, user: "run it again and take the video"): COMPLETED. Recovery 4/4
+  (23:14-23:32), growth added the KMR's three events, production resumed with ur5e-1 out and reached 11/11 at 01:21;
+  the KMR ran Retrieve, Deliver and Return for KET8, KET12 and KET16 with no hold or refusal from the base controller.
+  Video: 3 segments captured, none lost (largest capture gap 0.39 s), 9274 s recorded. Real-time factor 0.02-0.03 for
+  the first 10 min, then 0.12-0.27 (the nominal recording ran at about 0.5).
+- Videos (user: two versions paced by robot time like the nominal videos): `growth_video_robot_time.py` in
+  `rcim_video_build/talk` (live "Resources at work" chart, captions per phase, Gazebo 3D view cropped as the nominal
+  clip). Normal 10x simulated time, 148.6 s; fast 35x, 45.3 s:
+  `/home/jongh/recovery_review_1030/model_growth_20261111/video_b8/growth_b8_{normal_10x,fast_35x}.mp4`. Simulated
+  time from Gazebo's Sim Time read off the recorded frames (segments 0-1) and a `gz stats` log from 00:19.
+  Open: the closing caption comparing with and without the recovery (user, relayed) awaits the user's review of its
+  wording and sources; the after-run replay of the run's events through the rule monitors is not built.
+- Run C again for the caption's "without the recovery" number (offline harness `run_c.py`, the real scheduler with
+  simulated execution, the same 11-part order and failure point, ur5e-1 out, no recovery; repository read-only, its
+  scheduler code that of `dbade3d`): blocked at 7/11 on seeds 1-3 (the gears and the four round pegs; KET4 left in M1,
+  KET8, KET12 and KET16 in Storage). The 3/11 recorded above for November 11 came from older code; 7/11 replaces it.
+  Records: `/home/jongh/recovery_review_1030/model_growth_20261111/offline/harness/runs/run_c_seed{1,2,3}_drain/`.
 
 - Outlines from `9776af2` (prompt `9f1faee`). The ur5e-1 and Machining compositions finished before the runners moved to
   `7f6f712`; the Python is the same and the native corridor change reaches only a gear insertion, which neither has.
