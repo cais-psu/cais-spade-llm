@@ -189,15 +189,21 @@ def replay_checked_draft(draft, observations: dict) -> tuple[dict, str]:
     source = deepcopy(draft.prepared)
     # The live loop takes this transition when the outline is declared complete.
     source["multi_turn_session_state"] = {**result["session"], "current_phase": "primitive_generation"}
+    from cais_spade_llm.recovery_framework.workflow_gazebo import TRANSPORT_PRIMITIVE_INTERFACES
+
     recorded = observations["prepared_recovery_request"]["recovery_resources"]
-    declarations = current_primitive_declarations(observations["inputs"]["scene"])
+    scene = observations["inputs"]["scene"]
+    declarations = current_primitive_declarations(scene)
     rids = {jid: rid for rid, jid in observations["jids"].items()}
     # The outline input leaves out procedures and owner evidence: composition authors from each owner's
     # primitives, and each owner checks its program against its own recorded evidence.
     for jid, entry in source["recovery_resources"].items():
         owner = recorded.get(jid) or {}
+        rid = rids.get(jid)
+        transport = isinstance(scene.get(rid), dict) and "simulation_transport" in scene[rid]
         entry["execution_primitive_catalog"] = _declared_catalog(owner.get("execution_primitive_catalog") or [],
-                                                                 declarations.get(rids.get(jid), {}))
+                                                                 declarations.get(rid, {}),
+                                                                 TRANSPORT_PRIMITIVE_INTERFACES if transport else None)
         evidence = owner.get("resource_evidence") or (observations.get("resource_evidence") or {}).get(jid)
         if evidence:
             entry["resource_evidence"] = deepcopy(evidence)
@@ -210,7 +216,8 @@ _CONTRACT_KEYS = ("preconditions", "effects", "capability_constraints", "product
                   "parameters", "controllable", "after_sec", "semantic_summary")
 
 
-def _declared_catalog(recorded: list[dict], declared: dict[str, list[dict]]) -> list[dict]:
+def _declared_catalog(recorded: list[dict], declared: dict[str, list[dict]],
+                      interfaces: dict[str, dict] | None = None) -> list[dict]:
     """Give each recorded primitive the contracts the current code declares for it (paper assumption A.2).
 
     A capture records each primitive's executor interface (parameters, outputs, description) as its program
@@ -223,6 +230,8 @@ def _declared_catalog(recorded: list[dict], declared: dict[str, list[dict]]) -> 
     Args:
         recorded: The capture's execution catalog rows for one resource.
         declared: That resource's current declarations, per primitive name.
+        interfaces: The interface the code serves where the capture recorded none, per primitive name (a
+            transport's description and outputs); a recorded value is kept.
 
     Returns:
         The catalog composition validates programs against.
@@ -244,6 +253,9 @@ def _declared_catalog(recorded: list[dict], declared: dict[str, list[dict]]) -> 
         if variants is None:
             continue
         interface = {key: deepcopy(value) for key, value in row.items() if key not in _CONTRACT_KEYS}
+        for key, value in (interfaces or {}).get(row.get("name"), {}).items():
+            if not interface.get(key):
+                interface[key] = deepcopy(value)
         # A primitive its executor leaves undeclared needs and changes nothing the checks can read.
         rows.extend(row_for(interface, variant) for variant in variants or [{}])
     named = {row.get("name") for row in recorded}

@@ -25,11 +25,12 @@
   --warn: #fab219;
   --nominal-fill: #eceef1;
   --nominal-stroke: #b1b6be;
-  --s1: #2a78d6;
-  --s2: #eb6834;
-  --s3: #1baf7a;
-  --s4: #eda100;
-  --s5: #e87ba4;
+  --s1: #00a651;
+  --s2: #d95926;
+  --s3: #e8b32e;
+  --s4: #b03a2e;
+  --s5: #f2a7c6;
+  --on-s4: #ffffff;
   --dnf: #c4c7cc;
   --on-seg: #15181d;
   --v-openai: #008300;
@@ -46,7 +47,7 @@
     --bg: #0f1114; --plate: #181a1e; --band: #1d2024; --ink: #eceef1; --ink-2: #b8bec7;
     --muted: #858b95; --hair: #2a2e34; --axis: #3d424a; --accent: #3987e5; --accent-soft: #1b2a3f;
     --nominal-fill: #262a30; --nominal-stroke: #4c525b;
-    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --dnf: #70757d;
+    --s1: #00a651; --s2: #d95926; --s3: #e8b32e; --s4: #b03a2e; --s5: #f2a7c6; --dnf: #70757d;
     --v-openai: #1f9a1f; --v-claude: #9085e9;
     --m1: rgb(100% 35% 35%); --m2: rgb(40% 60% 100%); --m3: rgb(25% 80% 25%);
     color-scheme: dark;
@@ -56,7 +57,7 @@
   --bg: #0f1114; --plate: #181a1e; --band: #1d2024; --ink: #eceef1; --ink-2: #b8bec7;
   --muted: #858b95; --hair: #2a2e34; --axis: #3d424a; --accent: #3987e5; --accent-soft: #1b2a3f;
   --nominal-fill: #262a30; --nominal-stroke: #4c525b;
-  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --dnf: #70757d;
+  --s1: #00a651; --s2: #d95926; --s3: #e8b32e; --s4: #b03a2e; --s5: #f2a7c6; --dnf: #70757d;
   --v-openai: #1f9a1f; --v-claude: #9085e9;
   --m1: rgb(100% 35% 35%); --m2: rgb(40% 60% 100%); --m3: rgb(25% 80% 25%);
   color-scheme: dark;
@@ -324,6 +325,15 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     <figcaption id="tabo1-caption"></figcaption>
   </figure>
 
+  <figure class="plate" id="tabo2">
+    <div class="plate-head">
+      <h3>Table O2 · What composition rejected</h3>
+      <div class="tags" data-tags="RC1 + RC2 · optional"></div>
+    </div>
+    <div class="table-wrap"><table class="results wide" id="tabo2-table"></table></div>
+    <figcaption id="tabo2-caption"></figcaption>
+  </figure>
+
   <figure class="plate" id="tab8">
     <div class="plate-head">
       <h3>Table 8 · Execution in Gazebo</h3>
@@ -360,7 +370,9 @@ function wilson(k, n, z = 1.96) {
 
 const PLACEHOLDER = DATA.mode === "placeholder";
 const SETTINGS = DATA.settings;
-const ORDER = DATA.scenarios;
+// Scenario order on the page, as in the paper's Fig. 11: Conveyor and UR5e-1, then Part slippage and M1 (user, 2026-11-12).
+const SCENARIO_ORDER = ["Conveyor breakdown", "ur5e-1 breakdown", "Part slippage", "Machining breakdown during part processing"];
+const ORDER = [...SCENARIO_ORDER.filter((s) => DATA.scenarios.includes(s)), ...DATA.scenarios.filter((s) => !SCENARIO_ORDER.includes(s))];
 const SHORT = DATA.scenario_short;
 // The paper's name for each failure scenario (user decision, 2026-11-09). The attempt list keeps the records' names.
 const SCENARIO_LABELS = {
@@ -393,6 +405,8 @@ const OUTCOME_LABELS = {
   passed: "Passed", infeasible: "Infeasible: symbolic (RA)", physically_unsupported: "Infeasible: physical (RA)",
   unsafe: "Unsafe (CCA)", no_nominal_continuation: "Blocking (CCA)", "not audited": "Not audited",
 };
+// A count label's color on a segment: white on the dark outcome fills (--on-sN where the page sets one).
+const segInk = (color) => (/^var\(--s\d\)$/.test(color) ? color.replace(/^var\(--s(\d)\)$/, "var(--on-s$1, var(--on-seg))") : "var(--on-seg)");
 // Fig. 11's segments: each class in the audit's order, the joined pair at the first of the two.
 function fig11Segments(classes) {
   return classes.flatMap((k, ci) => {
@@ -438,6 +452,8 @@ function renderHeader() {
   const chips = [
     PLACEHOLDER ? `<span class="chip"><i class="fake"></i>Placeholder numbers: nothing collected yet</span>`
       : `<span class="chip"><i class="real"></i>Real data: ${DATA.sources.length} batches, ${started} attempts</span>`,
+    ...(DATA.audit_review ? [`<span class="chip"><i class="real"></i>Audit review 2026-11-12: ${DATA.audit_review.reaudited} outlines re-audited under corrected checker rules, ${DATA.audit_review.changed} outcomes changed (${esc(DATA.audit_review.name)})</span>`] : []),
+    ...(DATA.rerun ? [`<span class="chip"><i class="real"></i>Rerun 2026-11-13: ${esc(DATA.rerun.scenario)}, ${esc(DATA.rerun.setting)} counts its ${DATA.rerun.attempts} rerun attempts (${DATA.rerun.passed} passed) in place of the original ${DATA.rerun.replaced} (${DATA.rerun.replaced_passed} passed), run again after Exit's model declared a part taken off it (${esc(DATA.rerun.name)})</span>`] : []),
     ...MODELS.map((m) => `<span class="chip"><i class="real"></i>${esc(m.role)}: ${esc(m.name)}, ${m.planned} attempts per cell planned</span>`),
     `<span class="chip"><i class="real"></i>${DATA.max_turns}-turn budget</span>`,
   ];
@@ -532,7 +548,7 @@ function renderOutcome() {
           const w = (k / c.n) * BW, last = segments.slice(si + 1).every((seg) => seg.k === 0);
           const t = tip(`<b>${esc(scenarioLabel(scn))}</b> · ${esc(settingLabel(s))}<br>${label}: <b>${k}/${c.n}</b>${detail}`);
           p.push(`<rect x="${x}" y="${y + 4}" width="${Math.max(0, w - (last ? 0 : 2))}" height="${bh}" style="fill:${color}" class="hit" data-t="${t}"/>`);
-          if (w >= 18) p.push(`<text x="${x + w / 2 - (last ? 0 : 1)}" y="${y + 4 + bh / 2 + 4}" class="seg" text-anchor="middle" pointer-events="none">${k}</text>`);
+          if (k) p.push(`<text x="${x + w / 2 - (last ? 0 : 1)}" y="${y + 4 + bh / 2 + 4}" class="seg" style="fill:${segInk(color)}" text-anchor="middle" pointer-events="none">${k}</text>`);
           x += w;
         });
         p.push("</g>");
@@ -594,6 +610,31 @@ function renderRetrieval() {
 }
 
 /* ---------- Table O1 (optional): what validation rejected, framework settings as row groups, all models pooled ---------- */
+/* ---------- Table O2 (optional): refusals during primitive composition, by LLM ---------- */
+function renderTableO2() {
+  const C = DATA.composition, rows = (C && C.refusals) || [];
+  const table = document.getElementById("tabo2-table");
+  const shortName = (m) => m.name.replace(/ medium$/, "");
+  if (!rows.length) {
+    table.innerHTML = `<tbody><tr><td class="todo">No composition refusals recorded yet.</td></tr></tbody>`;
+    document.getElementById("tabo2-caption").innerHTML = `<b>Table O2.</b> Optional. Refusals during primitive composition.`;
+    return;
+  }
+  const total = (r) => Object.values(r.models).reduce((a, b) => a + b, 0);
+  const head = `<thead><tr><th>Record code</th><th style="text-align:left">Message as recorded</th>${MODELS.map((m) => `<th>${esc(shortName(m))}</th>`).join("")}<th class="sep">All</th><th>Fixed in the same event</th><th>Event never accepted</th></tr></thead>`;
+  let previous = null;
+  const body = rows.map((r) => {
+    const code = r.code === previous ? "" : `<code>${esc(r.code)}</code>`;
+    previous = r.code;
+    return `<tr><td>${code}</td><td style="text-align:left;white-space:normal;min-width:320px">${esc(r.message)}</td>${MODELS.map((m) => `<td>${r.models[m.id] || ""}</td>`).join("")}<td class="sep">${total(r)}</td><td>${r.fixed}</td><td>${r.open}</td></tr>`;
+  }).join("");
+  const sum = (f) => rows.reduce((t, r) => t + f(r), 0);
+  const foot = `<tr class="total"><td>All</td><td></td>${MODELS.map((m) => `<td>${sum((r) => r.models[m.id] || 0)}</td>`).join("")}<td class="sep">${sum(total)}</td><td>${sum((r) => r.fixed)}</td><td>${sum((r) => r.open)}</td></tr>`;
+  table.innerHTML = head + `<tbody>${body}${foot}</tbody>`;
+  const n = C.total ? C.total.composed : 0;
+  document.getElementById("tabo2-caption").innerHTML = `<b>Table O2.</b> Optional. Refusals while composing primitive programs for the ${n} outlines of Table 7, by LLM (${MODEL_NAMES}). Each row is one refusal message as the composition record gives it, with step indices, numbers, poses and quoted values left out so that equal refusals count together, under the record's code: <code>composition_infeasible</code>, the checks refused the program (its primitive contracts, the recorded facts, or motion planning in the cell recorded at the failure); <code>composition_missing_context</code>, the program reads a value the checks could not resolve, or one that differs from what the owner's calculation reads; <code>primitive_revision_requested</code>, the composing LLM proposed no program and reported that no visible primitive could perform the event. Fixed in the same event counts refusals after which a later program for that event was accepted, so they cost turns but not the outcome; Event never accepted counts those in the event where a composition stopped. A composition that stopped after six turns without progress is counted by those turns' refusals.`;
+}
+
 function renderTableO1() {
   const swatch = (name) => `<i class="sw" style="background:${CLASSES[DATA.classes.indexOf(name)].c};margin-right:5px;vertical-align:-1px"></i>`;
   const head = `<thead>
@@ -650,7 +691,7 @@ function renderTable7() {
   }
   document.getElementById("tab7-table").innerHTML = head("LLM (medium effort)") + `<tbody>${byModel}</tbody>`;
   document.getElementById("tab7b-table").innerHTML = head("Failure scenario") + `<tbody>${byScenario}</tbody>`;
-  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines: (a) by LLM, pooled over the four failure scenarios (12 outlines per LLM); (b) by failure scenario, pooled over the three LLMs (${MODEL_NAMES}; 9 outlines per scenario); 36 in all. The All row is the same in both. For each LLM and scenario, the three accepted outlines with the fewest events (ties: the earliest run; they include the outlines executed in Gazebo, Table 8) were composed by the LLM that wrote them, at reasoning effort ${esc(DATA.conditions.effort)}. Composed: Outlines is the share of outlines in which every event received a primitive program that the composition checks accepted, which each event's RA runs on its own program: the primitives' declared effects, and motion planning in the cell recorded at the failure. Events is the mean share of an outline's events that received one, so that each outline counts once; events are composed in order, so a composition that stops leaves the rest of its outline uncomposed. It was added after the compositions ran, beside the planned measure. Median per outline: the number of events in the outline, and the tokens and time spent composing the whole outline (the composition stage only), over all composed outlines, including those that stopped early. Every composed outline had already been accepted by RA and CCA; the CCA does not check the programs again. Each outline was composed once, except that GPT-6.1 Sol composed its Part slippage outlines twice and the table reports the second attempt. Lookups during composition are in Fig. O1 (b). The outline stage is in Fig. 11 and Table O1.`;
+  document.getElementById("tab7-caption").innerHTML = `<b>Table 7.</b> Primitive composition of ${esc(SETTINGS[FW_INCREMENTAL].n)} outlines: (a) by LLM, pooled over the four failure scenarios (12 outlines per LLM); (b) by failure scenario, pooled over the three LLMs (${MODEL_NAMES}; 9 outlines per scenario); 36 in all. The All row is the same in both. For each LLM and scenario, the three accepted outlines with the fewest events (ties: the earliest run; they include the outlines executed in Gazebo, Table 8) were composed by the LLM that wrote them, at reasoning effort ${esc(DATA.conditions.effort)}. Composed: Outlines is the share of outlines in which every event received a primitive program that the composition checks accepted, which each event's RA runs on its own program: the primitives' declared effects, and motion planning in the cell recorded at the failure. Events is the mean share of an outline's events that received one, so that each outline counts once; events are composed in order, so a composition that stops leaves the rest of its outline uncomposed. It was added after the compositions ran, beside the planned measure. Median per outline: the number of events in the outline, and the tokens and time spent composing the whole outline (the composition stage only), over all composed outlines, including those that stopped early. Every composed outline had already been accepted by RA and CCA; the CCA does not check the programs again. Each outline was composed once, with two exceptions, for which the table reports the later attempt, whatever it gave: GPT-6.1 Sol composed its Part slippage outlines twice; and GPT-6.1 Terra's three Machining outlines, the only outlines with a Conveyor event, were composed again after the Conveyor's primitives were served with the descriptions and outputs that the first compositions lacked, a gap found in the audit after the runs. Lookups during composition are in Fig. O1 (b). The outline stage is in Fig. 11 and Table O1.`;
 }
 
 /* ---------- Table 8 (optional): the selected outline per scenario executed in Gazebo ---------- */
@@ -826,6 +867,7 @@ renderHeader();
 renderConditions();
 renderOutcome();
 renderTableO1();
+renderTableO2();
 renderRetrieval();
 renderTable7();
 renderTable8();

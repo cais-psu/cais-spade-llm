@@ -101,6 +101,24 @@ TRANSPORT_PRIMITIVE_CONTRACTS: dict[str, dict[str, Any]] = {
     "move_relative": {"preconditions": {}, "effects": {
         "part_pose.x": {"set_from_step": {"primitive": "compute_transport_targets", "output": "target_x"}}}},
 }
+# What composition serves as a transport primitive's interface where the capture recorded none (the captures record
+# no description or outputs for these name-dispatched primitives). The outputs are positions along the transport
+# axis, never a place symbol: where a part arrives stays the checks' to find (user decision, 2026-11-12).
+TRANSPORT_PRIMITIVE_INTERFACES: dict[str, dict[str, Any]] = {
+    "detect_parts": {
+        "description": "Observe the parts this transport carries and record each one's position along its "
+                       "transport axis.",
+        "output_schema": {"names": {"type": "array", "items": {"type": "string"}},
+                          "initial_x": {"type": "object", "additionalProperties": {"type": "number"}}}},
+    "compute_transport_targets": {
+        "description": "Calculate, for the places the event states for the parts this transport moves, each part's "
+                       "target position along the transport axis and the one displacement they move by, from the "
+                       "recorded positions of those places.",
+        "output_schema": {"target_x": {"type": "object", "additionalProperties": {"type": "number"}},
+                          "displacement": {"type": "number"}}},
+    "move_relative": {
+        "description": "Move the transport so each part detect_parts observed reaches its calculated target_x."},
+}
 
 
 def transport_chain(scene: dict, resource_id: str, part_position: list[float]) -> dict:

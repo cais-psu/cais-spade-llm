@@ -15,6 +15,7 @@ import argparse
 import gzip
 import json
 import logging
+import re
 import statistics
 import sys
 from copy import deepcopy
@@ -28,10 +29,16 @@ sys.path.insert(0, str(REPO))
 
 from cais_spade_llm.recovery_framework.outline_audit import OUTCOME_CLASSES  # noqa: E402
 from cais_spade_llm.recovery_framework.outline_experiments import (  # noqa: E402
+    AUDIT_REVIEW_NAME,
     BATCH_NAME,
     CONFIGURATIONS,
     EXPERIMENTS,
+    RERUN_NAME,
+    read_audit_review,
     read_batch,
+    read_rerun,
+    rerun_rows,
+    reviewed_rows,
 )
 from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files  # noqa: E402
 
@@ -150,6 +157,10 @@ def attempts_from_batches(batch_ids: list[str] | None, live: set[str] = frozense
     """
     models = {model["model"]: model["id"] for model in MODELS}
     attempts, sources = [], []
+    # Outcomes follow the post-collection audit review (user decision, 2026-11-12); the records keep the recorded ones.
+    review = read_audit_review()
+    # One cell's attempts come from its rerun (user decision, 2026-11-13); the replaced batches keep their records.
+    rerun = read_rerun()
     for path in sorted(EXPERIMENTS.glob(f"*/{BATCH_NAME}")):
         if path.parent.name in EXCLUDED_BATCHES:
             logger.info("Left out %s: %s", path.parent.name, EXCLUDED_BATCHES[path.parent.name])
@@ -166,8 +177,9 @@ def attempts_from_batches(batch_ids: list[str] | None, live: set[str] = frozense
         if settings.get("model") not in models:
             logger.warning("Left out %s: %s is not a study model", batch["batch_id"], settings.get("model"))
             continue
-        started = 0
-        for row in batch.get("rows") or []:
+        started: dict[str, int] = {}
+        rows = rerun_rows(batch["batch_id"], batch.get("rows") or [], rerun)
+        for row in reviewed_rows(rows, review):
             if row.get("status") not in STARTED:
                 continue
             setting = setting_index((batch.get("configurations") or {}).get(row.get("configuration"), {}))
@@ -175,15 +187,44 @@ def attempts_from_batches(batch_ids: list[str] | None, live: set[str] = frozense
                 logger.info("Left out %s %s: %s is not a current setting", batch["batch_id"], row.get("attempt_id"),
                             row.get("configuration"))
                 continue
-            started += 1
+            source = row.get("rerun_batch") or batch["batch_id"]
+            started[source] = started.get(source, 0) + 1
             attempts.append({"model": models[settings["model"]], "setting": setting, "scenario": row.get("scenario"),
-                             "batch": batch["batch_id"], "row": row, **_draft_details(row)})
-        git = batch.get("git") or {}
-        sources.append({"batch": batch["batch_id"], "model": settings.get("model"), "status": batch.get("status"),
-                        "started": started, "planned": len(batch.get("plan") or []),
-                        "created": str(batch.get("created_at", ""))[:16].replace("T", " "),
-                        "code": f"{str(git.get('head', '?'))[:8]}, {git.get('uncommitted_files', '?')} uncommitted files"})
+                             "batch": source, "row": row, **_draft_details(row)})
+        sources.append(_source(batch, started.get(batch["batch_id"], 0)))
+        replacing = (rerun.get("replaces") or {}).get(batch["batch_id"])
+        if replacing is not None:
+            rerun_batch = read_batch(EXPERIMENTS.parent / replacing / BATCH_NAME)
+            sources.append({**_source(rerun_batch, started.get(rerun_batch["batch_id"], 0)),
+                            "replaces": f"{rerun['scenario']}, {rerun['configuration']} of {batch['batch_id']}"})
     return attempts, sources
+
+
+def _source(batch: dict, started: int) -> dict:
+    git = batch.get("git") or {}
+    settings = batch.get("settings") or {}
+    return {"batch": batch["batch_id"], "model": settings.get("model"), "status": batch.get("status"),
+            "started": started, "planned": len(batch.get("plan") or []),
+            "created": str(batch.get("created_at", ""))[:16].replace("T", " "),
+            "code": f"{str(git.get('head', '?'))[:8]}, {git.get('uncommitted_files', '?')} uncommitted files"}
+
+
+def rerun_note(attempts: list[dict]) -> dict | None:
+    """Return what the page says about the cell rerun: its file and cell, and the attempts counted from it and in place
+    of, as the replaced batches record them after the audit review."""
+    rerun = read_rerun()
+    counted = [attempt for attempt in attempts if attempt["row"].get("rerun_batch")]
+    if not counted:
+        return None
+    cell = (rerun["scenario"], rerun["configuration"])
+    used = {attempt["row"]["rerun_batch"] for attempt in counted}
+    replaced = [row for batch_id, source in rerun["replaces"].items() if Path(source).name in used
+                for row in reviewed_rows(read_batch(EXPERIMENTS / batch_id / BATCH_NAME).get("rows") or [])
+                if (row.get("scenario"), row.get("configuration")) == cell and row.get("status") in STARTED]
+    return {"name": RERUN_NAME, "scenario": rerun["scenario"],
+            "setting": PAPER_NAMES.get(rerun["configuration"], rerun["configuration"]), "attempts": len(counted),
+            "passed": sum(attempt["row"].get("outcome") == "passed" for attempt in counted),
+            "replaced": len(replaced), "replaced_passed": sum(row.get("outcome") == "passed" for row in replaced)}
 
 
 def cells_from_attempts(attempts: list[dict]) -> dict:
@@ -235,9 +276,12 @@ def attempt_lines(attempts: list[dict]) -> list[dict]:
     for attempt in attempts:
         row = attempt["row"]
         tokens, seconds = _number(row.get("tokens")), row.get("elapsed_seconds")
+        recorded = row.get("recorded_outcome")
         lines.append({
             "model": attempt["model"], "setting": names[attempt["setting"]],
-            "scenario": attempt["scenario"], "outcome": row.get("outcome"),
+            "scenario": attempt["scenario"],
+            "outcome": row.get("outcome") if recorded in (None, row.get("outcome"))
+            else f"{row.get('outcome')} (recorded {recorded})",
             "stage": row.get("failing_stage") or "", "stop": row.get("stop_cause"),
             "events": row.get("outline_length"), "lookups": row.get("lookups"),
             "tokens_k": round(tokens / 1000) if tokens is not None else None,
@@ -322,6 +366,11 @@ COMPOSITION_LOGS = EXPERIMENTS.parent / "study2_compositions" / "logs_r9"
 # reports the second attempt for each of them, whatever it gave; the caption says so. Terra gets no second attempt.
 SECOND_ATTEMPT_LOGS = EXPERIMENTS.parent / "study2_compositions" / "logs_r9b"
 SECOND_ATTEMPT = {"PS_sol_1", "PS_sol_2", "PS_sol_3"}
+# User decision 2026-11-12 (Option B): Terra's three Machining outlines were composed again after the Conveyor's
+# primitives were served with the descriptions and outputs the first compositions lacked (only Terra's outlines have a
+# Conveyor event). Table 7 reports the re-run in place of the first composition, whatever it gave; the caption says so.
+CONVEYOR_RERUN_LOGS = EXPERIMENTS.parent / "study2_compositions" / "logs_r10_conveyor"
+CONVEYOR_RERUN = {"MACH_terra_1", "MACH_terra_2", "MACH_terra_3"}
 COMPOSITION_SCENARIOS = {"PS": "Part slippage", "CONV": "Conveyor breakdown",
                          "MACH": "Machining breakdown during part processing", "UR5": "ur5e-1 breakdown"}
 COMPOSITION_MODELS = {"opus": "opus55", "sol": "sol", "terra": "terra"}
@@ -394,6 +443,97 @@ def _reply(text: str) -> dict:
     return raw if isinstance(raw, dict) and isinstance(raw.get("decision"), str) else {}
 
 
+# A composing turn's prompt and reply records share one stamp. Each prompt's feedback block lists what the checks
+# and the composing LLM reported for the turns before it, so a turn's refusal is what the next prompt adds.
+_COMPOSING_TURN = re.compile(r"multi_turn_(RECOVERY_SEQ\d+)_primitive_generation_turn(\d+)_(prompt|response)_(\d{8}T\d{6})\.txt")
+_FEEDBACK_LINE = re.compile(r"^- RECOVERY_SEQ\d+ / \S+ \[(\w+)\]: (.*)$")
+
+
+def refusal_message(text: str) -> str:
+    """Return a refusal message with its numbers, poses and quoted values left out, so equal refusals count together.
+
+    Args:
+        text: The message as the feedback block records it.
+
+    Returns:
+        The message's first clause, with every step index, number, pose and quoted value replaced by an ellipsis.
+    """
+    if text.startswith("LLM reported primitive-surface gap"):
+        return "LLM reported primitive-surface gap"
+    text = re.sub(r"^(\w+) step \d+ \(([^)]*)\): ", r"\1 (\2): ", text).split(";")[0]
+    # Innermost braces and brackets first, so nested values collapse to one ellipsis.
+    while re.search(r"\{[^{}]*\}|\[[^\[\]]*\]", text):
+        text = re.sub(r"\{[^{}]*\}|\[[^\[\]]*\]", "…", text)
+    # Numbers standing alone, not digits inside a name such as KET4_Square_4mm or ur5e-3.
+    text = re.sub(r"\(-?\d[^)]*\)|'[^']*'|(?<![\w.-])-?\d+(?:\.\d+)?(?:e-?\d+)?%?(?![\w])", "…", text)
+    text = re.sub(r"(?:…[\s,]*)+", "… ", text).strip()
+    if len(text) <= 130:
+        return text
+    cut = text[:130].rsplit(" ", 1)[0]
+    return cut if cut.endswith("…") else cut + " …"
+
+
+def _feedback(prompt: Path) -> list[tuple[str, str]]:
+    """Return a composing prompt's feedback lines as (code, message)."""
+    text = prompt.read_text(errors="replace")
+    start = text.find("Previous Validation Feedback")
+    lines = []
+    for line in text[start:].splitlines()[1:] if start >= 0 else []:
+        match = _FEEDBACK_LINE.match(line)
+        if not match:
+            break
+        lines.append((match.group(1), match.group(2)))
+    return lines
+
+
+def composition_refusals(directory: Path, turns: dict[tuple[str, int], dict], stop_message: str) -> list[dict]:
+    """Return every refusal one composition received, and whether its event was accepted after it.
+
+    A gap the composing LLM reports is its own reply. A refused program's reasons are what the next prompt's
+    feedback block adds; the last refused program of a stopped composition has no next prompt, and its reason is the
+    composition's stop message.
+
+    Args:
+        directory: The composition's directory.
+        turns: Each composing turn's stamp, LLM decision and recorded outcome, per (outline id, turn).
+        stop_message: The composition's final message.
+
+    Returns:
+        One row per refusal: its record code, its message as ``refusal_message`` gives it, and ``fixed`` when a later
+        program for the same event was accepted.
+    """
+    prompts: dict[tuple[str, int], Path] = {}
+    for path in (directory / "recovery_primitves").glob("multi_turn_*_prompt_*.txt"):
+        match = _COMPOSING_TURN.match(path.name)
+        if match:
+            prompts[(match.group(1), int(match.group(2)))] = path
+    order = sorted(turns, key=lambda key: turns[key]["stamp"])
+    rows = []
+    for index, key in enumerate(order):
+        turn = turns[key]
+        fixed = any(other[0] == key[0] and other[1] > key[1] and turns[other]["outcome"] == "draft_ready"
+                    for other in turns)
+        if turn["decision"] in ("need_primitive_revision", "primitive_blocked"):
+            rows.append({"code": "primitive_revision_requested", "message": "LLM reported primitive-surface gap",
+                         "fixed": fixed})
+            continue
+        if turn["decision"] != "primitive_steps_ready" or turn["outcome"] == "draft_ready":
+            continue
+        later = order[index + 1] if index + 1 < len(order) else None
+        if later is not None and key in prompts and later in prompts:
+            added = _feedback(prompts[later])
+            for line in _feedback(prompts[key]):
+                if line in added:
+                    added.remove(line)
+            reasons = [(code, message) for code, message in added if code != "primitive_revision_requested"]
+        else:
+            reason = stop_message.split("paused_after_primitive_blocked: ", 1)[-1] if later is None else ""
+            reasons = [("composition_infeasible", reason)] if reason and "stalled" not in reason else []
+        rows.extend({"code": code, "message": refusal_message(message), "fixed": fixed} for code, message in reasons
+                    or [("composition_infeasible", "(refusal text not recorded)")])
+    return rows
+
+
 def composition_row(log: Path) -> dict | None:
     """Return one finished composition: its outline's events, how many were composed, and its effort."""
     from cais_spade_llm.recovery_framework.outline_draft import _token_usage
@@ -414,8 +554,19 @@ def composition_row(log: Path) -> dict | None:
         program = json.loads((directory / "composition.json").read_text())["accepted_primitive_program"]
         primitives = sum(len(event.get("primitive_steps") or []) for event in program)
     # Study 2's response records were gzip-compressed on 2026-11-10 to save disk space; they read the same.
-    replies = [_reply(_read_reply(path))
-               for path in sorted((directory / "recovery_primitves").glob("multi_turn_*_response_*.txt*"))]
+    replies, turns_seen = [], {}
+    for path in sorted((directory / "recovery_primitves").glob("multi_turn_*_response_*.txt*")):
+        text = _read_reply(path)
+        reply = _reply(text)
+        replies.append(reply)
+        match = _COMPOSING_TURN.match(path.name.removesuffix(".gz"))
+        try:
+            outcome = json.loads(text[text.find("{"):]).get("decision") if match else None
+        except json.JSONDecodeError:
+            outcome = None
+        if match:
+            turns_seen[(match.group(1), int(match.group(2)))] = {
+                "stamp": match.group(4), "decision": reply.get("decision"), "outcome": outcome}
     turns = [reply.get("decision") for reply in replies]
     # A lookup is one reference the composing LLM requested, as the outline stage counts its retrievals.
     requested = [ref for reply in replies if reply.get("decision") == "need_context"
@@ -433,7 +584,7 @@ def composition_row(log: Path) -> dict | None:
             "events": events, "accepted": accepted, "share": accepted / events if events else None, "passed": passed,
             "primitives": primitives, "refused": max(turns.count("primitive_steps_ready") - accepted, 0),
             "calls": calls, "lookups": lookups, "references": references, "tokens": tokens,
-            "seconds": result.get("seconds")}
+            "seconds": result.get("seconds"), "refusals": composition_refusals(directory, turns_seen, str(result.get("message") or ""))}
 
 
 def composition_summary(rows: list[dict]) -> dict | None:
@@ -457,10 +608,12 @@ def compositions_from_logs(logs: Path = COMPOSITION_LOGS) -> dict | None:
     rows = []
     for log in sorted(logs.glob("*.log")):
         second = SECOND_ATTEMPT_LOGS / log.name
+        rerun = CONVEYOR_RERUN_LOGS / log.name
         use_second = log.stem in SECOND_ATTEMPT and second.exists() and composition_row(second) is not None
-        row = composition_row(second if use_second else log)
+        use_rerun = log.stem in CONVEYOR_RERUN and rerun.exists() and composition_row(rerun) is not None
+        row = composition_row(rerun if use_rerun else second if use_second else log)
         if row is not None:
-            rows.append({**row, "attempt": 2 if use_second else 1})
+            rows.append({**row, "attempt": 2 if use_second else 1, "conveyor_rerun": use_rerun})
     if not rows:
         return None
     references = {}
@@ -472,12 +625,21 @@ def compositions_from_logs(logs: Path = COMPOSITION_LOGS) -> dict | None:
     used = {path for counts in references.values() if counts for path in counts}
     reference_rows = [path for path in COMPOSITION_REFERENCES if path in used] + sorted(used - set(COMPOSITION_REFERENCES))
     second_attempts = sorted(row["name"] for row in rows if row["attempt"] == 2)
-    return {"second_attempts": second_attempts, "references": references, "reference_rows": reference_rows,
+    conveyor_reruns = sorted(row["name"] for row in rows if row["conveyor_rerun"])
+    refusals: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        for refusal in row["refusals"]:
+            entry = refusals.setdefault((refusal["code"], refusal["message"]), {
+                "code": refusal["code"], "message": refusal["message"], "models": {}, "fixed": 0, "open": 0})
+            entry["models"][row["model"]] = entry["models"].get(row["model"], 0) + 1
+            entry["fixed" if refusal["fixed"] else "open"] += 1
+    return {"second_attempts": second_attempts, "conveyor_reruns": conveyor_reruns, "references": references, "reference_rows": reference_rows,
             "scenarios": {scenario: composition_summary([row for row in rows if row["scenario"] == scenario])
                           for scenario in SCENARIOS},
             "total": composition_summary(rows),
             "models": {model["id"]: composition_summary([row for row in rows if row["model"] == model["id"]])
                        for model in MODELS},
+            "refusals": sorted(refusals.values(), key=lambda entry: (entry["code"], -sum(entry["models"].values()))),
             "rows": rows}
 
 
@@ -574,6 +736,12 @@ def page_data(placeholder: bool, batch_ids: list[str] | None, live: set[str] = f
         "references": reference_rows(cells),
         "cells": cells, "composition": composition, "execution": execution, "sources": sources, "attempts": attempt_lines(attempts),
         "max_turns": MAX_TURNS, "conditions": conditions(),
+        "audit_review": None if placeholder else {
+            "name": AUDIT_REVIEW_NAME,
+            "reaudited": sum("recorded_outcome" in attempt["row"] for attempt in attempts),
+            "changed": sum(attempt["row"].get("recorded_outcome") not in (None, attempt["row"].get("outcome"))
+                           for attempt in attempts)},
+        "rerun": None if placeholder else rerun_note(attempts),
     }
 
 

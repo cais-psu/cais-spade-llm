@@ -6,7 +6,7 @@
   <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
    <cc:Work>
     <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
-    <dc:date>2026-11-09T16:29:16.165300</dc:date>
+    <dc:date>2026-11-12T18:43:06.265474</dc:date>
     <dc:format>image/svg+xml</dc:format>
     <dc:creator>
      <cc:Agent>
@@ -35,7 +35,7 @@ L 9.84 6.890156
 L 15.44 6.890156 
 " style="fill: none; stroke: #cc0000; stroke-width: 0.9; stroke-linecap: square"/>
     <defs>
-     <path id="m8bc39cee16" d="M -1.8 1.8 
+     <path id="mb4b16291b9" d="M -1.8 1.8 
 L 1.8 1.8 
 L 1.8 -1.8 
 L -1.8 -1.8 
@@ -43,7 +43,7 @@ z
 " style="stroke: #cc0000; stroke-linejoin: miter"/>
     </defs>
     <g>
-     <use xlink:href="#m8bc39cee16" x="9.84" y="6.890156" style="fill: #cc0000; stroke: #cc0000; stroke-linejoin: miter"/>
+     <use xlink:href="#mb4b16291b9" x="9.84" y="6.890156" style="fill: #cc0000; stroke: #cc0000; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="text_1">
@@ -55,7 +55,7 @@ L 88.270625 6.890156
 L 93.870625 6.890156 
 " style="fill: none; stroke: #0033cc; stroke-width: 0.9; stroke-linecap: square"/>
     <defs>
-     <path id="m1ff4cde943" d="M 0 1.95 
+     <path id="m3bea08bc5e" d="M 0 1.95 
 C 0.517146 1.95 1.013181 1.744536 1.378858 1.378858 
 C 1.744536 1.013181 1.95 0.517146 1.95 0 
 C 1.95 -0.517146 1.744536 -1.013181 1.378858 -1.378858 
@@ -68,7 +68,7 @@ z
 " style="stroke: #0033cc"/>
     </defs>
     <g>
-     <use xlink:href="#m1ff4cde943" x="88.270625" y="6.890156" style="fill: #0033cc; stroke: #0033cc"/>
+     <use xlink:href="#m3bea08bc5e" x="88.270625" y="6.890156" style="fill: #0033cc; stroke: #0033cc"/>
     </g>
    </g>
    <g id="text_2">
@@ -80,7 +80,7 @@ L 152.297656 6.890156
 L 157.897656 6.890156 
 " style="fill: none; stroke: #008c00; stroke-width: 0.9; stroke-linecap: square"/>
     <defs>
-     <path id="ma115677950" d="M -0 2.192031 
+     <path id="mf515f03a0e" d="M -0 2.192031 
 L 2.192031 0 
 L 0 -2.192031 
 L -2.192031 -0 
@@ -88,7 +88,7 @@ z
 " style="stroke: #008c00; stroke-linejoin: miter"/>
     </defs>
     <g>
-     <use xlink:href="#ma115677950" x="152.297656" y="6.890156" style="fill: #008c00; stroke: #008c00; stroke-linejoin: miter"/>
+     <use xlink:href="#mf515f03a0e" x="152.297656" y="6.890156" style="fill: #008c00; stroke: #008c00; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="text_3">

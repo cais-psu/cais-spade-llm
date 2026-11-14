@@ -24,7 +24,7 @@ from cais_spade_llm.ui.refresh import PageRefresh
 _EFFORTS = {**{name: name for name in ("none", "minimal", "low", "medium", "high", "xhigh")}, "not sent (gpt-4o)": None}
 _CHECK_NAMES = {"check_ra_feasibility": "RA", "check_cca_safety": "CCA safety", "check_nonblocking": "CCA nonblocking"}
 _ATTEMPT_COLUMNS = (
-    "attempt_id", "scenario", "configuration", "repetition", "status", "outcome", "first_failing_event",
+    "attempt_id", "rerun_batch", "scenario", "configuration", "repetition", "status", "outcome", "first_failing_event",
     "failing_stage", "outline_length", *(f"rejections_{check}" for check in experiments.REJECTION_CHECKS),
     "revisions", "rewrites", "lookups", "provider_calls", "tokens", "elapsed_seconds", "stop_cause",
 )
@@ -36,6 +36,11 @@ _EVENT_COLUMNS = ("step", "event_name", "resource", "part_name", "end_state", "r
 
 def _columns(names: tuple[str, ...]) -> list[dict]:
     return [{"name": name, "field": name, "label": name.replace("_", " "), "align": "left"} for name in names]
+
+
+def _attempt_key(row: dict) -> str:
+    # A rerun's attempts keep their own ids, which repeat the replaced batch's, so their batch keeps the key unique.
+    return f"{row['rerun_batch']}/{row.get('attempt_id')}" if row.get("rerun_batch") else str(row.get("attempt_id"))
 
 
 def _configuration_text(flags: dict) -> str:
@@ -119,9 +124,10 @@ def render_recovery_experiments(*, is_active: Callable[[], bool] | None = None, 
         rejection_table = ui.table(columns=_columns(_REJECTION_COLUMNS), rows=[], row_key="key").classes(
             "w-full").props("dense wrap-cells")
         ui.label("Attempts").classes("font-semibold")
-        attempt_table = ui.table(columns=_columns(_ATTEMPT_COLUMNS), rows=[], row_key="attempt_id",
+        attempt_table = ui.table(columns=_columns(_ATTEMPT_COLUMNS), rows=[], row_key="key",
                                  selection="single").classes("w-full").props("dense wrap-cells")
-        pager = TablePager(attempt_table, lambda: [{column: row.get(column) for column in _ATTEMPT_COLUMNS}
+        pager = TablePager(attempt_table, lambda: [{"key": _attempt_key(row),
+                                                    **{column: row.get(column) for column in _ATTEMPT_COLUMNS}}
                                                    for row in shown["rows"]])
         details = ui.column().classes("w-full")
 
@@ -165,15 +171,28 @@ def render_recovery_experiments(*, is_active: Callable[[], bool] | None = None, 
             return
         batch = await asyncio.to_thread(experiments.read_batch, runner.root / batch_id / experiments.BATCH_NAME,
                                         live=runner.live_batch)
-        shown.update(batch=batch, rows=batch.get("rows") or [])
+        review = await asyncio.to_thread(experiments.read_audit_review, runner.root)
+        rerun = await asyncio.to_thread(experiments.read_rerun, runner.root)
+        rows = await asyncio.to_thread(experiments.rerun_rows, batch_id, batch.get("rows") or [], rerun, runner.root)
+        shown.update(batch=batch, rows=experiments.reviewed_rows(rows, review))
         summary = experiments.summarize(shown["rows"])
         outcome_table.rows = [{"key": f"{row['configuration']}|{row['scenario']}", **row} for row in summary["outcomes"]]
         rejection_table.rows = [{"key": f"{row['configuration']}|{row['scenario']}", **row}
                                 for row in summary["rejections"]]
         chosen = batch.get("settings") or {}
+        reviewed = [row for row in shown["rows"] if "recorded_outcome" in row]
+        changed = sum(row["outcome"] != row["recorded_outcome"] for row in reviewed)
+        note = (f" Outcomes follow the audit review of 2026-11-12 ({experiments.AUDIT_REVIEW_NAME}): {changed} of "
+                f"{len(reviewed)} re-audited attempts changed; the recorded outcomes are kept in the records and the CSV."
+                if reviewed else "")
+        rerun_batches = sorted({row["rerun_batch"] for row in shown["rows"] if row.get("rerun_batch")})
+        if rerun_batches:
+            note += (f" {rerun['scenario']}, {rerun['configuration']}: the attempts shown are the rerun of 2026-11-13 "
+                     f"({', '.join(rerun_batches)}; {experiments.RERUN_NAME}) after Exit's model declared a part taken "
+                     "off it; this batch's original attempts of that cell stay in its record.")
         batch_message.text = (f"{batch.get('status')}: {batch.get('message') or ''} Model {chosen.get('model')}, "
                               f"effort {chosen.get('reasoning_effort')}, max turns {chosen.get('max_turns')}, "
-                              f"scheduling seed {batch.get('seed')}.")
+                              f"scheduling seed {batch.get('seed')}.{note}")
         pager.update(reset=False)
 
     async def refresh_batches(*, select_live: bool = False) -> None:
@@ -230,13 +249,22 @@ def render_recovery_experiments(*, is_active: Callable[[], bool] | None = None, 
         details.clear()
         if not attempt_table.selected or shown["batch"] is None:
             return
-        row = next((row for row in shown["rows"] if row["attempt_id"] == attempt_table.selected[0]["attempt_id"]), {})
+        row = next((row for row in shown["rows"] if _attempt_key(row) == attempt_table.selected[0]["key"]), {})
         path = Path(str(row.get("draft_path")))
         names = (shown["batch"].get("resource_names") or {}).get(row.get("scenario"), {})
         with details:
             ui.label(f"{row.get('attempt_id')}: {row.get('configuration')} on {row.get('scenario')}, "
                      f"repetition {row.get('repetition')}; {row.get('outcome')}").classes("font-semibold")
             ui.label(str(row.get("message") or "")).classes("text-sm text-slate-600")
+            if "recorded_outcome" in row:
+                ui.label(f"Audit review 2026-11-12: recorded {row['recorded_outcome']} "
+                         f"(event {row.get('recorded_first_failing_event') or '–'}), now {row['outcome']} "
+                         f"(event {row.get('first_failing_event') or '–'}). {row.get('review_reason') or ''} "
+                         f"Corrected rules: {row.get('corrected_rules') or 'none'}.").classes("text-sm text-amber-700")
+            if row.get("rerun_batch"):
+                ui.label(f"Rerun of 2026-11-13 ({row['rerun']}): attempt of batch {row['rerun_batch']}, shown in "
+                         f"place of this batch's original attempts of {row.get('configuration')} on "
+                         f"{row.get('scenario')}, which stay in its record.").classes("text-sm text-amber-700")
             if not path.is_file():
                 ui.label("No draft was recorded for this attempt.").classes("text-sm")
                 return

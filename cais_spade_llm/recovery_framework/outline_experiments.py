@@ -40,6 +40,16 @@ logger = logging.getLogger(__name__)
 
 EXPERIMENTS = RECORDS / "outline_experiments"
 BATCH_NAME = "batch.json"
+# The post-collection audit review (user decision, 2026-11-12): the final outcome of each re-audited outline. The
+# original audit.json and batch.json records stay as recorded; only what is shown and counted applies the review.
+AUDIT_REVIEW_NAME = "audit_review_20261112.json"
+REVIEW_COLUMNS = ("recorded_outcome", "recorded_failing_stage", "recorded_first_failing_event", "audit_review",
+                  "review_reason", "corrected_rules")
+# The rerun of one Study 1 cell (user decision, 2026-11-13): Part slippage, Framework, incremental ran again for each
+# model after Exit's model declared its response to a part taken off it. The original batch.json rows stay as recorded;
+# what is shown and counted takes the rerun batch's rows for that cell.
+RERUN_NAME = "exit_rerun_20261113.json"
+RERUN_COLUMNS = ("rerun", "rerun_batch")
 # Display labels only: each maps to the exact OutlineDraft flags it runs with.
 CONFIGURATIONS = {
     "LLM, single-pass": {"single_pass_outline": True},
@@ -312,12 +322,89 @@ def summarize(rows: list[dict]) -> dict[str, list[dict]]:
 
 
 def rows_csv(rows: list[dict]) -> str:
-    """Return attempt rows as CSV text, one column per recorded measurement."""
+    """Return attempt rows as CSV text, one column per recorded measurement, and the review's and rerun's columns
+    when applied."""
+    applied = (*REVIEW_COLUMNS, *RERUN_COLUMNS)
+    columns = [*ROW_COLUMNS, *(name for name in applied if any(name in row for row in rows))]
     stream = io.StringIO()
-    writer = csv.DictWriter(stream, fieldnames=ROW_COLUMNS, extrasaction="ignore")
+    writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
     return stream.getvalue()
+
+
+def read_audit_review(root: Path = EXPERIMENTS) -> dict:
+    """Return the post-collection audit review's attempts by draft directory name, or an empty dict without one."""
+    path = root / AUDIT_REVIEW_NAME
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8")).get("attempts") or {}
+
+
+def reviewed_rows(rows: list[dict], review: dict | None = None) -> list[dict]:
+    """Return attempt rows with the audit review's final outcome, keeping the recorded one beside it.
+
+    A row the review re-audited takes its outcome, failing stage and first failing event, and keeps the recorded
+    values as ``recorded_*``; any other row, such as an attempt that did not finish, is returned as it is. The rows
+    passed in are not changed, so a batch saved afterwards keeps its recorded outcomes.
+
+    Args:
+        rows: Attempt rows as a batch records them.
+        review: The review's attempts by draft directory name; read from the experiments folder when None.
+    """
+    review = read_audit_review() if review is None else review
+    shown = []
+    for row in rows:
+        entry = review.get(Path(str(row.get("draft_path"))).parent.name)
+        if entry is None:
+            shown.append(row)
+            continue
+        shown.append({**row, "outcome": entry["outcome"], "failing_stage": entry["failing_stage"],
+                      "first_failing_event": entry["first_failing_event"],
+                      "recorded_outcome": row.get("outcome"), "recorded_failing_stage": row.get("failing_stage"),
+                      "recorded_first_failing_event": row.get("first_failing_event"),
+                      "audit_review": AUDIT_REVIEW_NAME, "review_reason": entry.get("reason", ""),
+                      "corrected_rules": "; ".join(entry.get("corrected_rules") or [])})
+    return shown
+
+
+def read_rerun(root: Path = EXPERIMENTS) -> dict:
+    """Return the cell rerun's record (its cell and the rerun batch for each batch it replaces), or an empty dict."""
+    path = root / RERUN_NAME
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def rerun_rows(batch_id: str, rows: list[dict], rerun: dict | None = None, root: Path = EXPERIMENTS) -> list[dict]:
+    """Return a batch's attempt rows with the rerun's attempts in place of the original ones of its cell.
+
+    The rerun's rows take the places of the cell's original rows, in their order, and name the rerun file and
+    their own batch; every other row is returned as it is, as is every row of a batch the rerun does not replace.
+    The rows passed in are not changed, so a batch saved afterwards keeps its recorded rows.
+
+    Args:
+        batch_id: The batch the rows belong to.
+        rows: Attempt rows as the batch records them.
+        rerun: The rerun's record; read from ``root`` when None.
+        root: The experiments folder; the rerun names its batches relative to the folder above it.
+    """
+    rerun = read_rerun(root) if rerun is None else rerun
+    source = (rerun.get("replaces") or {}).get(batch_id)
+    if source is None:
+        return list(rows)
+    cell = (rerun["scenario"], rerun["configuration"])
+    path = root.parent / source
+    replacement = iter([{**row, "rerun": RERUN_NAME, "rerun_batch": path.name}
+                        for row in read_batch(path / BATCH_NAME).get("rows") or []
+                        if (row.get("scenario"), row.get("configuration")) == cell])
+    shown = []
+    for row in rows:
+        if (row.get("scenario"), row.get("configuration")) != cell:
+            shown.append(row)
+        elif (taken := next(replacement, None)) is not None:
+            shown.append(taken)
+    return [*shown, *replacement]
 
 
 def read_batch(path: Path, *, live: str | None = None) -> dict:

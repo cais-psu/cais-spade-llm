@@ -485,6 +485,69 @@ def test_a_row_says_not_recorded_for_what_its_records_lack(tmp_path):
     assert (row["provider_calls"], row["provider_requests"]) == (2, 3)
 
 
+def test_the_audit_review_sets_the_shown_outcome_and_keeps_the_recorded_one(tmp_path):
+    review = {"version": 1, "attempts": {"draft_a": {
+        "outcome": "passed", "failing_stage": "", "first_failing_event": "",
+        "reason": "", "corrected_rules": ["drive_one_turn", "base_search_no_dock"]}}}
+    (tmp_path / outline_experiments.AUDIT_REVIEW_NAME).write_text(json.dumps(review))
+    rows = [{"attempt_id": "attempt_001", "outcome": "physically_unsupported", "failing_stage": "physical_evidence",
+             "first_failing_event": 4, "draft_path": str(tmp_path / "batch" / "attempts" / "draft_a" / "draft.json")},
+            {"attempt_id": "attempt_002", "outcome": "did_not_finish", "failing_stage": "", "first_failing_event": "",
+             "draft_path": str(tmp_path / "batch" / "attempts" / "draft_b" / "draft.json")}]
+    recorded = json.loads(json.dumps(rows))
+
+    shown = outline_experiments.reviewed_rows(rows, outline_experiments.read_audit_review(tmp_path))
+
+    assert (shown[0]["outcome"], shown[0]["first_failing_event"], shown[0]["recorded_outcome"],
+            shown[0]["recorded_first_failing_event"]) == ("passed", "", "physically_unsupported", 4)
+    assert shown[0]["corrected_rules"] == "drive_one_turn; base_search_no_dock"
+    # An attempt the review did not re-audit, and the rows passed in, stay as recorded.
+    assert shown[1] == recorded[1]
+    assert rows == recorded
+    assert outline_experiments.summarize([{**row, "status": "finished", "configuration": "LLM, single-pass",
+                                           "scenario": SCENARIO} for row in shown])["outcomes"][0]["passed"] == 1
+    header = outline_experiments.rows_csv(shown).splitlines()[0].split(",")
+    assert header[-len(outline_experiments.REVIEW_COLUMNS):] == list(outline_experiments.REVIEW_COLUMNS)
+    assert "recorded_outcome" not in outline_experiments.rows_csv(recorded).splitlines()[0]
+
+
+def test_no_audit_review_file_leaves_every_row_as_recorded(tmp_path):
+    rows = [{"attempt_id": "attempt_001", "outcome": "unsafe", "draft_path": str(tmp_path / "draft_a" / "draft.json")}]
+
+    assert outline_experiments.read_audit_review(tmp_path) == {}
+    assert outline_experiments.reviewed_rows(rows, {}) == rows
+
+
+def test_a_cell_rerun_takes_the_places_of_its_original_attempts_and_leaves_them_recorded(tmp_path):
+    experiments = tmp_path / "outline_experiments"
+    experiments.mkdir()
+    cell = {"scenario": SCENARIO, "configuration": "Framework, incremental"}
+    rerun_batch = tmp_path / "rerun" / "batch_new"
+    rerun_batch.mkdir(parents=True)
+    (rerun_batch / outline_experiments.BATCH_NAME).write_text(json.dumps({"batch_id": "batch_new", "status": "finished",
+        "rows": [{"attempt_id": "attempt_001", **cell, "outcome": "passed"},
+                 {"attempt_id": "attempt_002", **cell, "outcome": "passed"}]}))
+    (experiments / outline_experiments.RERUN_NAME).write_text(json.dumps(
+        {**cell, "replaces": {"batch_old": "rerun/batch_new"}}))
+    rows = [{"attempt_id": "attempt_001", **cell, "outcome": "did_not_finish"},
+            {"attempt_id": "attempt_002", "scenario": SCENARIO, "configuration": "LLM, single-pass", "outcome": "unsafe"},
+            {"attempt_id": "attempt_003", **cell, "outcome": "did_not_finish"}]
+    recorded = json.loads(json.dumps(rows))
+    rerun = outline_experiments.read_rerun(experiments)
+
+    shown = outline_experiments.rerun_rows("batch_old", rows, rerun, experiments)
+
+    assert [(row["attempt_id"], row["outcome"], row.get("rerun_batch")) for row in shown] == [
+        ("attempt_001", "passed", "batch_new"), ("attempt_002", "unsafe", None), ("attempt_002", "passed", "batch_new")]
+    assert rows == recorded
+    # A batch the rerun does not replace, or no rerun file, leaves every row as recorded.
+    assert outline_experiments.rerun_rows("batch_other", rows, rerun, experiments) == rows
+    assert outline_experiments.read_rerun(tmp_path) == {}
+    assert outline_experiments.rerun_rows("batch_old", rows, {}, experiments) == rows
+    header = outline_experiments.rows_csv(shown).splitlines()[0].split(",")
+    assert header[-len(outline_experiments.RERUN_COLUMNS):] == list(outline_experiments.RERUN_COLUMNS)
+
+
 def test_audit_missing_audits_finished_attempts_once_their_inputs_still_match(observations, tmp_path, monkeypatch,
                                                                             frozen):
     monkeypatch.setattr(recovery_observations, "read_observations", lambda path: deepcopy(observations))

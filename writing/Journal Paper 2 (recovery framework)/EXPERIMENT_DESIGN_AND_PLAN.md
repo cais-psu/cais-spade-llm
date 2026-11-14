@@ -877,6 +877,54 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
 - 2026-11-09, user decision: GPT-6.1 Terra gets no second attempt. Its three Part slippage second attempts were taken
   out of the queue before any ran, and Table 7 reports Terra's first attempts; only Sol's Part slippage outlines
   report the second attempt. Terra's PS_terra_2 composed all 5 events on its first attempt.
+- 2026-11-12, Study 1 audit review (after collection; user decisions 2026-11-11 and 2026-11-12, applied at the
+  user's word "make the changes"). The user asked whether the independent audit refused baseline outlines for
+  reasons the outline was not at fault for. Offline replays found checker rules stricter than anything the prompt
+  states, and the user ruled that an outline passes unless it is really infeasible or unsafe. Every attempt that
+  ended with an outline (697 of 720; the 23 that did not finish have none) was re-audited, Algorithm 1 with Eq. 12,
+  Eq. 13 on each event and Eq. 6 at the end, with six rules corrected, the same for every method: the KMR drive may
+  turn in place once anywhere on the way (it could turn only at its start); when an event leaves the KMR at no named
+  place with no pose, the base search may pick a free spot but never a dock (it tried docks first, then refused the
+  event for not naming the dock); a release followed by a move home in one event is checked in that order; a KMR
+  base is judged by the stated footprint plus 0.03 m against each obstacle outline (0.2 mm tolerance for rounded
+  headings), not the controller's 5 cm grid test; the arm search tries 24 more seeds when it finds no pose; and
+  where the KMR arm's fixed transfer path fails, the arm may move joint by joint to a pose at the same approach
+  point and then take the RA's straight descent. Two relabels: a KMR location named after a tray or the Buffer is
+  Infeasible: symbolic (RA), not unresolved, and a stated base overlapping a station is Infeasible: physical (RA).
+  The stated-pose rule, schema errors, Blocking for a KMR left away from a dock, every Unsafe outcome and
+  `complete_job` stated with its start were reviewed and kept. Result: 118 outcomes changed, all baseline
+  (Baseline passed 1 → 10 of 240, Informed baseline 59 → 70); the framework's 218 passes and 22 unfinished attempts
+  stay, although 9 of those 22 kept being refused by the first two rules until the request budget and cannot be
+  re-scored without new generation. The confirmatory comparisons were recomputed on the reviewed outcomes (all
+  four p < 10⁻²² after Holm). `audit.json` and `batch.json` are unchanged; the review is a separate file,
+  `outline_experiments/audit_review_20261112.json`, which the Experiments tab and the results page read and show
+  beside the recorded outcome; per-attempt effort (requests, lookups, tokens, time) is unchanged. Evidence for each
+  attempt: `writing/Journal Paper 2 (recovery framework)/evidence/study1_audit_720.xlsx`; scripts and re-check
+  results: `/home/jongh/recovery_review_1030/study1_audit_review/`. The checker code itself is not changed yet; the
+  rules are to be fixed in the code, and the margin and action-order conventions stated in the prompt, after the
+  paper's numbers are frozen.
+- 2026-11-12, Study 2 Conveyor re-run (after collection; user decisions 2026-11-12, Option B). The Study 2 audit
+  found that GPT-6.1 Terra's three Machining outlines, the only outlines of the 36 with a Conveyor event (advance the
+  square part to loading position 2), were composed with the Conveyor's primitives served without descriptions or
+  outputs: the capture records no interface for a transport resource, so `compute_transport_targets` had a
+  placeholder description and no output fields, and Terra's statement that no visible output gives `target_x` was
+  true. All three first compositions stalled at that event, after 5, 5 and 6 of 18 events. The user judged this
+  unfair to Terra and had the served model fixed and the three re-run. Fix, written on 2026-11-12 after the runs:
+  `TRANSPORT_PRIMITIVE_INTERFACES` in `workflow_gazebo.py` describes `detect_parts`, `compute_transport_targets` and
+  `move_relative` and names their numeric outputs (`initial_x`, `target_x`, `displacement`), and
+  `primitive_composition._declared_catalog` serves it for transport resources only, where the capture recorded no
+  interface. It names no place, changes no check, and does not serve the Conveyor's nominal function
+  (`move_parts_downstream`) or its decomposition, since composition composes primitives. The three outlines were
+  composed once more by Terra at the outline's own effort, on `7f6f712` plus that patch
+  (`study2_compositions/conveyor_fix_20261112.patch`), in a worktree reading the same records. Table 7 reports the
+  re-runs in place of the first compositions, whatever they gave, and its caption says so. Results: MACH_terra_3
+  composed all 18 events; MACH_terra_1 stopped at event 3 (ur5e-1 placing the square part on the conveyor, refused
+  because the `pick_ctx` its program passes differs from the pick context the calculation reads) and MACH_terra_2 at
+  event 5 (ur5e-1 placing the square part on the conveyor, six turns without progress), both before the Conveyor
+  event and at events their first compositions had composed. Terra 3 → 4 of 12 outlines composed (52% → 56% of
+  events), Machining 6 → 7 of 9, all 26 → 27 of 36. Records: `compositions_r10_conveyor` and `logs_r10_conveyor`; the
+  first compositions stay in `compositions_r9` and `logs_r9`. Terra's ur5e-1 outlines were not re-run: the other two
+  LLMs composed their picks at M1 from the same served information.
 
 ### Tables and exports required for the paper
 

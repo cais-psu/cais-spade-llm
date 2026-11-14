@@ -28,6 +28,7 @@ from cais_spade_llm.experimental_results.style import (
     ROW_OFFSETS,
     SETTING_GROUPS,
     apply_style,
+    label_ink,
     level_label,
     save,
 )
@@ -40,8 +41,8 @@ PANEL_SIZE_IN = (FULL_WIDTH_IN / 2, 2.15)
 JOINED = ("unresolved", "did_not_finish")
 JOINED_LABEL = "No outline established"
 NOT_AUDITED = "not audited"
-# Segments narrower than this share of the bar get no count label.
-MIN_LABELLED_SHARE = 0.08
+# Every segment gets its count (user decision, 2026-11-12); a one-digit count fits inside a 1-of-30 segment.
+MIN_LABELLED_SHARE = 0.0
 # Median effort per attempt as three columns right of the bars: header, cell key, and the column's center in
 # points from the bars' right end. Units go on a second header line to keep the columns narrow. The caption says
 # these are medians.
@@ -93,7 +94,7 @@ def _draw_scenario(ax: Axes, data: dict[str, Any], scenario: str) -> None:
                 share = count / cell["n"]
                 ax.barh(y, share, left=left, height=BAR_HEIGHT, color=color, edgecolor="white", linewidth=0.6)
                 if share >= MIN_LABELLED_SHARE:
-                    ax.text(left + share / 2, y, str(count), ha="center", va="center", fontsize=6.5, color=INK)
+                    ax.text(left + share / 2, y, str(count), ha="center", va="center", fontsize=6.5, color=label_ink(color))
                 left += share
             _draw_effort(ax, y, _effort_texts(cell), va="center", fontsize=7, color=INK)
     # Headers end just above the first bar, so a one-line header sits on the second line of the others.

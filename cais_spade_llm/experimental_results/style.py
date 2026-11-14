@@ -23,17 +23,42 @@ INK_2 = "#4b515b"
 MUTED = "#7c838d"
 HAIR = "#e1e4e8"
 AXIS = "#c3c7cd"
-# The results page's color for each audit outcome, so a figure and the page read alike.
+# The results page's color for each audit outcome, so a figure and the page read alike. Passed is a vivid
+# traffic-light green and no failure is green; physical infeasibility is yellow and unsafe is red (user decisions,
+# 2026-11-12). Red is deep and the pink beside it light. Known limit: for red-green colour blindness the green is
+# close to the orange beside it (validator ΔE 5.0); the count labels and white gaps between segments carry it.
 OUTCOME_COLORS = {
-    "passed": "#2a78d6",
-    "infeasible": "#eb6834",
-    "physically_unsupported": "#1baf7a",
-    "unsafe": "#eda100",
-    "no_nominal_continuation": "#e87ba4",
+    "passed": "#00a651",
+    "infeasible": "#d95926",
+    "physically_unsupported": "#e8b32e",
+    "unsafe": "#b03a2e",
+    "no_nominal_continuation": "#f2a7c6",
     "unresolved": MUTED,
     "did_not_finish": "#c4c7cc",
     "not audited": "#f6f7f9",
 }
+
+
+def _relative_luminance(color: str) -> float:
+    """Return the WCAG relative luminance of a #rrggbb color."""
+    channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def label_ink(fill: str) -> str:
+    """Return white or INK, whichever has more contrast against a segment's fill.
+
+    Args:
+        fill: The segment color as #rrggbb.
+
+    Returns:
+        The color for a count label drawn on that segment.
+    """
+    background = _relative_luminance(fill)
+    on_white = 1.05 / (background + 0.05)
+    on_ink = (background + 0.05) / (_relative_luminance(INK) + 0.05)
+    return "#ffffff" if on_white > on_ink else INK
 # How the figures name each audit outcome, with the check that sets it. The records keep the audit's names.
 OUTCOME_LABELS = {
     "passed": "Passed",

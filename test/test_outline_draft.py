@@ -887,6 +887,29 @@ def test_composition_takes_the_recorded_interface_and_the_current_contracts():
     assert "output_schema" not in outcome and "description" not in outcome
 
 
+def test_composition_serves_a_transports_declared_interface_where_the_capture_recorded_none():
+    from cais_spade_llm.recovery_framework.primitive_composition import _declared_catalog
+    from cais_spade_llm.recovery_framework.workflow_gazebo import (
+        TRANSPORT_PRIMITIVE_CONTRACTS,
+        TRANSPORT_PRIMITIVE_INTERFACES,
+    )
+
+    recorded = [{"name": "compute_transport_targets", "description": None, "params": {}, "output_schema": None},
+                {"name": "move_relative", "description": "Recorded text.", "params": {"speed_mps": {}},
+                 "output_schema": None}]
+    declared = {name: [contract] for name, contract in TRANSPORT_PRIMITIVE_CONTRACTS.items()}
+    rows = {row["name"]: row for row in _declared_catalog(recorded, declared, TRANSPORT_PRIMITIVE_INTERFACES)}
+    targets = rows["compute_transport_targets"]
+    assert targets["description"] == TRANSPORT_PRIMITIVE_INTERFACES["compute_transport_targets"]["description"]
+    # The served outputs are positions along the axis that move_relative's declared effect reads, never a place.
+    assert set(targets["output_schema"]) == {"target_x", "displacement"}
+    assert rows["move_relative"]["effects"]["part_pose.x"]["set_from_step"]["output"] in targets["output_schema"]
+    # A recorded description is kept; a resource with no served interface keeps the recording as it was.
+    assert rows["move_relative"]["description"] == "Recorded text."
+    plain = _declared_catalog(recorded, declared)
+    assert plain[0]["description"] is None and plain[0]["output_schema"] is None
+
+
 @pytest.mark.parametrize("draft_id, outline, shown", [("draft_1", [{"outline_id": "R1"}], True),
                                                       ("draft_2", [{"outline_id": "R1"}], False),
                                                       ("draft_1", [{"outline_id": "R2"}], False)])

@@ -6,7 +6,7 @@
   <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
    <cc:Work>
     <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
-    <dc:date>2026-11-09T16:29:15.222722</dc:date>
+    <dc:date>2026-11-12T18:43:03.592279</dc:date>
     <dc:format>image/svg+xml</dc:format>
     <dc:creator>
      <cc:Agent>
@@ -35,7 +35,7 @@ L 11.94 10.05
 L 11.94 4.24 
 L 4.24 4.24 
 z
-" style="fill: #2a78d6; stroke: #e1e4e8; stroke-width: 0.5; stroke-linejoin: miter"/>
+" style="fill: #00a651; stroke: #e1e4e8; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="text_1">
     <text style="font-size: 7px; font-family: 'Arial', 'Liberation Sans', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #15181d" x="14.74" y="9.56" transform="rotate(-0 14.74 9.56)">Passed</text>
@@ -46,7 +46,7 @@ L 54.187187 10.05
 L 54.187187 4.24 
 L 46.487187 4.24 
 z
-" style="fill: #eb6834; stroke: #e1e4e8; stroke-width: 0.5; stroke-linejoin: miter"/>
+" style="fill: #d95926; stroke: #e1e4e8; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="text_2">
     <text style="font-size: 7px; font-family: 'Arial', 'Liberation Sans', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #15181d" x="56.987187" y="9.56" transform="rotate(-0 56.987187 9.56)">Infeasible: symbolic (RA)</text>
@@ -57,7 +57,7 @@ L 150.497344 10.05
 L 150.497344 4.24 
 L 142.797344 4.24 
 z
-" style="fill: #1baf7a; stroke: #e1e4e8; stroke-width: 0.5; stroke-linejoin: miter"/>
+" style="fill: #e8b32e; stroke: #e1e4e8; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="text_3">
     <text style="font-size: 7px; font-family: 'Arial', 'Liberation Sans', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #15181d" x="153.297344" y="9.56" transform="rotate(-0 153.297344 9.56)">Infeasible: physical (RA)</text>
@@ -68,7 +68,7 @@ L 244.869375 10.05
 L 244.869375 4.24 
 L 237.169375 4.24 
 z
-" style="fill: #eda100; stroke: #e1e4e8; stroke-width: 0.5; stroke-linejoin: miter"/>
+" style="fill: #b03a2e; stroke: #e1e4e8; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="text_4">
     <text style="font-size: 7px; font-family: 'Arial', 'Liberation Sans', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #15181d" x="247.669375" y="9.56" transform="rotate(-0 247.669375 9.56)">Unsafe (CCA)</text>
@@ -79,7 +79,7 @@ L 307.333438 10.05
 L 307.333438 4.24 
 L 299.633438 4.24 
 z
-" style="fill: #e87ba4; stroke: #e1e4e8; stroke-width: 0.5; stroke-linejoin: miter"/>
+" style="fill: #f2a7c6; stroke: #e1e4e8; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="text_5">
     <text style="font-size: 7px; font-family: 'Arial', 'Liberation Sans', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #15181d" x="310.133438" y="9.56" transform="rotate(-0 310.133438 9.56)">Blocking (CCA)</text>
