@@ -482,6 +482,103 @@ Put 1–4 first; reviewers are most likely to raise them. Give each a concrete n
   them and no chaining through a failed precondition. The review passes two Sol outlines whose single event
   releases a part and then moves home (rule 3), because the prompt never told the LLM this. Either keep the
   wording and disclose these two, or say that an event's actions are checked in their stated order.
+- **Study 2 audit (2026-11-12, after collection).** Every composition, and every composing turn that did not end
+  in an accepted program, is listed with its evidence in `evidence/study2_audit.xlsx` (decisions in its Decisions
+  sheet). Decided so far: the Conveyor re-run below, no re-run for Terra's ur5e-1 outlines, and MACH_terra_1's
+  and MACH_terra_2's re-runs kept as failures; CONV_terra_3, PS_terra_3 and PS_terra_1 kept as
+  failures; PS_sol_3 counted as composed with a footnote (all below).
+- **Conveyor re-run (Option B).** Terra's three Machining outlines, the only ones with a Conveyor event, were first
+  composed with the Conveyor's primitives served without descriptions or outputs, a gap found in the audit. The
+  three were composed again after the fix, and Table 7 reports the re-runs in place of the first compositions,
+  whatever they gave: Terra 3 → 4 of 12, Machining 6 → 7 of 9, all 26 → 27 of 36. The fix states what the
+  primitives compute and output, no place and no check (Deviations, 2026-11-12). Two of the three re-runs stopped
+  earlier than their first compositions, at events those had composed.
+- **Part slippage outlines in Table 7 (user decision 2026-11-16: keep).** The nine composed Part slippage outlines
+  were selected, before the Exit re-run, from the original event-level framework batches, which Fig. 11 now shows
+  replaced by the re-run. None of them uses Exit, so the fixed model accepts them unchanged; they were not
+  reselected. Sentence for the text: "For Part slippage, the composed outlines come from the event-level framework
+  batches as first run; the re-run of that setting after the Exit model correction (Section X) changed only
+  attempts that placed the peg on Exit, which none of these outlines does."
+- **Composition checks loosened before the final runs (audit 2026-11-16: no pass lenient).** Six composition
+  checks were relaxed on 2026-11-08, before the Table 7 compositions ran (Deviations, 2026-11-08). Every accepted
+  program of the 28 passes was checked again in order with the old rule evaluated beside each relaxed one (all 28
+  reproduce). Only two relaxations decide any pass: the gear's turn about its shaft is no longer bounded (PS_sol_2
+  and PS_sol_3 insert the gear at 0 degrees instead of the declared 90), and a part's `current_process` is read as
+  the part's own (all 7 Machining passes and Sol's 3 Part slippage passes; the stated value is still compared with
+  the recorded one, never supplied). The first is consistent with the model: the gear's collision shape is a plain
+  cylinder, so its turn changes nothing the checks or the simulator see. Sentence for the text: "The checks model
+  the small gear as a cylinder, so its turn on the shaft is not checked; gear meshing is not modelled." The
+  others decide none: a place descent touching its named support (40 such places in 24 passes; the old rule
+  allowed the same contact at each), a tilted cylinder judged by its rim, references resolving in served lookups
+  (used by 11 passes, a matter of citation), and an LLM block counted as a turn without progress.
+- **Refusals that cost turns, not the outcome.** Of the 144 refusals in the 36 compositions (Table O2), 78 were
+  followed by an accepted program for the same event; they cost turns and tokens but changed no outcome. The other
+  66 are in the events where the nine failed compositions stopped.
+- **Terra's ur5e-1 compositions** (all three stopped at the KMR picking from M1). Two served facts could have
+  misled: `compute_pick_targets` is described as working from the observed Storage part, and the KMR's Cartesian
+  moves must keep the observed TCP orientation, which the real controller requires but the `move_cartesian`
+  contract does not state. Not re-run (user decision, 2026-11-12): Opus and Sol composed their picks at M1 from
+  the same served information.
+- **Resolver limit (checked).** A program cannot cite the event's own part's `/parts/<name>/snapshot` path, which a
+  lookup serves: the composition checks read that part through their own part view. In the Table 7 compositions
+  this refused programs in 13 events, 11 of them accepted a few turns later. In two it was refused in the event
+  where the composition stopped: CONV_terra_3 (turn 21; it stopped later on a MoveIt refusal) and PS_terra_3 (turn
+  7). Deviations 2026-11-08 says this limit never turned a valid program into a failure. CONV_terra_3 checked
+  (offline replay with its recorded replies, 2026-11-15): with the path resolved, the turn-21 program is refused
+  anyway, its new KMR base overlapping the Assembly Station's margin. PS_terra_3 checked the same way: the turn-7
+  program is refused anyway, for giving the gear's observed pose as the pick calculation's `target_pose`. So in
+  Study 2 the limit cost turns but changed no outcome, and the Deviations sentence holds.
+- **CONV_terra_3 (kept as a failure, user decision 2026-11-15).** Its outline stated the KMR base for the Buffer
+  place at (-1.14, 1.34), 0.4 m west of where the successful compositions stood; the outline checks accepted that
+  pose, but MoveIt refused every place from it (the KMR wrist at its joint limit). The outline checks ask whether
+  some arm pose does the event; composition checks the exact path the program commands, so it can refuse what the
+  outline check accepted.
+- **PS_terra_3 (kept as a failure, user decision 2026-11-15).** It stopped at event 3, ur5e-3 picking the dropped
+  gear. In six of its eight turns Terra proposed nothing, saying no primitive can leave ur5e-3 at no named
+  location, while the served pick event sets the robot's location from the part's (none for the dropped gear);
+  six compositions, including Terra's PS_terra_2, composed this event with the same prompt. Its one program gave
+  the gear's pose as an input the pick calculation does not take.
+- **PS_terra_1 (kept as a failure, user decision 2026-11-15).** It stopped at event 2, ur5e-3 placing the square
+  part in the Buffer, which every other composition of this event passed (10 of 10). Its one program gave the
+  assembly board's centre as an input the place calculation does not take; it then proposed nothing.
+- **PS_sol_3 (counted as composed, user decision 2026-11-15; Table 7 footnote).** Sol's second attempt stopped at
+  event 4, ur5e-3 inserting the small gear. Its program had the same steps as the accepted insertions; MoveIt
+  refused it for a 0.0001 mm touch between the gear and the plate the gear seats on, which the capture's mating
+  declaration does not list as an allowed contact (only the shaft and other gears' teeth). The gear was held about
+  90 degrees turned, from Sol's earlier pick without a stated orientation, which the checks accepted. Every other
+  collision refusal in Study 2 was 0.35 mm or deeper. The user judged it a framework model gap, not an LLM error:
+  the program was accepted under review and the composition resumed, and Sol composed event 5 live under the
+  unchanged checks (accepted at its 7th turn). Sol's first attempt stopped at the same insertion for the same
+  contact. Fix after the
+  freeze: an insertion's seating surface as an allowed contact, found from the recorded geometry.
+- **Resume rule (user decision 2026-11-15).** a failed composition is resumed from its stopping event only when no
+  program could have passed that event because of a gap in the framework. PS_sol_3 qualifies: once the gear was
+  held turned, every insertion program met the undeclared plate contact. MACH_terra_1 does not: a passing form
+  existed (leaving pick_ctx out), which Terra itself used in its first composition of that outline and in
+  MACH_terra_3, so it stays a failure although the check's feedback could not show the way. The other seven
+  failures stopped on the LLM's own errors. Events are composed in order and each program is checked from the state
+  the accepted programs of the earlier events leave (robot poses, grasps, part placements), so the events after a
+  stopping event without a correct program have no state to start from and are not attempted.
+  Paper sentence (Section 6.3.2 or the Table 7 caption): "Events are composed in order, and each event's
+  program is checked from the state that the accepted programs of the earlier events leave (robot poses, grasps,
+  part placements); a composition therefore stops at the first event without an accepted program. One
+  composition (GPT-6.1 Sol, Part slippage) stopped at an event that no program could pass, because the
+  framework's model did not declare the surface a gear seats on as an allowed contact; it was resumed from that
+  event under review, and its remaining event was composed by the same LLM under the unchanged checks."
+- **MACH_terra_1 re-run (kept as a failure, user decision 2026-11-15).** It stopped at event 3, ur5e-1 placing the
+  square part on the conveyor. From turn 6 Terra gave the place calculation ur5e-1's pick record, as the lookup
+  served it; the check compared it with ur5e-1's private record, which had already been extended with the place
+  calculation's own outputs, so no given value could match, and the refusal named the path Terra had cited (shown
+  by an offline replay). Leaving the input out passes, as every other accepted place after an earlier pick did,
+  including Terra's own MACH_terra_3. The defect only arises when the pick was composed in an earlier event: Sol's
+  PS_sol_3 second attempt cited the same record for a part ur5e-3 already held in the capture and passed. Not
+  re-run, since Table 7 reports the Conveyor re-run whatever it gave; the check is to be fixed after the paper's
+  numbers are frozen.
+- **MACH_terra_2 re-run (kept as a failure, user decision 2026-11-15).** It stopped at event 5, the same kind of
+  place. Both refusals were real (an input the calculation does not take, then a pick record with no part name);
+  Terra then proposed nothing for six turns, reporting that the pick context has no part name. The projected state
+  it was served after the pick does show `task_ctx` with `part_name: null` while `held_part` names the part (the
+  event model's summary, not the robot's pick record). Leaving the input out passes, as in MACH_terra_3.
 
 ## 10. Statistics
 
@@ -543,22 +640,29 @@ setup.
 Numbers available (results page, Table 7):
 
 - 36 compositions, 3 per LLM and scenario.
-- Passed: Opus 12/12, Sol 11/12, Terra 4/12, 27/36 in all. Share of events composed: 100%, 97%, 56%.
+- Passed: Opus 12/12, Sol 12/12†, Terra 4/12, 28/36 in all. Share of events composed: 100%, 100%, 56%.
+- † PS_sol_3 (second attempt) was resumed under review (user decisions 2026-11-15), with a Table 7 footnote: it
+  stopped at the gear insertion (event 4 of 5) because the framework's model does not declare the plate the gear
+  seats on as an allowed contact, and MoveIt refused a 0.0001 mm touch; Sol's program had the same steps as the
+  accepted insertions. That program was accepted under review, and Sol composed event 5 live under the unchanged
+  checks (accepted at its 7th turn, after 3 refused programs; 7 calls, 116k tokens, added to its effort). The
+  review is `study2_compositions/composition_review_20261115.json`, the resumed record
+  `compositions_r11_ps_sol3_review/`; the r9b record is unchanged. Without the review: Sol 11/12, 27/36.
 - Terra's Machining counts are its Conveyor-fix re-runs, reported in place of the first compositions (Option B,
   decided 2026-11-12; Deviations). The first compositions were 0/3 (5, 5 and 6 of 18 events), all stalled at the
   Conveyor event served without descriptions or outputs; the re-runs gave 18/18, 2/18 and 4/18.
-- Sol's 11/12 counts its Part slippage second attempts. On first attempts Sol is 9/12 (all three Part slippage
+- Sol's 12/12 counts its Part slippage second attempts. On first attempts Sol is 9/12 (all three Part slippage
   first attempts stalled on lookups of `product_geometry` and `/geometry/Gear_Plate`), so 25/36 overall (24/36
   with Terra's first Machining compositions too). Opus
   got no second attempt (it did not need one); Terra got none by decision. Decided 2026-11-10: the table keeps
   Sol's second attempts as they are, with no footnote.
-- By scenario: Conveyor 8/9, UR5e-1 6/9, M1 7/9, Part slippage 6/9 (4/9 on first attempts).
-- Medians per composition: 7 events, 26 primitives, 2 refused programs, 23 calls, 61.5 lookups, 313k tokens,
-  14.8 min. M1 is the heaviest: 446k tokens, 38.6 min.
-- The 9 failed compositions (8 Terra, 1 Sol second attempt) stopped after 1–8 accepted events. 6 of the 9 stalled
+- By scenario: Conveyor 8/9, UR5e-1 6/9, M1 7/9, Part slippage 7/9† (4/9 on first attempts).
+- Medians per composition: 7 events, 26 primitives, 2 refused programs, 23 calls, 60 lookups, 277k tokens,
+  14.8 min. M1 is the heaviest: 446k tokens, 40.1 min.
+- The 8 failed compositions (all Terra) stopped after 1–8 accepted events. 5 of the 8 stalled
   (6 turns without progress); CONV_terra_3 ended on a MoveIt refusal (KMR joint a6 at its limit), PS_terra_3 when
   the LLM reported that no primitive can reach the stated state, and the MACH_terra_1 re-run on a refusal that the
-  `pick_ctx` its program passes differs from the pick context the calculation reads. Seven stopped at an event
+  `pick_ctx` its program passes differs from the pick context the calculation reads. Six stopped at an event
   outside the resource's nominal functions: KMR placing in the buffer, KMR picking from M1, UR5e-3 handling the peg
   or the dropped gear. The two failed Machining re-runs stopped at ur5e-1 placing the square part on the conveyor,
   an event their first compositions had composed.
@@ -644,21 +748,21 @@ which LLM is best."
 **Major**
 
 1. **Important: composition separates the models, and the ranking changes between stages.**
-   - Opus composed 12/12 outlines (100% of events), Sol 11/12 (97%) and Terra 4/12 (56%).
+   - Opus composed 12/12 outlines (100% of events), Sol 12/12† (100%) and Terra 4/12 (56%).
    - Terra passed 83–85% in synthesis, so synthesis success does not predict composition success.
    - The checks make up for a weaker model at the task level, but not yet at the primitive level, where every
      number must refer to 𝒦 and every motion must pass motion planning.
-2. **Good: strong LLMs compose reliably.** Opus and Sol composed 23 of 24 outlines, so the stage works with a
+2. **Good: strong LLMs compose reliably.** Opus and Sol composed 24 of 24 outlines (one counted by review, †), so the stage works with a
    capable model.
 
 **Moderate**
 
 3. **Bad: Terra fails by stalling, not by being refused.** Refused programs are similar for all three LLMs
-   (median 2, 1 and 2). 6 of the 9 failed compositions ended after six turns without progress, so Terra's problem
+   (median 2, 1 and 2). 5 of the 8 failed compositions ended after six turns without progress, so Terra's problem
    is producing a program at all, not producing wrong ones.
-4. **Bad: more effort did not help.** Terra used the most lookups (76.5) and tokens (417k) per composition and
-   still failed 8 of 12.
-5. **Observation: the failures cluster on new uses of resources.** Seven of the nine failures stopped at an event
+4. **Bad: more effort did not help.** Terra used the most tokens per composition (445k, against 176k for Opus and
+   296k for Sol) and still failed 8 of 12. Its median lookups (61.5) equal Sol's.
+5. **Observation: the failures cluster on new uses of resources.** Six of the eight failures stopped at an event
    outside the resource's nominal functions:
    - the KMR placing in the buffer;
    - the KMR picking from M1;
@@ -675,7 +779,7 @@ which LLM is best."
 **Minor**
 
 6. **Cost differs by LLM:** Opus needed the fewest tokens and least time per composition (176k tokens and 13.2 min,
-   against 296k and 14.4 min for Sol and 417k and 17.3 min for Terra).
+   against 296k and 15.2 min for Sol and 445k and 15.9 min for Terra).
 7. **Caveats:**
    - 3 compositions per LLM and scenario is enough for counts, not for a statistical test between LLMs.
    - Point back to the 6.3.1 caveats rather than repeating them.

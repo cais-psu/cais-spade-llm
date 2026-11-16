@@ -371,6 +371,17 @@ SECOND_ATTEMPT = {"PS_sol_1", "PS_sol_2", "PS_sol_3"}
 # Conveyor event). Table 7 reports the re-run in place of the first composition, whatever it gave; the caption says so.
 CONVEYOR_RERUN_LOGS = EXPERIMENTS.parent / "study2_compositions" / "logs_r10_conveyor"
 CONVEYOR_RERUN = {"MACH_terra_1", "MACH_terra_2", "MACH_terra_3"}
+# User decision 2026-11-15: compositions counted as composed although their record stopped, each with its reason
+# (a framework model gap, not an LLM error). Kept beside the records, which stay unchanged; Table 7 marks them and
+# its caption says why. The share of events composed stays as recorded.
+COMPOSITION_REVIEW = EXPERIMENTS.parent / "study2_compositions" / "composition_review_20261115.json"
+
+
+def read_composition_review(path: Path = COMPOSITION_REVIEW) -> dict[str, dict]:
+    """Return the reviewed compositions by name, or none when the review file is absent."""
+    if not path.exists():
+        return {}
+    return {row["name"]: row for row in json.loads(path.read_text())["rows"]}
 COMPOSITION_SCENARIOS = {"PS": "Part slippage", "CONV": "Conveyor breakdown",
                          "MACH": "Machining breakdown during part processing", "UR5": "ur5e-1 breakdown"}
 COMPOSITION_MODELS = {"opus": "opus55", "sol": "sol", "terra": "terra"}
@@ -594,6 +605,7 @@ def composition_summary(rows: list[dict]) -> dict | None:
     tokens = _median([row["tokens"] for row in rows])
     minutes = _median([row["seconds"] / 60 for row in rows if row.get("seconds") is not None])
     return {"composed": len(rows), "passed": sum(row["passed"] for row in rows),
+            "reviewed": sum(bool(row.get("reviewed")) for row in rows),
             "share": statistics.fmean(row["share"] for row in rows if row["share"] is not None),
             "events": _median([row["events"] for row in rows]),
             "primitives": _median([row["primitives"] for row in rows if row["primitives"] is not None]),
@@ -616,6 +628,21 @@ def compositions_from_logs(logs: Path = COMPOSITION_LOGS) -> dict | None:
             rows.append({**row, "attempt": 2 if use_second else 1, "conveyor_rerun": use_rerun})
     if not rows:
         return None
+    review = read_composition_review()
+    for row in rows:
+        if row["name"] in review and not row["passed"]:
+            reviewed = review[row["name"]]
+            row.update(passed=True, reviewed=reviewed["reason"])
+            # A composition resumed from its reviewed event: its record's effort plus the live turns after it.
+            resumed = reviewed.get("resumed")
+            if resumed:
+                added = resumed["added_effort"]
+                row.update(accepted=resumed["events_accepted"], share=resumed["events_accepted"] / row["events"],
+                           primitives=resumed["primitives"],
+                           refused=row["refused"] - resumed["accepted_by_review"] + added["refused"],
+                           calls=row["calls"] + added["calls"], tokens=row["tokens"] + added["tokens"],
+                           lookups=row["lookups"] + added["lookups"],
+                           seconds=(row["seconds"] or 0) + added["seconds"])
     references = {}
     for scenario in SCENARIOS:
         composed = [row for row in rows if row["scenario"] == scenario]
@@ -633,7 +660,8 @@ def compositions_from_logs(logs: Path = COMPOSITION_LOGS) -> dict | None:
                 "code": refusal["code"], "message": refusal["message"], "models": {}, "fixed": 0, "open": 0})
             entry["models"][row["model"]] = entry["models"].get(row["model"], 0) + 1
             entry["fixed" if refusal["fixed"] else "open"] += 1
-    return {"second_attempts": second_attempts, "conveyor_reruns": conveyor_reruns, "references": references, "reference_rows": reference_rows,
+    return {"second_attempts": second_attempts, "conveyor_reruns": conveyor_reruns,
+            "reviewed": sorted(row["name"] for row in rows if row.get("reviewed")), "references": references, "reference_rows": reference_rows,
             "scenarios": {scenario: composition_summary([row for row in rows if row["scenario"] == scenario])
                           for scenario in SCENARIOS},
             "total": composition_summary(rows),

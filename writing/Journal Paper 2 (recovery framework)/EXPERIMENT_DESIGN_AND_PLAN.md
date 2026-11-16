@@ -925,151 +925,144 @@ first. The paper states that Study 2 executes the shortest passed outline per sc
   events), Machining 6 → 7 of 9, all 26 → 27 of 36. Records: `compositions_r10_conveyor` and `logs_r10_conveyor`; the
   first compositions stay in `compositions_r9` and `logs_r9`. Terra's ur5e-1 outlines were not re-run: the other two
   LLMs composed their picks at M1 from the same served information.
-
-### Tables and exports required for the paper
-
-1. **Protocol table:** model profiles, configurations and their exact settings,
-   captures/conditions, fixed workflow and generation settings, budgets,
-   repetitions, evidence versions, and exclusions.
-2. **Study 1 results:** audited outcome classes `n/N` per configuration and
-   failure, first failing checks, non-progress admissions, lookups, turns,
-   tokens, and time; and a rejection table for both validated configurations
-   side by side (completed, rewrites or revisions, RA rejections, CCA
-   rejections after RA, most common reason).
-3. **Study 2 results:** outline and overall completion `n/N` per failure and model,
-   conditional primitive completion, latency, revisions, tokens, and stop stages.
-4. **Study 3 results:** unique reference cases, coverage, policy decisions, false
-   acceptance/rejection, unresolved outcomes, and checker time.
-5. **Raw exports:** one row per recovery attempt, plus separate linked tables for
-   audited events, reviewed cases, proposals, programs, and checks. Cases and
-   proposals must not become extra attempts in the summary.
-
-Export JSON records and CSV tables with identifiers, source hashes, actual
-settings, code/evidence-policy versions, outcome definitions, and artifact links.
-Preserve the evidence required by accepted results and reference cases, and
-keep experiment records under the retention rule in section 3.
-
-## 5. Figures
-
-Use measured data for paper figures. Any preliminary illustrative layout must
-be labeled as an example and excluded from result exports. Start with the two
-Study 1 figures; add the others with their studies.
-
-| Figure | Study and purpose | Axes and evidence requirements |
-| --- | --- | --- |
-| Audited outcome by configuration | Study 1: show what validation and incremental generation each change | One stacked proportion bar per configuration, grouped as no validation (Single-pass LLM, Incremental LLM) and with validation (Single-pass + validation, Full framework), faceted by failure. Classes are mutually exclusive by the first-failing-check rule: passed, infeasible, physically unsupported, unsafe, no nominal continuation, unresolved, did not finish. Label `n/N`; all started attempts are the denominator. Median tokens, time and lookups beside each bar. The caption states that both validated configurations eliminate the infeasible, physically unsupported, and unsafe classes by construction. |
-| Effort by configuration (optional) | Study 1: show the spread of cost | Individual points with medians for tokens per attempt, per configuration. Show attempts that did not complete separately. Optional because the outcome figure carries the medians. |
-| Recovery completion by failure | Study 2: show whether the full workflow completes | Horizontal: the four exact failures. Vertical: completion proportion, with `n/N` and 95% intervals. Show outline and overall completion in separate panels with all started attempts as denominator. Put conditional primitive completion in its own table/panel with its denominator stated. Distinguish model profiles when more than one is evaluated. |
-| Validation-policy error plot | Study 3: show what feasibility and safety enforcement prevent | Horizontal: the four acceptance policies. Separate panels for infeasible acceptance, unsafe acceptance, and valid-case rejection; include counts, intervals, and unresolved outcomes. Preserve separate proposal/program units and avoid stacking overlapping error categories. |
-| One resource timeline or ordered event diagram | Study 2: explain the composed recovery | Lanes: exact resource identifiers. Use supported schedule time or explicitly ordinal steps. Show outline events, primitive programs, dependencies, and represented nominal work. Label offline schedules and all timing assumptions. |
-
-Detailed feasibility/safety confusion matrices can accompany Study 3 in
-supplementary material. With additional model profiles, a model-by-failure
-completion heatmap or completion-versus-cost scatter plot can summarize
-Studies 1 and 2. These are alternative views of the same results, not
-additional studies.
-
-Selection plots, candidate decision graphs, generate-and-test curves, and
-fixed-outline comparison panels belong to the relevant Possible studies.
-Do not make them requirements of the core implementation.
-
-Produce publication figures with standard plotting tools from exported tables.
-Save plotting configuration/source, selected-data identifiers, SVG or PDF, and
-PNG previews. Use accessible colors plus shapes or line styles, common scales
-for compared panels, and gray unavailable cells. Caption every figure with its
-stage, input origin, cohort, denominator, and evidence limits.
-
-## 6. UI, records, and integration plan
-
-The `experiments` placeholder at `/recovery-framework?tab=experiments` is
-delivered. Build its first functional slice for Study 1: configuration
-selection (all four configurations, each unavailable one showing its reason),
-capture readiness,
-repetitions and budgets, the planned attempt matrix, explicit start/cancel
-controls, progress, audited outcome results, and exports. Add Study 2 and
-Study 3 controls afterwards. List Possible studies as deferred options without
-active controls.
-
-Only applicable combinations are selectable. An unsupported configuration,
-stage, or missing input has a visible reason and cannot launch a misleading
-comparison. A failure where the Full framework has not completed is shown as
-not yet comparable.
-
-Keep experiment records in a dedicated versioned directory under the existing
-recovery monitoring area. Each batch has a frozen configuration/manifest and
-each attempt has its own state, result, audit, and evidence references.
-Persist queued, running, terminal, and interrupted status so page navigation
-or reconnect does not launch duplicate work or discard completed results.
-
-Use recovery-framework-owned orchestration modules and isolated sequential
-workers. Extend the reserved evaluator in
-[recovery_evaluation.py](../../cais_spade_llm/recovery_framework/recovery_evaluation.py)
-with a versioned configuration field rather than writing a second runner; it already
-freezes inputs, isolates attempts, and blocks live calls. Preserve
-`SystemBridge` as the public boundary for existing live-runtime access; keep
-`cais_spade_llm/ui/bridge.py` read-only. The experiment worker uses saved
-inputs and cannot dispatch live robot work. Do not change global model
-configuration or the active recovery session to select a trial's settings.
-
-Reuse the existing request writer, saved-observation construction, validators,
-and evidence viewers where their contracts match the study. Keep legacy
-evaluation manifests readable and preserve the reserved protocol's original
-semantics. Historical records missing study metadata remain historical;
-do not infer that they belong to a new controlled matrix.
-
-### Integration notes for the focused plan
-
-The existing recovery preparation, candidate-selection code, Start fresh
-path, and reserved evaluator are distinct paths. Record the settings actually
-used by a worker; do not infer that a `pure_llm` value disables validation or
-that a `neurosymbolic` value proves every intended stage is integrated. The
-Start fresh path sets `outline_diagnostic_bypass=true` even when every check
-is selected, so its all-checks-selected behavior must be verified against the
-legacy validated route before either is chosen as the shared pipeline for
-the incremental configurations.
-
-The single-pass configurations need a reply format for a complete outline
-that keeps the same starting prompt, lookups, and lookup limit as the
-incremental configurations. Build or verify it before the pilot; giving them
-less information would measure missing facts rather than the generation
-method. Single-pass + validation also needs a loop that checks the finished
-outline with the phase 3 audit component and asks for a whole-outline rewrite
-with the findings.
-
-The core pipeline needs verified primitive support, CCA checks, and final
-audits for each enabled scenario. The retained recovery handoff currently
-records an accepted Part slippage outline and an RA-accepted primitive
-composition whose `cca_composition_status=not_checked`. That record must not
-be promoted to the full Study 2 endpoint without the remaining required checks.
-Retained failure captures and incomplete prefixes are not complete results.
-
-Preserve current owner endpoint/predicate evidence policy. Missing evidence
-cannot trigger fabricated timing or unsolicited trajectory generation.
-Re-read the evolving runtime code before implementing workers, and keep the
-reserved evaluator's original manifest semantics and historical reports intact.
-
-## 7. Phased implementation and acceptance
-
-Implement one numbered phase at a time, run its checks, and record a handoff
-here before advancing. A completed software phase does not mean its
-experiments have run. Recommended order: phase 3, phase 4, then complete
-phase 2 using the record format fixed in phase 4, then phases 5 onward.
-
-| Phase | Deliverable | Acceptance gate | Status |
-| --- | --- | --- | --- |
-| 1 | Separate experiment design document | Exact scenarios, studies, configuration definitions, model extensibility, measurement definitions, figure specifications, and phase checklist; valid local references | Complete: 2026-10-13; revised 2026-10-14 and 2026-10-21 |
-| 2 | Experiments tab and persistent configuration/results | Navigation preserves form state; capture readiness and trial counts are correct; Study 1 configuration selection shows unavailable configurations with reasons; records and exports round-trip; no automatic model calls | Software delivered 2026-10-27: Study 1 setup, batch runner with frozen manifests, persistent records, Fig. 11 / Table 6 summaries, CSV and JSON export (see handoff). No trials run |
-| 3 | Independent outline auditor | Attempt 17's outline passes, including nominal continuation. Reviewed negative controls fail at the expected event and check: one each for RA feasibility, physical support, `SAFE_shared_area_mutex`, `SAFE_gear_small_before_KET4_Square_4mm`, and nominal continuation (the mock `part_slippage` plans may supply the two safety cases if their events convert to the outline format). Missing evidence yields `unresolved`. No provider, Gazebo, controller, or feedback path. | Software delivered 2026-10-27 (`outline_audit.py`); offline check on three saved drafts. Attempt 17 and the reviewed negative controls not yet run |
-| 4 | Study 1 configurations and the `Part slippage` pilot | Single-pass reply format with the same prompt, lookups, and lookup limit. Incremental configurations on one shared pipeline with one proposal per turn and exact recorded settings. Single-pass + validation checks finished outlines with the phase 3 component and rewrites whole outlines. Single-pass LLM and Incremental LLM make zero RA/CCA calls and receive no validation findings. Experiment-record retention exception agreed. The pilot runs 12 attempts and every finished outline is audited. | Software delivered 2026-10-27; pilot not run |
-| 5 | Study 1 on the remaining failures | Each added failure enters only after the Full framework completes an audited outline there (runtime roadmap dependency); each runs as a frozen four-configuration batch | Planned |
-| 6 | Study 2 end-to-end workers | Fresh isolated attempts; actual settings captured; outline, primitive, and overall endpoints verified; required RA/CCA/nominal evidence; cancellation and retained history | Planned |
-| 7 | Study 3 reviewed cases and policy replay | Identical inputs across four policies using the phase 3 auditor; independent labels; accurate acceptance and unresolved outcomes; zero live dispatch | Planned |
-| 8 | Reports and figures | Correct configuration, attempt, and case denominators; measured outcome, completion, and policy-error plots; one evidence-backed recovery example; reproducible exports | Planned |
-| 9 | Possible studies | Implement only a later selected comparison with its own frozen protocol; no changes to core interpretation. The selector correction belongs to possible study A. | Deferred |
-| 10 | Additional model adapters | Reuse core studies and records; preserve request/evidence contracts; show unsupported settings and missing usage | Later extension |
-
-### Tests to add or extend during implementation
-
+- 2026-11-15, Study 2 audit decisions (after collection; user decisions 2026-11-15). Each failed composition in Table
+  7 was reviewed at the event where it stopped, with offline replays of the recorded replies where a check's
+  behaviour was in question (no LLM calls; scripts and results in /home/jongh/recovery_review_1030/study2_audit/).
+  Kept as failures: MACH_terra_1 (re-run; from turn 6 the check compared the program's pick_ctx with ur5e-1's private
+  record already extended with the place calculation's own outputs, so no given value could match, but leaving the
+  input out passes as in every other accepted place), MACH_terra_2 (re-run; refusals real), CONV_terra_3, PS_terra_3
+  and PS_terra_1. The resolver limit (a program cannot cite the event's own part's /parts/<name>/snapshot) occurred
+  where CONV_terra_3 and PS_terra_3 stopped; with the path resolved both programs are refused anyway (a KMR base
+  overlapping the Assembly Station's margin; a target_pose the pick calculation does not take), so the 2026-11-08
+  statement that it never turned a valid program into a failure holds. Counted as composed: PS_sol_3 (Sol's second
+  attempt), which stopped at the gear insertion because the capture's mating declaration does not list the plate the
+  gear seats on as an allowed contact and MoveIt refused a 0.0001 mm touch with it (every other collision refusal in
+  Study 2 was 0.35 mm or deeper); Sol's program had the same steps as the accepted insertions. The user judged it a
+  framework model gap: its event-4 program was accepted under review and the composition resumed (events 1-4 replayed
+  from the record, no LLM calls), and Sol composed event 5 live under the unchanged checks, accepted at its 7th turn
+  after 3 refused programs (records in compositions_r11_ps_sol3_review/; its 7 calls and 116k tokens are added to the
+  composition's effort). Table 7 marks it with a footnote. The review is
+  study2_compositions/composition_review_20261115.json beside the records, which are unchanged; Table 7 gives Sol
+  12/12 (100% of events) and 28/36 in all (11/12 and 27/36 without it). Checker fixes for after the paper freeze: the
+  resolver limit, the pick_ctx comparison after a pick composed in an earlier event, and an insertion's seating
+  surface as an allowed contact. Resume rule (user decision 2026-11-15): a failed composition is resumed from its
+  stopping event only when no program could have passed that event because of a gap in the framework. PS_sol_3
+  qualifies: once the gear was held turned, every insertion program met the undeclared plate contact. MACH_terra_1
+  does not: a passing form existed (leaving pick_ctx out), which Terra itself used in its first composition of that
+  outline and in MACH_terra_3, so it stays a failure although the check's feedback could not show the way. The other
+  seven failures stopped on the LLM's own errors. Events are composed in order and each program is checked from the
+  state the accepted programs of the earlier events leave (robot poses, grasps, part placements), so the events after
+  a stopping event without a correct program have no state to start from and are not attempted.  ### Tables and
+  exports required for the paper  1. **Protocol table:** model profiles, configurations and their exact settings,
+  captures/conditions, fixed workflow and generation settings, budgets, repetitions, evidence versions, and
+  exclusions. 2. **Study 1 results:** audited outcome classes `n/N` per configuration and failure, first failing
+  checks, non-progress admissions, lookups, turns, tokens, and time; and a rejection table for both validated
+  configurations side by side (completed, rewrites or revisions, RA rejections, CCA rejections after RA, most common
+  reason). 3. **Study 2 results:** outline and overall completion `n/N` per failure and model, conditional primitive
+  completion, latency, revisions, tokens, and stop stages. 4. **Study 3 results:** unique reference cases, coverage,
+  policy decisions, false acceptance/rejection, unresolved outcomes, and checker time. 5. **Raw exports:** one row
+  per recovery attempt, plus separate linked tables for audited events, reviewed cases, proposals, programs, and
+  checks. Cases and proposals must not become extra attempts in the summary.  Export JSON records and CSV tables with
+  identifiers, source hashes, actual settings, code/evidence-policy versions, outcome definitions, and artifact
+  links. Preserve the evidence required by accepted results and reference cases, and keep experiment records under
+  the retention rule in section 3.  ## 5. Figures  Use measured data for paper figures. Any preliminary illustrative
+  layout must be labeled as an example and excluded from result exports. Start with the two Study 1 figures; add the
+  others with their studies.  | Figure | Study and purpose | Axes and evidence requirements | | --- | --- | --- | |
+  Audited outcome by configuration | Study 1: show what validation and incremental generation each change | One
+  stacked proportion bar per configuration, grouped as no validation (Single-pass LLM, Incremental LLM) and with
+  validation (Single-pass + validation, Full framework), faceted by failure. Classes are mutually exclusive by the
+  first-failing-check rule: passed, infeasible, physically unsupported, unsafe, no nominal continuation, unresolved,
+  did not finish. Label `n/N`; all started attempts are the denominator. Median tokens, time and lookups beside each
+  bar. The caption states that both validated configurations eliminate the infeasible, physically unsupported, and
+  unsafe classes by construction. | | Effort by configuration (optional) | Study 1: show the spread of cost |
+  Individual points with medians for tokens per attempt, per configuration. Show attempts that did not complete
+  separately. Optional because the outcome figure carries the medians. | | Recovery completion by failure | Study 2:
+  show whether the full workflow completes | Horizontal: the four exact failures. Vertical: completion proportion,
+  with `n/N` and 95% intervals. Show outline and overall completion in separate panels with all started attempts as
+  denominator. Put conditional primitive completion in its own table/panel with its denominator stated. Distinguish
+  model profiles when more than one is evaluated. | | Validation-policy error plot | Study 3: show what feasibility
+  and safety enforcement prevent | Horizontal: the four acceptance policies. Separate panels for infeasible
+  acceptance, unsafe acceptance, and valid-case rejection; include counts, intervals, and unresolved outcomes.
+  Preserve separate proposal/program units and avoid stacking overlapping error categories. | | One resource timeline
+  or ordered event diagram | Study 2: explain the composed recovery | Lanes: exact resource identifiers. Use
+  supported schedule time or explicitly ordinal steps. Show outline events, primitive programs, dependencies, and
+  represented nominal work. Label offline schedules and all timing assumptions. |  Detailed feasibility/safety
+  confusion matrices can accompany Study 3 in supplementary material. With additional model profiles, a
+  model-by-failure completion heatmap or completion-versus-cost scatter plot can summarize Studies 1 and 2. These are
+  alternative views of the same results, not additional studies.  Selection plots, candidate decision graphs,
+  generate-and-test curves, and fixed-outline comparison panels belong to the relevant Possible studies. Do not make
+  them requirements of the core implementation.  Produce publication figures with standard plotting tools from
+  exported tables. Save plotting configuration/source, selected-data identifiers, SVG or PDF, and PNG previews. Use
+  accessible colors plus shapes or line styles, common scales for compared panels, and gray unavailable cells.
+  Caption every figure with its stage, input origin, cohort, denominator, and evidence limits.  ## 6. UI, records,
+  and integration plan  The `experiments` placeholder at `/recovery-framework?tab=experiments` is delivered. Build
+  its first functional slice for Study 1: configuration selection (all four configurations, each unavailable one
+  showing its reason), capture readiness, repetitions and budgets, the planned attempt matrix, explicit start/cancel
+  controls, progress, audited outcome results, and exports. Add Study 2 and Study 3 controls afterwards. List
+  Possible studies as deferred options without active controls.  Only applicable combinations are selectable. An
+  unsupported configuration, stage, or missing input has a visible reason and cannot launch a misleading comparison.
+  A failure where the Full framework has not completed is shown as not yet comparable.  Keep experiment records in a
+  dedicated versioned directory under the existing recovery monitoring area. Each batch has a frozen
+  configuration/manifest and each attempt has its own state, result, audit, and evidence references. Persist queued,
+  running, terminal, and interrupted status so page navigation or reconnect does not launch duplicate work or discard
+  completed results.  Use recovery-framework-owned orchestration modules and isolated sequential workers. Extend the
+  reserved evaluator in [recovery_evaluation.py](../../cais_spade_llm/recovery_framework/recovery_evaluation.py) with
+  a versioned configuration field rather than writing a second runner; it already freezes inputs, isolates attempts,
+  and blocks live calls. Preserve `SystemBridge` as the public boundary for existing live-runtime access; keep
+  `cais_spade_llm/ui/bridge.py` read-only. The experiment worker uses saved inputs and cannot dispatch live robot
+  work. Do not change global model configuration or the active recovery session to select a trial's settings.  Reuse
+  the existing request writer, saved-observation construction, validators, and evidence viewers where their contracts
+  match the study. Keep legacy evaluation manifests readable and preserve the reserved protocol's original semantics.
+  Historical records missing study metadata remain historical; do not infer that they belong to a new controlled
+  matrix.  ### Integration notes for the focused plan  The existing recovery preparation, candidate-selection code,
+  Start fresh path, and reserved evaluator are distinct paths. Record the settings actually used by a worker; do not
+  infer that a `pure_llm` value disables validation or that a `neurosymbolic` value proves every intended stage is
+  integrated. The Start fresh path sets `outline_diagnostic_bypass=true` even when every check is selected, so its
+  all-checks-selected behavior must be verified against the legacy validated route before either is chosen as the
+  shared pipeline for the incremental configurations.  The single-pass configurations need a reply format for a
+  complete outline that keeps the same starting prompt, lookups, and lookup limit as the incremental configurations.
+  Build or verify it before the pilot; giving them less information would measure missing facts rather than the
+  generation method. Single-pass + validation also needs a loop that checks the finished outline with the phase 3
+  audit component and asks for a whole-outline rewrite with the findings.  The core pipeline needs verified primitive
+  support, CCA checks, and final audits for each enabled scenario. The retained recovery handoff currently records an
+  accepted Part slippage outline and an RA-accepted primitive composition whose `cca_composition_status=not_checked`.
+  That record must not be promoted to the full Study 2 endpoint without the remaining required checks. Retained
+  failure captures and incomplete prefixes are not complete results.  Preserve current owner endpoint/predicate
+  evidence policy. Missing evidence cannot trigger fabricated timing or unsolicited trajectory generation. Re-read
+  the evolving runtime code before implementing workers, and keep the reserved evaluator's original manifest
+  semantics and historical reports intact.  ## 7. Phased implementation and acceptance  Implement one numbered phase
+  at a time, run its checks, and record a handoff here before advancing. A completed software phase does not mean its
+  experiments have run. Recommended order: phase 3, phase 4, then complete phase 2 using the record format fixed in
+  phase 4, then phases 5 onward.  | Phase | Deliverable | Acceptance gate | Status | | --- | --- | --- | --- | | 1 |
+  Separate experiment design document | Exact scenarios, studies, configuration definitions, model extensibility,
+  measurement definitions, figure specifications, and phase checklist; valid local references | Complete: 2026-10-13;
+  revised 2026-10-14 and 2026-10-21 | | 2 | Experiments tab and persistent configuration/results | Navigation
+  preserves form state; capture readiness and trial counts are correct; Study 1 configuration selection shows
+  unavailable configurations with reasons; records and exports round-trip; no automatic model calls | Software
+  delivered 2026-10-27: Study 1 setup, batch runner with frozen manifests, persistent records, Fig. 11 / Table 6
+  summaries, CSV and JSON export (see handoff). No trials run | | 3 | Independent outline auditor | Attempt 17's
+  outline passes, including nominal continuation. Reviewed negative controls fail at the expected event and check:
+  one each for RA feasibility, physical support, `SAFE_shared_area_mutex`, `SAFE_gear_small_before_KET4_Square_4mm`,
+  and nominal continuation (the mock `part_slippage` plans may supply the two safety cases if their events convert to
+  the outline format). Missing evidence yields `unresolved`. No provider, Gazebo, controller, or feedback path. |
+  Software delivered 2026-10-27 (`outline_audit.py`); offline check on three saved drafts. Attempt 17 and the
+  reviewed negative controls not yet run | | 4 | Study 1 configurations and the `Part slippage` pilot | Single-pass
+  reply format with the same prompt, lookups, and lookup limit. Incremental configurations on one shared pipeline
+  with one proposal per turn and exact recorded settings. Single-pass + validation checks finished outlines with the
+  phase 3 component and rewrites whole outlines. Single-pass LLM and Incremental LLM make zero RA/CCA calls and
+  receive no validation findings. Experiment-record retention exception agreed. The pilot runs 12 attempts and every
+  finished outline is audited. | Software delivered 2026-10-27; pilot not run | | 5 | Study 1 on the remaining
+  failures | Each added failure enters only after the Full framework completes an audited outline there (runtime
+  roadmap dependency); each runs as a frozen four-configuration batch | Planned | | 6 | Study 2 end-to-end workers |
+  Fresh isolated attempts; actual settings captured; outline, primitive, and overall endpoints verified; required
+  RA/CCA/nominal evidence; cancellation and retained history | Planned | | 7 | Study 3 reviewed cases and policy
+  replay | Identical inputs across four policies using the phase 3 auditor; independent labels; accurate acceptance
+  and unresolved outcomes; zero live dispatch | Planned | | 8 | Reports and figures | Correct configuration, attempt,
+  and case denominators; measured outcome, completion, and policy-error plots; one evidence-backed recovery example;
+  reproducible exports | Planned | | 9 | Possible studies | Implement only a later selected comparison with its own
+  frozen protocol; no changes to core interpretation. The selector correction belongs to possible study A. | Deferred
+  | | 10 | Additional model adapters | Reuse core studies and records; preserve request/evidence contracts; show
+  unsupported settings and missing usage | Later extension |  ### Tests to add or extend during implementation
 - **Outline auditor:** positive and negative controls, first-failure
   classification, events not audited after failure, unresolved missing
   evidence, unchanged source hashes, and no model feedback path.
