@@ -1,0 +1,36 @@
+\subsubsection{Recovery Task Synthesis Results}
+
+Across the four failure scenarios in Fig.~11, the neuro-symbolic framework
+produced a passing recovery outline in 230 of 240 attempts (95.8\%), compared
+with 70 of 240 (29.2\%) for the Informed baseline and 10 of 240 (4.2\%) for
+the Baseline. Each bar represents 30 attempts, ten per \gls{llm}. Every
+completed outline was checked for feasibility, safety, and task continuation.
+Only the framework used feedback from the \glspl{ra} and the \gls{cca} to
+revise proposals during synthesis. Its remaining ten attempts ended without
+an outline.
+
+Adding the safety specifications to the prompt reduced unsafe outcomes from
+144 of 240 Baseline attempts (60.0\%) to 30 of 240 Informed baseline attempts
+(12.5\%). The Informed baseline produced 44 passing outlines in 60 Part
+slippage attempts, compared with 26 in 180 attempts across the three breakdown
+scenarios. Across all four scenarios, 63 Informed baseline outlines failed a
+symbolic or physical feasibility check. A further 58 passed the event checks
+but left the cell in a state from which the remaining nominal tasks could not
+be completed.
+
+The framework produced 112 passing outlines in 120 attempts with \gls{ol}
+generation and 118 in 120 with \gls{el} generation. All six additional passes
+came from Conveyor breakdown, where the count rose from 23 to 29 of 30. For
+UR5e-1 robot breakdown, 29 of 30 attempts passed at each level. For M1
+machine breakdown and Part slippage, all 30 attempts per scenario passed at
+each level.\footnote{For Part slippage,
+Fig.~11(b) reports the full event-level framework rerun after the Exit model
+was corrected to represent the removal of a part. Before the correction, 18
+of 30 attempts passed.}
+
+The framework used more tokens at \gls{el} in all four scenarios when
+measured by the median per attempt. For Conveyor breakdown, median generation
+time was similar at the two levels (5.8~min at \gls{ol} and 5.7~min at
+\gls{el}). M1 machine breakdown showed the largest increase in both token
+use and generation time. The medians rose from 82,000 to 270,000 tokens per
+attempt and from 5.1 to 9.6~min, while median lookups fell from 18 to 16.

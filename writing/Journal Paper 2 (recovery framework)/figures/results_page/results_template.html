@@ -334,6 +334,15 @@ details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); margi
     <figcaption id="tabo2-caption"></figcaption>
   </figure>
 
+  <figure class="plate" id="tabo3">
+    <div class="plate-head">
+      <h3>Table O3 · Outcome totals by method</h3>
+      <div class="tags" data-tags="Fig. 11 · RC2 · optional"></div>
+    </div>
+    <div class="table-wrap"><table class="results wide" id="tabo3-table"></table></div>
+    <figcaption id="tabo3-caption"></figcaption>
+  </figure>
+
   <figure class="plate" id="tab8">
     <div class="plate-head">
       <h3>Table 8 · Execution in Gazebo</h3>
@@ -663,6 +672,45 @@ function renderTableO1() {
   document.getElementById("tabo1-caption").innerHTML = `<b>Table O1.</b> Optional. Rejections in the two framework settings, pooled over the three models (${MODEL_NAMES}) and summed over the started attempts per scenario. Each rejection column uses the name and colour that Fig. 11 gives the outcome its check sets, but counts rejections, not attempts: one attempt can be rejected many times before it passes. In ${esc(SETTINGS[FW_SINGLE].n)} a rejection stops a whole outline at its first failing event, and the LLM rewrites the outline; in ${esc(SETTINGS[FW_INCREMENTAL].n)} a rejection applies to one proposed event, which the LLM revises. RA runs before CCA safety, so every Unsafe (CCA) rejection is a proposal that passed RA: a feasible but unsafe event (H2). Completed counts the attempts that finished an outline within ${DATA.max_turns} turns.`;
 }
 
+/* ---------- Table O3 (optional): Fig. 11's outcomes summed by method and generation level, all models pooled ---------- */
+function renderTableO3() {
+  const ci = (name) => DATA.classes.indexOf(name);
+  const swatch = (i) => `<i class="sw" style="background:${CLASSES[i].c};margin-right:5px;vertical-align:-1px"></i>`;
+  const anyNotAudited = SETTINGS.some((_, s) => sumOver(POOLED, s, (c) => c.classes[NOT_AUDITED]) > 0);
+  // Fig. 11's outcomes in its legend order; the Infeasible (RA) column adds the two RA outcomes, as the text cites them.
+  const cols = [
+    { head: `${swatch(ci("passed"))}${OUTCOME_LABELS.passed}`, k: (cl) => cl[ci("passed")] },
+    { head: `${swatch(ci("infeasible"))}${OUTCOME_LABELS.infeasible}`, k: (cl) => cl[ci("infeasible")], sep: true },
+    { head: `${swatch(ci("physically_unsupported"))}${OUTCOME_LABELS.physically_unsupported}`, k: (cl) => cl[ci("physically_unsupported")] },
+    { head: `Infeasible (RA)<small>symbolic + physical</small>`, k: (cl) => cl[ci("infeasible")] + cl[ci("physically_unsupported")] },
+    { head: `${swatch(ci("unsafe"))}${OUTCOME_LABELS.unsafe}`, k: (cl) => cl[ci("unsafe")] },
+    { head: `${swatch(ci("no_nominal_continuation"))}${OUTCOME_LABELS.no_nominal_continuation}`, k: (cl) => cl[ci("no_nominal_continuation")] },
+    { head: `${swatch(JOINED[0])}${JOINED_LABEL}<small>unresolved + did_not_finish</small>`, k: (cl) => cl[JOINED[0]] + cl[JOINED[1]] },
+    ...(anyNotAudited ? [{ head: `${swatch(NOT_AUDITED)}${OUTCOME_LABELS["not audited"]}`, k: (cl) => cl[NOT_AUDITED] }] : []),
+  ];
+  const totals = (settings) => ({
+    n: settings.reduce((t, s) => t + sumOver(POOLED, s, (c) => c.n), 0),
+    classes: DATA.classes.map((_, i) => settings.reduce((t, s) => t + sumOver(POOLED, s, (c) => c.classes[i]), 0)),
+  });
+  const share = (k, n) => (n ? `${((100 * k) / n).toFixed(1)}%` : dash);
+  // Medians come per setting from the builder; they are not pooled over both levels.
+  const effortCells = (e) =>
+    `<td class="sep">${e && e.tokens_k !== null ? `${e.tokens_k}k` : dash}</td>`
+    + `<td>${e && e.minutes !== null ? e.minutes.toFixed(1) : dash}</td>`;
+  const row = (label, t, e, cls = "") =>
+    `<tr${cls ? ` class="${cls}"` : ""}><td>${label}</td><td>${t.n}</td>`
+    + cols.map((c) => `<td${c.sep ? ' class="sep"' : ""}>${c.k(t.classes)}<small>${share(c.k(t.classes), t.n)}</small></td>`).join("")
+    + effortCells(e) + `</tr>`;
+  const head = `<thead><tr><th>Method and generation level</th><th>Attempts</th>${cols.map((c) => `<th${c.sep ? ' class="sep"' : ""}>${c.head}</th>`).join("")}`
+    + `<th class="sep">Median tokens<small>per attempt</small></th><th>Median time<small>min per attempt</small></th></tr></thead>`;
+  const body = SETTING_GROUPS.map((g) =>
+    `<tr class="model"><td colspan="${cols.length + 4}">${esc(g.label)}</td></tr>`
+    + g.rows.map((s) => row(esc(settingLabel(s)), totals([s]), DATA.effort ? DATA.effort[s] : null)).join("")
+    + row("Both levels", totals(g.rows), null, "total")).join("");
+  document.getElementById("tabo3-table").innerHTML = head + `<tbody>${body}</tbody>`;
+  document.getElementById("tabo3-caption").innerHTML = `<b>Table O3.</b> Optional. The outcomes of Fig. 11 summed over the four failure scenarios and the three LLMs (${MODEL_NAMES}): for each method, each generation level and both levels together. Each attempt counts once, under the first check its outline failed, with the percentage of the row's attempts beneath. Infeasible (RA) adds the symbolic and physical RA outcomes. ${JOINED_LABEL} joins unresolved (an outline the checks could not evaluate) and did_not_finish (no outline within ${DATA.max_turns} turns). The counts are those of Fig. 11, with the audit review and the Exit re-run applied. Median tokens and time are per attempt over the row's attempts, taken from the unrounded records as Fig. 11 takes them per scenario; they are not given for both levels together.`;
+}
+
 /* ---------- Table 7: primitive composition, by LLM and by failure scenario ---------- */
 function renderTable7() {
   const head = (first) => `<thead>
@@ -868,6 +916,7 @@ renderConditions();
 renderOutcome();
 renderTableO1();
 renderTableO2();
+renderTableO3();
 renderRetrieval();
 renderTable7();
 renderTable8();

@@ -269,6 +269,22 @@ def cells_from_attempts(attempts: list[dict]) -> dict:
     return cells
 
 
+def setting_effort(attempts: list[dict]) -> list[dict]:
+    """Return each setting's median tokens (k) and minutes per attempt, over every scenario and model.
+
+    The medians are taken from the unrounded records, as the cells' medians are.
+    """
+    effort = []
+    for setting in range(len(CONFIGURATIONS)):
+        rows = [attempt["row"] for attempt in attempts
+                if attempt["setting"] == setting and attempt["scenario"] in SCENARIOS]
+        tokens = _median([_number(row.get("tokens")) for row in rows])
+        seconds = _median([row.get("elapsed_seconds") for row in rows])
+        effort.append({"tokens_k": _round(tokens / 1000 if tokens is not None else None),
+                       "minutes": _round(seconds / 60 if seconds is not None else None, 1)})
+    return effort
+
+
 def attempt_lines(attempts: list[dict]) -> list[dict]:
     """Return one line per attempt for the page's attempt table."""
     names = [PAPER_NAMES.get(name, name) for name in CONFIGURATIONS]
@@ -763,6 +779,7 @@ def page_data(placeholder: bool, batch_ids: list[str] | None, live: set[str] = f
         "scenarios": SCENARIOS, "scenario_short": SCENARIO_SHORT, "models": MODELS, "classes": CLASSES,
         "references": reference_rows(cells),
         "cells": cells, "composition": composition, "execution": execution, "sources": sources, "attempts": attempt_lines(attempts),
+        "effort": None if placeholder else setting_effort(attempts),
         "max_turns": MAX_TURNS, "conditions": conditions(),
         "audit_review": None if placeholder else {
             "name": AUDIT_REVIEW_NAME,

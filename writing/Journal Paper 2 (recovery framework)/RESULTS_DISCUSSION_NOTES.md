@@ -4,8 +4,10 @@ Working notes from the 2026-11-10 review of the Study 1 results, for drafting Se
 Analysis) and the Discussion and Limitations subsection.
 
 **Source of every number:** the 720 Study 1 attempt records behind the RCIM Recovery Results page
-(generated 2026-11-09 18:09 UTC; Study 1 outcomes regenerated 2026-11-12 with the audit review below; 18 batches in
-`cais_spade_llm/monitor/environment_runs/recovery/outline_experiments/`), and the Study 2 records in
+(generated 2026-11-09 18:09 UTC; Study 1 outcomes regenerated 2026-11-12 with the audit review below and on
+2026-11-13 with the Exit re-run below; 18 batches in
+`cais_spade_llm/monitor/environment_runs/recovery/outline_experiments/`, and for the re-run cell 3 batches in
+`.../recovery/study1_exit_rerun_20261113/`), and the Study 2 records in
 `.../recovery/study2_compositions/`. The informed baseline and framework batches ran on `9776af2`; the baseline
 batches ran on `4ffcc2c` (see "Things to disclose").
 
@@ -18,6 +20,11 @@ Experiments tab and the results page (regenerated 2026-11-12) show the reviewed 
 beside it. Evidence for each of the 720 attempts: `evidence/study1_audit_720.xlsx`. Effort numbers (tokens, time,
 requests, lookups) belong to the attempt and do not change. Details: "Things to disclose" below and
 EXPERIMENT_DESIGN_AND_PLAN.md, Deviations, 2026-11-12.
+
+**Exit re-run (2026-11-13; these notes updated 2026-11-16).** One cell, Part slippage × framework × EL, was run again
+after Exit's model was given its missing declaration (a part taken off Exit leaves it empty). Every Study 1 number
+below counts the re-run in place of the first run: framework 230 passed (was 218), EL 118 (was 106), 10 unfinished
+(was 22). The first-run records are unchanged. Details: "Things to disclose" below.
 
 Contents:
 
@@ -80,10 +87,14 @@ Wording preferences settled in the review: no "audited", no "pool"/"pooled", no 
 - Keep the grey-bar clause while the figure has grey bars.
 - The legend says "All models pooled"; "All LLMs" would match the caption.
 - `figure12_model_comparison.png` has a transparent background; export it on white before submission.
-- Re-export both figures from the results page regenerated on 2026-11-12: the Baseline and Informed baseline bars
-  in Fig. 11 and markers in Fig. 12a changed with the audit review. Fig. 12b does not change: it counts the
-  framework's rejections during generation, under the checks as they ran. Neither caption needs to change; the
-  review is disclosed in the text (Section 9 of these notes).
+- Both figures were re-exported on 2026-11-16 from the results page generated 2026-11-16 05:07 UTC, which applies
+  the audit review and the Exit re-run. The audit review changed the Baseline and Informed baseline bars in Fig. 11
+  and the markers in Fig. 12a (already in the 2026-11-12 export). The Exit re-run changed Fig. 11(b)'s framework EL
+  bar (18 → 30 passed; 96k → 81k tokens, 1.7 → 1.6 min, 16 → 14 lookups), Fig. 12a's framework EL markers
+  (95/85/85% → 100/98/98%) and Fig. 12b (all checks 41/45/39% → 30/29/36%, axis 0–40% → 0–30%), because the first
+  run's part slippage attempts were refused many times over Exit. Fig. 12b still counts rejections under the
+  checks as they ran. Neither caption needs to change; the review and the re-run are disclosed in the text
+  (Section 9 of these notes).
 - Blocking (CCA) is not drawn in (b) because it runs once per outline, when the LLM declares the outline
   complete, not on each candidate event. Add "Blocking (CCA) is not shown because it checks the whole outline
   once, not each event." if a reader would miss it.
@@ -100,8 +111,12 @@ All three LLMs together, 120 attempts per row (3 LLMs × 4 scenarios × 10 runs)
 | Baseline | EL | 1 | 74 | 14 | 5 | 18 | 8 | 90k | 2.1 min | 13 |
 | Informed baseline | OL | 41 | 15 | 24 | 7 | 26 | 7 | 40k | 1.1 min | 16 |
 | Informed baseline | EL | 29 | 15 | 27 | 5 | 32 | 12 | 109k | 2.8 min | 16 |
-| Framework | OL | 112 | 0 | 0 | 0 | 0 | 8 | 78k | 3.7 min | 17 |
-| Framework | EL | 106 | 0 | 0 | 0 | 0 | 14 | 210k | 6.2 min | 16 |
+| Framework | OL | 112 | 0 | 0 | 0 | 0 | 8 | 78k | 3.6 min | 17 |
+| Framework | EL | 118 | 0 | 0 | 0 | 0 | 2 | 176k | 5.6 min | 15 |
+
+Framework EL counts the Exit re-run (first run: 106 passed, 14 no outline, 210k, 6.2 min, 16 lookups). Medians are
+of the raw per-attempt values, as the results page computes them; the framework's OL time read 3.7 min here before
+2026-11-16, a rounding slip (raw median 3.62 min).
 
 No outline established = `unresolved` (a finished outline the final check could not establish) plus
 `did_not_finish` (no outline). In the baselines it is all `unresolved` except one Informed baseline attempt that
@@ -125,32 +140,34 @@ Passed per scenario (30 attempts each):
 | Informed baseline, OL | 4 | 8 | 9 | 20 |
 | Informed baseline, EL | 0 | 4 | 1 | 24 |
 | Framework, OL | 23 | 29 | 30 | 30 |
-| Framework, EL | 29 | 29 | 30 | 18 |
+| Framework, EL | 29 | 29 | 30 | 30 (first run 18) |
 
 Framework passes per LLM (10 per cell), OL / EL:
 
 | LLM | Conveyor | UR5e-1 | M1 | Part slippage | Total |
 |---|---|---|---|---|---|
-| Claude Opus 5.5 | 10 / 10 | 10 / 10 | 10 / 10 | 10 / 8 | 40 / 38 |
-| GPT-6.1 Sol | 9 / 10 | 10 / 9 | 10 / 10 | 10 / 5 | 39 / 34 |
-| GPT-6.1 Terra | 4 / 9 | 9 / 10 | 10 / 10 | 10 / 5 | 33 / 34 |
+| Claude Opus 5.5 | 10 / 10 | 10 / 10 | 10 / 10 | 10 / 10 | 40 / 40 |
+| GPT-6.1 Sol | 9 / 10 | 10 / 9 | 10 / 10 | 10 / 10 | 39 / 39 |
+| GPT-6.1 Terra | 4 / 9 | 9 / 10 | 10 / 10 | 10 / 10 | 33 / 39 |
+
+Part slippage EL is the Exit re-run (first run: 8, 5 and 5).
 
 ## 3. Study 1 findings, major to minor
 
 **Major**
 
 1. **Validation, not knowledge of the rules, makes outlines meet the recovery requirements.** The framework
-   passed 218/240 (91%) without the rules in its prompt, against 70/240 (29%) for the Informed baseline and
+   passed 230/240 (96%) without the rules in its prompt, against 70/240 (29%) for the Informed baseline and
    10/240 (4%) for the Baseline (p < 0.001). It held for all three LLMs (83–100%) and in every scenario (at least
-   18/30).
+   23/30).
 2. **Giving the rules in the prompt fixes safety only partly and moves the failures elsewhere.** Unsafe
    outlines fell from 144/240 (60%) to 30/240 (12.5%), but RA failures rose from 36/240 (15%) to 63/240 (26%)
    and Blocking from 34/240 (14%) to 58/240 (24%). The Informed baseline's passes are mostly part slippage (44/60,
    against 26/180 in the other three scenarios).
 3. **Unchecked LLM proposals break every requirement.** The Baseline failed safety in 60% of attempts (144/240),
    the RA checks in 15% (36/240: 17 at OL, 19 at EL) and task continuation in 14% (34/240). Even inside the
-   framework, about 40% of candidate events
-   were rejected (Fig. 12b: 41%, 45%, 39%). The checks find the errors and the feedback gets them fixed; the
+   framework, about a third of candidate events
+   were rejected (Fig. 12b: 30%, 29%, 36%). The checks find the errors and the feedback gets them fixed; the
    LLM rarely gets them right the first time.
 
 **Moderate**
@@ -160,7 +177,7 @@ Framework passes per LLM (10 per cell), OL / EL:
    (15), the scenarios that need reach or a base pose at a new place: the KMR has no drive route even with one
    turn (10), the arm meets a station (5), or the stated base overlaps a station with the stated 0.03 m margin
    (5). The recorded audit had 92; most of the difference came from the checker's own strictness (Section 9).
-   In the event-level framework the physical check rejected 1–22% of candidate events per LLM (Fig. 12b).
+   In the event-level framework the physical check rejected 1–25% of candidate events per LLM (Fig. 12b).
 5. **The task-continuation check (Eq. 6) catches what checking each event cannot.** 92 baseline outlines are
    Blocking (58 Informed baseline, 34 Baseline): every event passed the safety and feasibility checks, yet nominal
    production could not resume. In 89 of the 92 the outline leaves the KMR at no named place (resource_location
@@ -168,23 +185,24 @@ Framework passes per LLM (10 per cell), OL / EL:
    to reach its trim and assembly. They occur in conveyor (37), UR5e-1 (28) and M1 (27) breakdown, none in part
    slippage. (An earlier version of these notes put the M1 cases down to the trim order φ7; the refusals name the
    KMR.)
-6. **The framework never finished an outline that fails a requirement.** All 22 of its unsuccessful attempts
-   ended without an outline (16 at the turn limit, 6 at the no-progress stop). This holds by construction;
+6. **The framework never finished an outline that fails a requirement.** All 10 of its unsuccessful attempts
+   ended without an outline (9 at the turn limit, 1 at the no-progress stop). This holds by construction;
    state it as such.
-7. **OL and EL are equally reliable, and OL is cheaper** (Section 5 of these notes).
+7. **OL and EL differ little in reliability, and OL is cheaper:** 112 vs. 118 of 120 (p = 0.07), all of the
+   difference from GPT-6.1 Terra (Section 5 of these notes).
 
 **Minor**
 
-8. **Validation costs about twice the tokens and two to three times the time** of the Informed baseline at
-   the same level, but still minutes per attempt (median 3.7 min at OL, 6.2 at EL). Lookups stay at 13–17, so
+8. **Validation costs 1.6–1.9 times the tokens and 2.0–3.2 times the time** of the Informed baseline at
+   the same level, but still minutes per attempt (median 3.6 min at OL, 5.6 at EL). Lookups stay at 13–17, so
    the extra cost reflects revisions after refused proposals, not more context retrieval.
 9. **The turn limit rarely constrained passing attempts** (Section 6 of these notes).
 10. **The baselines leave state values out:** 28 of their 480 outlines (6%; Baseline 15, Informed baseline 13)
     cannot be checked because an event omits a value it changes. The framework refuses such events and the LLM
     then states the value.
 11. **The weakest model with the rules alone reaches the same level with the framework:** Terra rose from 18% in
-    the Informed baseline to 83–85% with the framework, a gain of 65–68 points, about the same as Opus (30% to
-    95–100%). Before the audit review Terra's gain looked the largest (from 10%); it no longer is. Belongs in
+    the Informed baseline to 83–98% with the framework (83% at OL, 98% at EL), a gain of 65–80 points, about the
+    same as Opus (30% to 100%, 70 points). Before the audit review Terra's gain looked the largest (from 10%); it no longer is. Belongs in
     6.3.2.
 
 ## 4. Study 1 draft text
@@ -219,83 +237,92 @@ reach a new place. Blocking occurred only in conveyor, UR5e-1 and M1 breakdown: 
 every event was safe and feasible, but the outline left the KMR at no named place, from which it could not resume
 its nominal tasks. Knowing the rules therefore helps the LLM avoid unsafe events, but
 it does not let the LLM confirm that resources can perform the proposed events or that nominal production can
-resume. In both baselines, the No outline established segments are finished outlines that the checks could not
-establish, for example because an event left out a value it changes.
+resume. In the baselines, all but one of the No outline established outcomes are finished outlines that the
+checks could not establish, for example because an event left out a value it changes.
 
-The neuro-symbolic framework passed 218 of 240 attempts (91%) without the safety rules in its prompt: 112 of 120
-at OL and 106 of 120 at EL. It passed at least 18 of 30 attempts in every scenario, including the three scenarios
+The neuro-symbolic framework passed 230 of 240 attempts (96%) without the safety rules in its prompt: 112 of 120
+at OL and 118 of 120 at EL. It passed at least 23 of 30 attempts in every scenario, including the three scenarios
 where the Informed baseline passed at most 9. The difference from the Informed baseline was significant at both
 generation levels (Cochran–Mantel–Haenszel test stratified by scenario and LLM, p < 0.001 after Holm correction).
-Because the framework accepts an event only after it passes RA and CCA, all 22 of its unsuccessful attempts
-ended without an outline: 16 at the 40-turn limit and 6 after repeated proposals made no progress. These
-attempts were concentrated in two cases: GPT-6.1 Terra on conveyor breakdown at OL (6 attempts) and part
-slippage at EL (12 attempts). Validation feedback, not knowledge of the rules, is therefore what makes
-LLM-generated outlines meet the recovery requirements (RC2).
+Because the framework accepts an event only after it passes RA and CCA, all 10 of its unsuccessful attempts ended
+without an outline: 9 at the 40-turn limit and 1 after repeated proposals made no progress. Eight of the 10 were on
+conveyor breakdown, 7 of them by GPT-6.1 Terra. Validation feedback, not knowledge of the rules, is therefore what
+makes LLM-generated outlines meet the recovery requirements (RC2).
+
+*Exit re-run (new 2026-11-16, not yet agreed; numbers in Section 9 of these notes):* The 30 event-level framework
+attempts on part slippage in Fig. 11 are a re-run. In the first run, 18 of them passed and 12 ended without an
+outline: the model of Exit declared that a part placed on it leaves it occupied, but not that a part taken from it
+leaves it empty, so an outline that placed the square peg on Exit and took it back could never state Exit empty.
+After this one declaration was added (Section X), the 30 attempts were run again with the same settings, and all 30
+passed. No other outcome in Fig. 11 was caused by the model of Exit.
 
 *Audit review (one or two sentences, in the setup or here; numbers in Section 9 of these notes):* After the runs, a
 review of the final check found that some of its geometric searches were stricter than the rules stated to the LLM;
 for example, the KMR could turn only at the start of a drive, and its clearance was tested on a 5 cm grid rather
-than the stated 3 cm margin. All 697 finished outlines were re-checked with these rules corrected, the same for
-every method: 118 baseline outcomes changed, 20 of them to passed, and every framework outcome stayed the same. The
-same rules were active while the framework generated its outlines, and they kept refusing 9 of its 22 unfinished
-attempts until the turn limit, so the correction does not favour the framework.
+than the stated 3 cm margin. All 697 outlines that finished in the original runs were re-checked with these rules
+corrected, the same for every method: 118 baseline outcomes changed, 20 of them to passed, and every framework
+outcome stayed the same. The same rules were active while the framework generated its outlines, and they kept
+refusing 9 of its 10 unsuccessful attempts until the turn limit, so the correction does not favour the framework.
 
-Validation feedback increased cost. Per attempt, the framework used a median of 78k tokens and 3.7 min at OL,
-and 210k tokens and 6.2 min at EL. This is about twice the tokens of the Informed baseline at the same level and
-two to three times its time. The median number of lookups stayed similar across all methods (13 to 17), so the
-added cost reflects revisions after refused proposals rather than additional context retrieval.
+Validation feedback increased cost. Per attempt, the framework used a median of 78k tokens and 3.6 min at OL, and
+176k tokens and 5.6 min at EL: 1.9 and 1.6 times the tokens of the Informed baseline at the same level, and 3.2 and
+2.0 times its time. The median number of lookups stayed similar across all methods (13 to 17), so the added cost
+reflects revisions after refused proposals rather than additional context retrieval.
 
 EL was included because generating a plan one step at a time, with feedback at each step, is a common way to
-support LLM planning [cite]. In this study, it did not improve the pass rate: OL passed as many attempts (112
-against 106 of 120, p = 0.25) at lower cost, using fewer tokens in all four scenarios. In part slippage, EL
-lowered the pass rate for all three LLMs (18 of 30 against 30 of 30); its only gain was for GPT-6.1 Terra on
-conveyor breakdown (9 of 10 against 4 of 10). In M1 machine breakdown, where recoveries had a median of 18
-events, both levels passed all 30 attempts, and OL used less than a third of the tokens. One possible
-explanation is that current LLMs can keep the complete recovery in context and reason over it in a single
-answer, which removes the need to break it into steps. Since all three LLMs evaluated here are recent models,
-this study cannot confirm that explanation, and EL may still benefit smaller or older models, a pattern also
-suggested by GPT-6.1 Terra on conveyor breakdown.
+support LLM planning [cite]. In this study, EL passed slightly more attempts than OL (118 against 112 of 120,
+p = 0.07), and OL cost less, using fewer tokens in all four scenarios. The difference in passes came from one LLM:
+Claude Opus 5.5 and GPT-6.1 Sol passed the same number of attempts at both levels (40 and 39 of 40), whereas
+GPT-6.1 Terra passed 39 at EL and 33 at OL, mostly on conveyor breakdown (9 against 4 of 10). In M1 machine
+breakdown, where passing recoveries had a median of 18 to 19 events, both levels passed all 30 attempts, and OL used
+less than a third of the tokens (82k against 270k). One possible explanation is that current LLMs can keep the
+complete recovery in context and reason over it in a single answer, which removes the need to break it into steps.
+Since all three LLMs evaluated here are recent models, this study cannot confirm that explanation, and EL may still
+benefit smaller or older models, a pattern also suggested by GPT-6.1 Terra on conveyor breakdown.
 
-All 22 unsuccessful framework attempts ended at the 40-turn limit or the no-progress stop. A larger limit might
+All 10 unsuccessful framework attempts ended at the 40-turn limit or the no-progress stop. A larger limit might
 allow some of them to finish, but the limit was kept for three reasons. First, it was set before the runs and
-applied equally to all methods, so raising it after seeing the results would favour the method that uses the
-most turns. Second, it rarely constrained successful attempts: passing attempts needed a median of 6 requests at
-OL and 16 at EL, and 95% finished within 22 and 30 requests, respectively. Third, the unsuccessful attempts were
-not converging: in their last turns they repeated proposals that the checks had already refused, and each used
-between 0.28 and 0.73 million tokens, because every request resends the growing conversation. A larger limit was
-therefore not tested.
+applied equally to all methods, so raising it after seeing the results would favour the method that uses the most
+turns. Second, it rarely constrained successful attempts: passing attempts needed a median of 6 requests at OL and
+14.5 at EL, and 95% finished within 22 and 30 requests, respectively. Third, the unsuccessful attempts were not
+converging: in their last turns they repeated proposals that the checks had already refused, and each used between
+0.44 and 0.73 million tokens, because every request resends the growing conversation. A larger limit was therefore
+not tested.
 
 ## 5. OL vs. EL: what can and cannot be inferred
 
 **Can be inferred**
 
-- **OL is cheaper.** Median tokens are lower at OL in all four scenarios (Conveyor 193k vs. 218k, UR5e-1 96k vs.
-  158k, M1 82k vs. 270k, Part slippage 50k vs. 97k). Time is lower in three of four; Conveyor is about equal.
-  Passing attempts needed a median of 6 requests at OL against 16 at EL.
-- **Neither level is more reliable overall.** 112 vs. 106 of 120 (p = 0.25). Per LLM: Opus 40 vs. 38, Sol 39
-  vs. 34, Terra 33 vs. 34.
+- **OL is cheaper.** Median tokens are lower at OL in all four scenarios (Conveyor 193k vs. 218k, UR5e-1 95k vs.
+  158k, M1 82k vs. 270k, Part slippage 50k vs. 81k). Time is lower in three of four; Conveyor is about equal.
+  Passing attempts needed a median of 6 requests at OL against 14.5 at EL.
+- **Neither level is clearly more reliable overall.** 112 vs. 118 of 120 (p = 0.07; 112 vs. 106, p = 0.25, before
+  the Exit re-run). Per LLM: Opus 40 vs. 40, Sol 39 vs. 39, Terra 33 vs. 39, so the whole difference is
+  GPT-6.1 Terra.
 - **EL produced detours that OL did not:** 11 of the 29 EL passes in conveyor breakdown move the square peg back
   to a place it had already left (for example, staging tray → UR5e-1 → M1 → UR5e-1 → M1 → KMR); none of the 23
   OL passes do.
 
 **Report only as observations**
 
-- Part slippage favours OL for all three LLMs (30/30 vs. 18/30, p < 0.001); consistent across models, but one
-  scenario.
+- Part slippage no longer differs between the levels: both pass 30/30 after the Exit re-run. The first run's 18/30
+  at EL, which favoured OL for all three LLMs, came from Exit's missing declaration (Section 9), not from the
+  level.
 - Conveyor favours EL only for GPT-6.1 Terra (4/10 vs. 9/10, p ≈ 0.06); one cell of 10 runs.
 
 **Cannot be inferred**
 
-- **Why each level fails where it does.** From the refusals of the 22 failed attempts:
+- **Why each level fails where it does.** From the refusals of the failed attempts:
   - OL on conveyor rewrote the whole outline 33–37 times, and every version still had an event the RA refused.
-  - EL on part slippage got 5–16 events accepted, then kept proposing events that could not be accepted. In 9 of
-    the 12, these were events at Exit, whose state no primitive can change. In the other 3, UR5e-3 tried to grasp
-    the gear while still holding the peg.
+  - EL on part slippage (first run, replaced by the Exit re-run) got 5–16 events accepted, then kept proposing
+    events that could not be accepted. In 9 of the 12, these were events at Exit, refused because Exit's model did
+    not declare what a part taken off it does. In the other 3, UR5e-3 tried to grasp the gear while still holding
+    the peg. With the declaration added, the re-run passed 30/30.
 
   These are hypotheses, not results of the study.
-- **"OL for short recoveries, EL for long ones."** The data points the other way. On the shortest recovery (part
-  slippage, median 5 events) OL was better; on the longest (M1, median 18–19 events) both passed 30/30 and OL used
-  under a third of EL's tokens. Recovery length also cannot be separated from the scenario, since each scenario
+- **"OL for short recoveries, EL for long ones."** The data do not support it. On the shortest recovery (part
+  slippage, median 5 events) both levels passed 30/30 after the Exit re-run; on the longest (M1, median 18–19
+  events) both passed 30/30 and OL used under a third of EL's tokens. Recovery length also cannot be separated from the scenario, since each scenario
   differs in resources, failure and constraints. A length claim would need recoveries of different lengths within
   one scenario.
 - **"We expected EL to be better."** H4 in EXPERIMENT_DESIGN_AND_PLAN.md (line 239) set no direction: "the paper
@@ -307,12 +334,12 @@ therefore not tested.
 | | Median requests (passing attempts) | 95% finished within | Max |
 |---|---|---|---|
 | Framework, OL | 6 | 22 | 35 |
-| Framework, EL | 16 | 30 | 35 |
+| Framework, EL | 14.5 | 30 | 35 |
 
-- Of the 22 failed framework attempts, 6 were stopped by the no-progress rule (repeating the same refusal). The
-  other 16 were repeating refused proposals in their last turns.
-- Failed attempts used 0.28–0.73 million tokens each, more than 90% of it input, because each request resends
-  the conversation.
+- Of the 10 failed framework attempts (22 before the Exit re-run), 1 was stopped by the no-progress rule
+  (repeating the same refusal). The other 9 were repeating refused proposals in their last turns.
+- Failed attempts used 0.44–0.73 million tokens each, 84–97% of it input, because each request resends the
+  conversation.
 - Reasons for keeping the limit:
   1. It was set before the runs and is the same for every method.
   2. Passing attempts rarely came near it.
@@ -330,7 +357,7 @@ close with the limitations.
 - **Robust across LLMs and failure types.** The effect holds for three LLMs from two providers and four failures
   that differ in what failed: a part, a machine, the conveyor and a robot.
 - **Repeatable recovery beyond the plant model (RC1).** The behaviours described in Section 6.2, such as the KMR
-  delivering to the buffer from a new base pose, are not one-off examples: 91% of attempts produced a valid
+  delivering to the buffer from a new base pose, are not one-off examples: 96% of attempts produced a valid
   recovery.
 - **The LLM proposes and the checks decide.** The LLM is good at proposing behaviour outside the plant model but
   unreliable at confirming it is valid. The framework splits those jobs and works without showing the LLM the
@@ -345,8 +372,9 @@ close with the limitations.
 - **Safe failure.** The framework never accepted an outline that breaks a requirement; when it failed, it
   produced none, leaving the disruption to an operator instead of the robots.
 - **Modest overhead:** minutes per attempt, before execution, with no extra context lookups.
-- **Practical default:** OL, with the same reliability as EL at lower cost.
-- **A weaker model reaches the same level** (Terra: 18% → 83–85%, a gain about equal to Opus's 30% → 95–100%).
+- **Practical default:** OL, with reliability close to EL's (112 vs. 118 of 120, p = 0.07; the gap is all
+  GPT-6.1 Terra) at lower cost.
+- **A weaker model reaches the same level** (Terra: 18% → 83–98%, a gain about equal to Opus's 30% → 100%).
 - **Rigorous protocol:** models chosen by criteria set in advance (model screen), equal runs per cell, a fixed
   turn limit, the statistical test chosen before the data, and every started attempt reported.
 
@@ -453,8 +481,8 @@ Put 1–4 first; reviewers are most likely to raise them. Give each a concrete n
 - **Audit review (2026-11-12), after collection.** The review asked whether the final check refused outlines for
   reasons the outline was not at fault for. It re-audited every finished outline (697; the 23 that did not finish
   have no outline) with six rules corrected, the same for every method, and changed 118 outcomes, all baseline
-  (Baseline passed 1 → 10, Informed baseline 59 → 70); the framework's 218 passes and 22 unfinished attempts stay.
-  The corrected rules:
+  (Baseline passed 1 → 10, Informed baseline 59 → 70); the framework's 218 passes and 22 unfinished attempts stay
+  (230 and 10 after the Exit re-run below). The corrected rules:
   1. the KMR drive may turn in place once anywhere on the way (it could turn only at its start; the real base
      controller turns along the way);
   2. when an event leaves the KMR at no named place with no pose, the base search may pick a free spot but never a
@@ -474,10 +502,24 @@ Put 1–4 first; reviewers are most likely to raise them. Give each a concrete n
   and `batch.json` are unchanged; the review is `outline_experiments/audit_review_20261112.json`, read by the
   Experiments tab and the results page, and each of the 720 attempts is listed with its evidence in
   `evidence/study1_audit_720.xlsx`.
-- **The same rules stopped framework attempts.** 9 of the framework's 22 unfinished attempts (Terra conveyor OL 6,
-  Sol conveyor OL 1, Terra conveyor EL 1, Terra UR5e-1 OL 1) kept being refused by rules 1 and 2 until the
-  40-request limit. They have no outline to re-audit and cannot be re-scored without new generation, so they stay
+- **The same rules stopped framework attempts.** 9 of the framework's 10 unfinished attempts (22 before the Exit
+  re-run; Terra conveyor OL 6, Sol conveyor OL 1, Terra conveyor EL 1, Terra UR5e-1 OL 1) kept being refused by
+  rules 1 and 2 until the 40-request limit. The tenth, Sol UR5e-1 EL, ended at the no-progress stop. They have no outline to re-audit and cannot be re-scored without new generation, so they stay
   as did not finish. Fig. 12b likewise counts rejections under the rules as they ran.
+- **Exit re-run (2026-11-13, user decision).** One cell, Part slippage × framework × EL, was run again for all three
+  LLMs, and Fig. 11, Fig. 12 and the results page count the re-run in place of the first run. Exit's model declared
+  what a part placed on it does (empty → occupied) but not what a part taken off it does, so an outline that parked
+  the square peg on Exit and took it back could never state Exit empty: the RA refused the stated value, and leaving
+  it out ended with Exit occupied and no part (Blocking, Eq. 6). In the first run 12 of the 30 attempts ended
+  without an outline (Opus 2, Sol 5, Terra 5); no other Study 1 outcome gives an Exit reason. Exit now declares its
+  own response to a part taken off it (occupied with that part → empty, no part); the RA checks a stated Exit value
+  against it and writes none. The re-run used the same settings (medium effort, 40 requests, the same capture and
+  stall rule) on `cece582` (`9776af2` plus that declaration; `d9f17ae` on this branch) and passed 30/30; 18 of the
+  30 parked the square peg on Exit, took it back and stated Exit empty. Records: three batches in
+  `recovery/study1_exit_rerun_20261113/`; the first-run `batch.json` and `audit.json` are unchanged, and
+  `outline_experiments/exit_rerun_20261113.json` maps each first-run batch to its re-run. Effect: framework
+  218 → 230 of 240, EL 106 → 118, unfinished 22 → 10; OL vs. EL p 0.25 → 0.07; Fig. 12b all checks
+  41/45/39% → 30/29/36%. Still open: a Deviations entry in EXPERIMENT_DESIGN_AND_PLAN.md and the paper sentence.
 - **Eq. 12 wording.** The paper's revised Eq. 12 text says an event's primitives are checked with no order between
   them and no chaining through a failed precondition. The review passes two Sol outlines whose single event
   releases a part and then moves home (rule 3), because the prompt never told the LLM this. Either keep the
@@ -585,21 +627,23 @@ Put 1–4 first; reviewers are most likely to raise them. Give each a concrete n
 - **Confidence intervals:** 95% Wilson score intervals, stated in the plan before the runs.
 - **Comparison test:** Cochran–Mantel–Haenszel, stratified by scenario × model as the plan states, continuity
   corrected, Holm correction over the four confirmatory comparisons. Recomputed 2026-11-12 on the reviewed
-  outcomes:
+  outcomes, and the EL rows and Holm adjustments again on 2026-11-16 with the Exit re-run:
 
   | Comparison | Level | χ² | p | Holm-adjusted p |
   |---|---|---|---|---|
-  | Framework vs. Baseline | EL | 179.8 | 5.4×10⁻⁴¹ | 2.2×10⁻⁴⁰ |
+  | Framework vs. Baseline | EL | 213.6 | 2.3×10⁻⁴⁸ | 9.1×10⁻⁴⁸ |
   | Framework vs. Baseline | OL | 168.8 | 1.4×10⁻³⁸ | 4.0×10⁻³⁸ |
-  | Framework vs. Informed baseline | OL | 102.0 | 5.6×10⁻²⁴ | 1.1×10⁻²³ |
-  | Framework vs. Informed baseline | EL | 99.0 | 2.6×10⁻²³ | 2.6×10⁻²³ |
+  | Framework vs. Informed baseline | OL | 102.0 | 5.6×10⁻²⁴ | 5.6×10⁻²⁴ |
+  | Framework vs. Informed baseline | EL | 149.7 | 2.0×10⁻³⁴ | 4.1×10⁻³⁴ |
 
   All p < 10⁻²². Informed baseline vs. Baseline (descriptive in the plan): OL p = 1.9×10⁻⁷, EL p = 1.6×10⁻⁹.
-  OL vs. EL within the framework: p = 0.25 (framework outcomes unchanged).
+  OL vs. EL within the framework: χ² = 3.2, p = 0.07 (112 vs. 118 of 120; p = 0.25 before the Exit re-run).
 - **Pass rates with 95% Wilson intervals** (all levels and LLMs): Baseline 10/240, 4.2% (2.3–7.5); Informed
-  baseline 70/240, 29.2% (23.8–35.2); framework 218/240, 90.8% (86.5–93.9).
+  baseline 70/240, 29.2% (23.8–35.2); framework 230/240, 95.8% (92.5–97.7).
 - These p-values were computed in the review with a hand-written script, since no statistics package is
-  installed. Recompute them with a package before submission; the conclusions do not depend on the exact method.
+  installed. The 2026-11-16 recomputation
+  (`/home/jongh/recovery_review_1030/fig_reexport_20261116/study1_numbers.py`) reproduces the unchanged rows
+  exactly; it computes CMH by hand and takes p from scipy, which is in the Poetry environment. Recompute them with a package before submission; the conclusions do not depend on the exact method.
 - The plan pre-stated OL vs. EL and Baseline vs. Informed baseline as descriptive comparisons. If the paper follows
   the plan exactly, drop their p-values.
 - If p-values appear in the paper, add one sentence naming the test to the setup.
@@ -617,20 +661,25 @@ Numbers available:
 | Informed baseline, OL | 30% | 55% | 18% |
 | Informed baseline, EL | 30% | 25% | 18% |
 | Framework, OL | 100% | 98% | 83% |
-| Framework, EL | 95% | 85% | 85% |
+| Framework, EL | 100% | 98% | 98% |
 
 Baseline and Informed baseline rows follow the audit review (40 attempts per cell: Baseline 2, 2, 5 at OL and 0, 0,
 1 at EL; Informed baseline 12, 22, 7 at OL and 12, 10, 7 at EL).
 
-Candidate events rejected in the EL framework (Fig. 12b, rejections during generation, unchanged by the review),
-Opus / Sol / Terra:
+Framework EL is the Exit re-run (first run 95%, 85%, 85%).
+
+Candidate events rejected in the EL framework (Fig. 12b, rejections during generation, unchanged by the review;
+part slippage from the Exit re-run), Opus / Sol / Terra:
 
 | Check | Opus | Sol | Terra |
 |---|---|---|---|
-| Infeasible: symbolic (RA) | 27% | 31% | 12% |
-| Infeasible: physical (RA) | 1% | 8% | 22% |
-| Unsafe (CCA) | 13% | 6% | 5% |
-| All checks | 41% | 45% | 39% |
+| Infeasible: symbolic (RA) | 14% | 11% | 6% |
+| Infeasible: physical (RA) | 1% | 10% | 25% |
+| Unsafe (CCA) | 15% | 8% | 5% |
+| All checks | 30% | 29% | 36% |
+
+First run: 27/31/12%, 1/8/22%, 13/6/5%, all 41/45/39%. Its part slippage attempts were refused many times over Exit
+(111, 186 and 63 symbolic rejections, against 1, 7 and 0 in the re-run).
 
 What to say: Section 12.1. The model screen (Sonnet 5.5 and Opus 4.6 excluded by pre-stated criteria) goes in the
 setup.
@@ -715,27 +764,28 @@ which LLM is best."
    does not depend on one model.
 2. **Good: validation narrows the gap between LLMs.** The Informed baseline ranges from 18% to 55% across LLMs;
    the framework ranges from 83% to 100%. Terra, the lower-priced model and the weakest with the rules alone
-   (18%), gains about as much as Opus (Terra 18% → 83–85%, Opus 30% → 95–100%).
+   (18%), gains about as much as Opus (Terra 18% → 83–98%, Opus 30% → 100%).
 
 **Moderate**
 
-3. **Good for the framework: every LLM needs the checks.** Each LLM had 39–45% of its candidate events rejected,
+3. **Good for the framework: every LLM needs the checks.** Each LLM had 29–36% of its candidate events rejected,
    so even the strongest model does not propose valid events reliably on its own.
 4. **Good: prompting alone is model-dependent, the framework is consistent.** Informed baseline results swing by
    model and scenario. Sol's 55% at OL comes mostly from M1 (9/10) and Part slippage (10/10), and Opus reaches
    10/10 on Part slippage at EL. The framework is uniformly high.
 5. **Observation: each LLM makes different errors.**
-   - Terra's rejections are mostly physical (22%, against 1% for Opus and 8% for Sol): poses, bases or routes the
+   - Terra's rejections are mostly physical (25%, against 1% for Opus and 10% for Sol): poses, bases or routes the
      resources cannot reach.
-   - Opus's and Sol's rejections are mostly symbolic (27% and 31%).
-   - Opus has the most unsafe rejections (13%).
+   - Opus's rejections are split between unsafe (15%) and symbolic (14%); Sol's between symbolic (11%) and
+     physical (10%). Before the Exit re-run both were mostly symbolic (27% and 31%).
+   - Opus has the most unsafe rejections (15%).
 
    Describe this; do not rank on it.
 
 **Minor**
 
-6. **OL vs. EL per LLM:** Opus 40 vs. 38, Sol 39 vs. 34, Terra 33 vs. 34. Terra is the only LLM that did not do
-   better at OL, which comes from conveyor breakdown (4/10 at OL against 9/10 at EL).
+6. **OL vs. EL per LLM:** Opus 40 vs. 40, Sol 39 vs. 39, Terra 33 vs. 39. Opus and Sol pass the same number at
+   both levels; Terra passes 6 more at EL, 5 of them on conveyor breakdown (4/10 at OL against 9/10 at EL).
 7. **Caveats (one or two sentences, so the comparison is not read as a ranking):**
    - The LLMs differ in vendor, size and release date.
    - The prompt was first developed on gpt-5.4, and later fixes were tried on Opus.
@@ -749,7 +799,7 @@ which LLM is best."
 
 1. **Important: composition separates the models, and the ranking changes between stages.**
    - Opus composed 12/12 outlines (100% of events), Sol 12/12† (100%) and Terra 4/12 (56%).
-   - Terra passed 83–85% in synthesis, so synthesis success does not predict composition success.
+   - Terra passed 83–98% in synthesis, so synthesis success does not predict composition success.
    - The checks make up for a weaker model at the task level, but not yet at the primitive level, where every
      number must refer to 𝒦 and every motion must pass motion planning.
 2. **Good: strong LLMs compose reliably.** Opus and Sol composed 24 of 24 outlines (one counted by review, †), so the stage works with a
@@ -797,12 +847,12 @@ repeating numbers. Sections 7 and 8 of these notes hold the underlying points.
 
 | Result (stays in 6.3.1 / 6.3.2) | Insight (goes in 6.3.3) |
 |---|---|
-| Framework 91% vs. Informed baseline 29% | **Verification cannot be handed to the LLM, even when it knows the rules.** Reach, free space and whether production can still finish need calculation, not reading. The LLM's value is proposing behaviour outside the model; checking it belongs to symbolic methods. For practitioners: invest in formal models and checks rather than prompt engineering. |
+| Framework 96% vs. Informed baseline 29% | **Verification cannot be handed to the LLM, even when it knows the rules.** Reach, free space and whether production can still finish need calculation, not reading. The LLM's value is proposing behaviour outside the model; checking it belongs to symbolic methods. For practitioners: invest in formal models and checks rather than prompt engineering. |
 | The framework passes without rules in the prompt | **Specifications belong in the model, not the prompt.** Changing a rule means changing the model; the prompt does not grow with the rule set, and the LLM cannot overlook a rule it never needed to read. |
 | Physical failures in conveyor and UR5e-1; Blocking where the KMR is left off its nominal places | **The requirements complement each other.** Different disruptions put pressure on different requirements, so a recovery framework needs feasibility (symbolic and physical), safety and continuation together. Continuation is a property of the remaining production as a whole, invisible when checking event by event. |
 | Unsuccessful framework attempts end with no outline | **Validation turns LLM unreliability into "no plan" rather than "a bad plan".** That makes the framework suitable alongside an operator: an unsolved disruption goes to a person, not to the robots. |
-| OL as reliable as EL, and cheaper | **Breaking the task into steps was not needed with current LLMs:** whole-outline reasoning with feedback was enough. Hedged: smaller models may still benefit. |
-| Terra 83–85% in synthesis, 33% in composition | **The hard part moves down to composition.** With checks, task-level reasoning is largely handled; turning new uses of a resource into primitive programs is where models now struggle. Future effort goes to primitive knowledge, such as examples of checked programs. A cheaper model may be enough for synthesis while composition still needs a stronger one (a possibility only; not tested). |
+| OL close to EL in reliability (112 vs. 118 of 120), and cheaper | **Breaking the task into steps was not needed for two of the three LLMs:** whole-outline reasoning with feedback was enough for Opus and Sol. Hedged: GPT-6.1 Terra gained at EL (33 → 39 of 40), so smaller models may still benefit. |
+| Terra 83–98% in synthesis, 33% in composition | **The hard part moves down to composition.** With checks, task-level reasoning is largely handled; turning new uses of a resource into primitive programs is where models now struggle. Future effort goes to primitive knowledge, such as examples of checked programs. A cheaper model may be enough for synthesis while composition still needs a stronger one (a possibility only; not tested). |
 | Outline lengths 4–27 events; detours | **Valid is not optimal.** The formulation only asks that a continuation exists (Eq. 6), so nothing prefers a shorter or faster recovery. Adding a cost criterion while leaving every event value to the LLM is an open question. |
 | No failure-specific logic; Baseline 10/240 on the same facts | **Failure-agnostic by design, demonstrated on four failure types;** generality beyond this cell remains to be shown. |
 
@@ -842,7 +892,7 @@ framework suitable for operation alongside people.
 
 Within the framework, the difficulty moved from deciding what to do to deciding how to do it. With the checks, all
 three LLMs produced valid recovery outlines in most attempts, and generating one event per turn brought no benefit
-over proposing the whole outline at once. This suggests that current LLMs can reason over a complete recovery when
+over proposing the whole outline at once for two of the three LLMs. This suggests that current LLMs can reason over a complete recovery when
 they receive feedback, although smaller or older models may still benefit from step-by-step generation. Turning
 outlines into primitive programs was harder and separated the LLMs (Section 6.3.2). The events that failed were
 those in which a resource performs a task outside its nominal functions, where the decompositions of nominal
@@ -956,16 +1006,15 @@ preconditions, constraints and effects).
 **Points**
 
 - The framework finds behaviour outside the plant model, not outside the primitive model. A recovery that needs a
-  skill no resource has (for example, pushing a part, or emptying a station that declares no primitives) cannot be
-  produced.
+  skill no resource has (for example, pushing a part) cannot be produced.
 - Seen in the results:
-  - In 9 of the 12 part slippage EL attempts that ended without an outline, the refusals were about Exit, which
-    declares no primitives ("no Exit primitive sets Exit's resource_state to empty", "Exit declares no
-    primitives").
+  - Not Exit (corrected 2026-11-16): the first run's part slippage EL attempts that kept being refused at Exit
+    failed because Exit's model left out what a part taken off it does, a declaration gap rather than a missing
+    primitive. With the declaration added, the re-run passed 30/30 (Section 9).
   - PS_terra_3's composition stopped when the LLM reported that no visible primitive could set the stated
     resource_location.
 - The cell's primitive set is small, which keeps choices, prompts and lookups manageable. Scaling to resources with
-  many primitives is untested. Lookups per composition are already 55–132, mostly primitive contracts and
+  many primitives is untested. Lookups per composition are already 56–138, mostly primitive contracts and
   decompositions.
 - Future work, in order of difficulty:
   1. **Scaling study:** resources with many primitives (for example, dual-arm robots or tool changers), measuring
@@ -981,10 +1030,8 @@ preconditions, constraints and effects).
 Feasibility is bounded in the same way by the declared primitives. Each resource offers a finite set of
 parameterized primitives with known preconditions and effects (Table 2), and an event is feasible only if some
 composition of them realizes it (Eq. 7). The framework can therefore find behaviour outside the plant model, but not
-outside the primitive model: a recovery that needs a skill no resource has, such as pushing a part or emptying a
-station that declares no primitives, cannot be produced. This bound appeared in the results. In part slippage, most
-event-level attempts that ended without an outline kept proposing events that needed Exit to be empty, although Exit
-declares no primitive that could empty it, and one composition stopped when the LLM reported that no primitive could
+outside the primitive model: a recovery that needs a skill no resource has, such as pushing a part, cannot be
+produced. This bound appeared in the results: one composition stopped when the LLM reported that no primitive could
 reach the state it had to produce. The cell's primitive sets are also small, which keeps the choices, the prompt and
 the lookups manageable; how synthesis and composition scale to resources with many primitives remains to be tested.
 Two extensions could widen the bound. Compositions that pass the checks could be stored as new composite functions,
@@ -997,7 +1044,7 @@ each would need a verified contract before the RA could check it, which remains 
 **Is the paper worth it? Yes.** A long limitations list mostly reflects how carefully the paper was reviewed.
 
 - **The main claim is strongly supported.** Validation, not knowledge of the rules, makes LLM recovery outlines
-  valid: 91% against 29% against 4%, across 720 attempts. It holds for three LLMs from two providers, in all four
+  valid: 96% against 29% against 4%, across 720 attempts. It holds for three LLMs from two providers, in all four
   failure types and at both generation levels, with p < 10⁻²².
 - **The design is rigorous:**
   - models chosen by criteria set in advance;

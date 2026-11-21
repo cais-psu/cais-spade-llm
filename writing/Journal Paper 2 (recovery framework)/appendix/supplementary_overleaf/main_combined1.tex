@@ -1,0 +1,928 @@
+\documentclass[preprint,12pt,authoryear]{elsarticle}
+\usepackage[letterpaper,hmargin=0.9in,top=0.76in,bottom=0.78in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern,textcomp}
+\usepackage{booktabs,tabularx,array}
+\usepackage{listings,needspace,tikz,tcolorbox,float}
+\tcbuselibrary{breakable}
+\definecolor{refred}{RGB}{170,43,40}
+\usepackage[hidelinks]{hyperref}
+\hypersetup{pdftitle={Supplementary Material: A Neuro-Symbolic Architecture for Safe and Feasible Self-Recovery in Multi-Agent Manufacturing Systems}}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+\setlength{\intextsep}{6pt plus 1pt minus 1pt}
+\raggedbottom
+\urlstyle{tt}
+\let\code\nolinkurl
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newtcolorbox{recordbox}[2][]{
+  colback=black!2, colframe=black!40, colbacktitle=black!10,
+  coltitle=black, fonttitle=\small\bfseries, title={#2},
+  title after break={#2 \textnormal{(continued)}},
+  arc=2pt, boxrule=0.45pt, boxsep=0pt, left=6pt, right=6pt,
+  top=4pt, bottom=4pt, toptitle=4pt, bottomtitle=4pt,
+  before skip=5pt, after skip=5pt, #1
+}
+\newcommand{\recordlabel}[1]{\par\Needspace{4\baselineskip}\smallskip
+  {\small\itshape #1\par}\nopagebreak}
+\lstset{
+  basicstyle=\small\ttfamily,
+  breaklines=true, breakatwhitespace=false, breakautoindent=false,
+  columns=fullflexible, keepspaces=true, showstringspaces=false,
+  upquote=true, xleftmargin=0pt, aboveskip=0pt, belowskip=0pt
+}
+\lstdefinestyle{recorded}{
+  basicstyle=\footnotesize\ttfamily, breakindent=0pt,
+  escapeinside={(*@}{@*)}
+}
+\newcommand{\papertitle}{A Neuro-Symbolic Architecture for Safe and Feasible Self-Recovery in Multi-Agent Manufacturing Systems}
+
+\begin{document}
+\pagestyle{plain}
+\begin{center}
+  {\Large\bfseries \papertitle\par}
+  \medskip
+  {\large Supplementary Material\par}
+\end{center}
+
+This supplement documents how the framework generates a recovery outline
+after a manufacturing failure, composes the accepted events from resource
+primitives, and executes the resulting programs in Gazebo. Appendices~A and~B
+use Part slippage as a worked example, showing the prompts, selected model
+replies, and the check findings that led to revisions. Appendix~C presents
+the recovery events executed in all four failure scenarios.
+
+The recovery outline prompt asks the large language model (LLM) to decide
+which resource should act and what should change. The initial prompt reports
+where the gear fell. The LLM then requests the gear's position relative to
+the robots' workspaces to decide which arm can reach it. The accepted pick
+event becomes the input to primitive composition. With the arm and intended
+end state fixed, the LLM must decide how \code{ur5e-3} will reach, grasp and
+withdraw with the gear.
+
+Table~\ref{tab:outline-blocks} shows how the outline prompt changes across turns.
+The \hyperref[sec:outline-prompt]{initial outline prompt} appears on
+page~\pageref{sec:outline-prompt}. Table~\ref{tab:composition-blocks} introduces
+the \hyperref[sec:composition-prompt]{primitive composition prompt} on
+page~\pageref{sec:composition-prompt}. The two prompt boxes reproduce selected blocks from one user message each.
+Two further boxes show how event~3 and its primitive program were revised.
+The tables identify what we shortened and why. Recorded messages retain their
+wording, with line breaks and JSON indentation adjusted for the page.
+
+\appendix
+\section{Recovery Outline Synthesis}
+\subsection{Event-level and outline-level instructions}
+
+The main paper compares Baseline, Informed baseline and Framework at both
+generation levels. The two Framework instructions below specify how much of
+the recovery to propose in one reply. \ref{sec:differences} gives the wording
+used in the baseline prompts.
+
+\recordlabel{Prompt \enspace Framework, event-level}
+\begin{lstlisting}[style=recorded]
+Propose 2(*@{\rmfamily\textendash}@*)5 different ways to do the next step of that plan, most preferred first.
+\end{lstlisting}
+The framework accepts the first candidate that passes the checks. The worked
+example uses this setting with Claude Opus 5.5 at medium reasoning effort.
+
+\recordlabel{Prompt \enspace Framework, outline-level}
+\begin{lstlisting}
+Give the whole plan in `events`: every recovery event, in the order they happen.
+\end{lstlisting}
+Here the LLM proposes the entire sequence in one reply. If the framework
+refuses it, the LLM receives the findings before revising the outline.
+
+\Needspace{12\baselineskip}
+\subsection{Failure observation and first recovery decision}\label{sec:outline-case}
+
+\code{ur5e-4} dropped \code{gear_small} while approaching the assembly board.
+The turn~1 prompt located the loose gear and identified its intended slot.
+
+\recordlabel{Prompt \enspace Turn 1, failure observation and recovery goal}
+\begin{lstlisting}
+- gear_small: not held, not at any station, measured at (0.250, 0.450, 1.025)
+\end{lstlisting}
+\smallskip
+\begin{lstlisting}
+- gear_small: part_location assembly_board-v1 (target Gear_Plate/Gear_Shaft_1) (normally ur5e-4's place_insert; ur5e-4 failed)
+\end{lstlisting}
+
+The goal identified the slot, but the failure observation alone did not establish
+which robot could reach the loose gear. On turn~1 the LLM requested eight facts,
+including the gear's position relative to the robots.
+
+\recordlabel{LLM reply \enspace Turn 1, first two references in the context request}
+\begin{lstlisting}
+"decision": "need_context",
+"context_requests": [
+  "/parts/gear_small/pose_relations",
+  "/parts/gear_small/state_variables",
+\end{lstlisting}
+
+The returned distances place the gear within the horizontal reach of
+\code{ur5e-3}. Figure~\ref{fig:failure-scene} shows where both arms stopped.
+
+\begin{figure}[ht!]
+\centering
+\begin{minipage}[c]{0.51\linewidth}\centering
+\begin{tikzpicture}[x=4.0cm,y=4.0cm,font=\scriptsize]
+  \begin{scope}
+    \clip (-0.95,-0.70) rectangle (0.95,0.90);
+    % reach of ur5e-3 (solid, shaded) and of ur5e-4 (dashed)
+    \fill[black!5] (0,0.5) circle [radius=0.886];
+    \draw[black!55, line width=0.6pt] (0,0.5) circle [radius=0.886];
+    \draw[black!55, line width=0.6pt, dashed] (0,-0.5) circle [radius=0.886];
+    % assembly board area and the four buffer zones
+    \fill[black!16] (-0.25,-0.25) rectangle (0.25,0.25);
+    \draw[black!60] (-0.25,-0.25) rectangle (0.25,0.25);
+    \fill[white] (-0.74,0.38) rectangle (-0.26,0.62);
+    \draw[black!60] (-0.74,0.38) rectangle (-0.26,0.62);
+    \draw[black!60] (-0.62,0.38) -- (-0.62,0.62) (-0.50,0.38) -- (-0.50,0.62) (-0.38,0.38) -- (-0.38,0.62);
+  \end{scope}
+  \draw[black!40] (-0.95,-0.70) rectangle (0.95,0.90);
+  % the two distances to the gear
+  \draw[black, line width=0.5pt] (0,0.5) -- (0.25,0.45);
+  \draw[black, line width=0.5pt, dotted] (0,-0.5) -- (0.25,0.45);
+  % arms, from base to gripper
+  \draw[line width=1.6pt, black!70] (0,0.5) -- (-0.32,0.5);
+  \draw[line width=1.6pt, black!70] (0,-0.5) -- (0.029,0.145);
+  \fill (0,0.5) circle [radius=0.028];
+  \fill (0,-0.5) circle [radius=0.028];
+  % gripper of ur5e-3 with the square peg; gripper of ur5e-4 over the gear's slot
+  \filldraw[fill=white, draw=black, line width=0.6pt] (-0.347,0.473) rectangle (-0.293,0.527);
+  \draw[refred, line width=1pt] (0.004,0.120) -- (0.054,0.170) (0.004,0.170) -- (0.054,0.120);
+  % the fallen gear
+  \fill[refred] (0.25,0.45) circle [radius=0.024];
+  % labels
+  \node[anchor=south] at (0,0.63) {\texttt{ur5e-3}};
+  \node[anchor=north] at (0,-0.54) {\texttt{ur5e-4}};
+  \node[anchor=south] at (-0.50,0.63) {buffer};
+  \node[anchor=south] at (-0.08,0.255) {assembly board};
+  \node[anchor=west] at (0.28,0.47) {small gear};
+  \node[anchor=south] at (0.14,0.495) {0.255\,m};
+  \node[anchor=west] at (0.09,-0.36) {0.982\,m};
+  \node[anchor=east] at (0.84,0.72) {reach of \texttt{ur5e-3}};
+  \node[anchor=east] at (0.84,-0.46) {reach of \texttt{ur5e-4}};
+  % scale bar
+  \draw[line width=0.8pt] (-0.90,-0.62) -- (-0.40,-0.62);
+  \draw[line width=0.8pt] (-0.90,-0.635) -- (-0.90,-0.605) (-0.40,-0.635) -- (-0.40,-0.605);
+  \node[anchor=south] at (-0.65,-0.615) {0.5\,m};
+\end{tikzpicture}
+\end{minipage}\hfill
+\begin{minipage}[c]{0.46\linewidth}
+\small\raggedright
+The dot marks \code{gear_small}. The solid and dashed arcs show the
+horizontal reach of \code{ur5e-3} and \code{ur5e-4}, respectively
+(0.886\,m for each arm).
+\par\smallskip
+The square marks the gripper of \code{ur5e-3}, holding \code{KET4_Square_4mm}
+at the buffer. The cross marks the stopped gripper of \code{ur5e-4} inside
+the assembly board area.
+\end{minipage}
+\caption{Part slippage seen from above. The authors reconstructed the scene from the recorded positions. The initial prompt supplied the gear position. The requested distances from the gear to the robot bases appeared on turn~2.}
+\label{fig:failure-scene}
+\end{figure}
+
+Before \code{ur5e-3} could pick up the gear, it had to free its gripper.
+The LLM proposed two places for the held peg. The board was still occupied
+by \code{ur5e-4}. The second candidate, \code{stage_KET4_in_buffer}, used an
+empty buffer zone and passed the checks. It became the first event in the
+outline. The \hyperref[sec:gazebo-slippage]{Part slippage event table in
+Appendix~C.1} lists the four accepted events in order.
+
+\Needspace{36\baselineskip}
+\subsection{How the outline prompt changes across turns}\label{sec:outline-feedback}
+
+Each turn asks the LLM to plan from the current projected state. A request for
+facts adds their values to the next prompt. An accepted event changes the
+projected state, and a refused candidate can leave a finding for the next turn.
+Table~\ref{tab:outline-blocks} shows when each block enters the exchange.
+
+\begin{table}[ht!]
+\centering\small
+\caption{Blocks of the event-level Framework prompt across the seven Part slippage turns.}\label{tab:outline-blocks}
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{.235\linewidth}YY@{}}
+\toprule
+Prompt block & When it appears and why & What is shown here and why \\
+\midrule
+Task and Role, Failure, Recovery Goal & Every turn identifies the failure, the required outcome and how to rank the next candidates. & All three blocks on turn~1 in A.4 establish what the planner knew before retrieval. \\
+\addlinespace
+Candidate Rules & Every turn specifies which state changes the LLM must declare for the acting resource, part and affected neighbors. & A.4 gives all seven rules. The pose rule explains the turn~5 revision below. \\
+\addlinespace
+Knowledge Base & Every turn lists facts the LLM can request before proposing an event. & A.4 gives the request instruction and one of eleven paths, the lookup used to assess reach. \\
+\addlinespace
+Resources and Parts & Start with the recorded states and capabilities. Later turns reflect the effects of accepted events. & Of 12 resources and 12 parts, A.4 shows the relevant buffer and arm fields and the gear entry to explain the staging decision. \\
+\addlinespace
+Retrieved context, Retrieved current values & From turn~2, return requested facts and current values. & Figure~\ref{fig:failure-scene} gives the two distances used to choose an arm. We omit the other lookup results. \\
+\addlinespace
+Recovery Events So Far (planned, not executed) & From turn~3, identifies accepted events whose effects already appear in the projected state. & The turn~3 example names the first accepted event. C.1 lists the final sequence once. \\
+\addlinespace
+Validation Feedback & On turns~3 and~5, gives the reason a candidate failed a check. & The findings on board access and the gear pose show how the LLM continued after a refusal. \\
+\addlinespace
+Missing context & On turns~6 and~7, flags a lookup that requires a new observation after the projected pick. & We describe the missing gear pose relation here and omit the repeated lookup error. \\
+\addlinespace
+System message & Every turn defines the JSON replies for proposing events, requesting facts or declaring completion. & A.4 gives the complete schema once. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\Needspace{11\baselineskip}
+On turn~2, the Central Controller Agent (CCA) refused the proposed board placement under
+\code{SAFE_shared_area_mutex}. The turn~3 prompt identified the candidate
+that had passed instead.
+
+\recordlabel{Prompt \enspace Turn 3, Validation Feedback on turn 2}
+\begin{lstlisting}
+These candidates were refused, and stage_KET4_in_buffer, listed after them, was applied.
+- candidate_event=c1/ur5e-3/KET4_Square_4mm | event_name=place_KET4_on_assembly_board | constraint_code=cca_safety | reason=SAFE_shared_area_mutex (At most one resource may occupy the assembly_board-v1 destination area at any time.) is broken during the event: ur5e-3 is in assembly_board-v1 while ur5e-4 is in assembly_board-v1
+\end{lstlisting}
+
+With the peg staged, the LLM proposed sending \code{ur5e-4} home to clear
+the board. That proposal became event~2.
+
+The Resource Agent (RA) refused both turn~4 candidates for event~3. For
+\code{pick_dropped_gear_small_ur5e3}, the LLM kept the intended holder on
+turn~5 and removed the arm pose. The recorded part position already supplied
+the pick target.
+
+\begin{recordbox}{Event 3 \enspace Picking up the dropped gear}
+\begin{minipage}[t]{0.483\linewidth}
+{\small\bfseries LLM reply \enspace Turn 4, proposed}\par\smallskip
+\begin{lstlisting}[style=recorded]
+"expected_end_state": {
+  "held_part": "gear_small",
+  "resource_state": "picked",
+  "resource_location": null,
+  "pose": {"x": 0.25, "y": 0.45,
+           "z": 1.243},
+  "part_location": "ur5e-3"
+}
+\end{lstlisting}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.483\linewidth}
+{\small\bfseries LLM reply \enspace Turn 5, accepted}\par\smallskip
+\begin{lstlisting}[style=recorded]
+"expected_end_state": {
+  "resource_state": "picked",
+  "held_part": "gear_small",
+  "resource_location": null,
+  "part_location": "ur5e-3"
+}
+\end{lstlisting}
+\end{minipage}
+\par\medskip\hrule\smallskip
+{\small\bfseries Prompt \enspace Turn 5, RA finding on the first candidate}\par\smallskip
+\begin{lstlisting}[style=recorded]
+gear_small's recorded position gives ur5e-3's target, so this event takes no pose; it states {x: 0.250, y: 0.450, z: 1.243}
+\end{lstlisting}
+\end{recordbox}
+
+The RA returned \code{FEASIBLE} and the CCA safety check returned \code{SAFE}.
+After the fourth event placed the gear in the projected state, the LLM returned
+\code{recovery_complete} on turn~7. The CCA check for continuation of normal
+production returned \code{NONBLOCKING}.
+
+\Needspace{9\baselineskip}
+\subsection{Recorded outline prompt and reply format}\label{sec:outline-prompt}
+
+These blocks precede the first lookup. The complete system message follows.
+Table~\ref{tab:outline-blocks} covers later turns.
+
+\begin{recordbox}[breakable]{Prompt \enspace Outline synthesis, turn 1}
+% begin selection outline-task-rules
+\begin{lstlisting}[style=recorded]
+Task and Role
+You are the recovery planner. A failure interrupted normal production. Until normal
+production takes over, only your recovery events change the planned state; a job
+already running keeps running until an event pauses or stops it.
+Plan how to get from the current state to the Recovery Goal. Propose 2(*@{\rmfamily\textendash}@*)5 different
+ways to do the next step of that plan, most preferred first. The first one in your
+order that passes every check becomes the next recovery event; the others are dropped.
+Give your plan in `plan` (two short sentences) and keep each `rationale` to one.
+
+Failure
+What was detected and measured, stated the same way for every resource.
+- ur5e-4 did not complete place_approach of gear_small (destination_location
+assembly_board-v1)
+- task_outcome (ur5e-4, task environment_9): goal_cancelled true, terminal_status 5,
+progress 0.503
+- device_fault_report (ur5e-4): resource_state failed, reported_by gripper object
+detection
+- state_discrepancy (ur5e-4, gear_small): expected_holder ur5e-4, measured_holder null
+- gear_small: not held, not at any station, measured at (0.250, 0.450, 1.025)
+- ur5e-4: measured pose (0.029, 0.145, 1.289), inside assembly_board-v1
+
+Recovery Goal
+- gear_small: part_location assembly_board-v1 (target Gear_Plate/Gear_Shaft_1)
+(normally ur5e-4's place_insert; ur5e-4 failed)
+
+Candidate Rules
+- One event per candidate, by one resource: `outline_id`, `event_name` (what it
+achieves; new names allowed), `resource`, `part_name` (if a part is involved),
+`expected_end_state`, `neighbor_end_state` (if needed), `rationale` (the fact it
+relies on).
+
+- Use a resource only where it works (a reachable location, a position within its
+workspace bounds, or a position it moves to) and for what it handles (parts it holds,
+processes it runs). Working at one place says nothing about another.
+
+- `expected_end_state`: the new value of each declared variable the event changes,
+for its resource and its part only.
+  Values may be new, but places, parts and positions must be known.
+  Give `pose` only for a position nothing else gives: an arm's pick or place target
+  comes from the part or the place when it declares compute_pick_targets or
+  compute_place_targets, a named pose gives its own position, and a mobile base's
+  reachable location gives its pose.
+  An arm's `pose` is its controlled link's; its fingertips lie the listed distance
+  further along the tool.
+  Write `pose` as {x, y, z}, a mobile base's as {x, y, yaw}.
+
+- A value holds after an event only when it already held, a declared action of the
+acting resource sets it, or the event's checks find it; state each value they find.
+  A pick empties what recorded the part where it was and leaves the part with the
+  acting resource;
+  a place puts it where the event names, and a part put into or taken from a place
+  leaves that place's resource what its model declares;
+  a move, navigation, pick or place leaves the acting resource at that declared
+  location, or at resource_location null where no declared place holds it, as a
+  stated `pose` does;
+  a part placed where its resource lists a completion gains that processCompleted
+  entry;
+  a stated completed process entry ends that process (current_process null).
+
+- `neighbor_end_state`: when moving the part changes another resource (it arrives at
+or leaves it), that resource's own changed variables, not the part's: {"<resource
+name>": {"<variable>": <value>}}. That resource does not act; variables you leave out
+stay as they are.
+
+- Use variable names exactly as declared. Look up any fact or variable you rely on
+that is not shown.
+
+- When you judge that normal production can carry on its remaining work from the state
+your events leave, return only `plan` and `decision: "recovery_complete"`; normal
+production then takes over.
+\end{lstlisting}
+% end selection outline-task-rules
+\medskip
+% begin selection outline-lookup
+\begin{lstlisting}[style=recorded]
+Knowledge Base
+Request facts from the knowledge base by returning only `plan`, `decision:
+"need_context"` and 1(*@{\rmfamily\textendash}@*)8 `context_requests` from the list below; they are added to the
+next prompt before you propose events. When proposing events, omit `decision` and
+`context_requests`.
+
+- /parts/<name>/pose_relations: which areas contain its measured position (one point,
+not its full extent), which declared places contain it, and how far it lies from each
+resource's workspace bounds
+\end{lstlisting}
+% end selection outline-lookup
+\medskip
+% begin selection outline-inventory
+\begin{lstlisting}[style=recorded]
+Resources
+Buffer For Machined parts (resource) idle; zone_1_part null; zone_2_part null;
+zone_3_part null; zone_4_part null
+
+ur5e-3 (robot) picked; held_part KET4_Square_4mm; resource_location Buffer For
+Machined parts; pose (-0.320, 0.500, 1.501); capabilities: reachable locations
+Buffer For Machined parts, assembly_board-v1, Exit; workspace bounds; actions:
+compute_pick_targets; compute_place_targets; detect_parts; grasp_part (needs
+held_part null) sets resource_state picked, held_part <part_name>
+
+ur5e-4 (robot) failed; held_part null; resource_location null; pose (0.029, 0.145,
+1.289), inside assembly_board-v1
+
+Parts
+gear_small not held, not at any station, measured at (0.250, 0.450, 1.025), assembly
+target Gear_Plate/Gear_Shaft_1; processes: print_part completed
+\end{lstlisting}
+% end selection outline-inventory
+\end{recordbox}
+
+\recordlabel{System message \enspace Outline reply format}
+% begin recorded outline-system
+\begin{lstlisting}[style=recorded]
+Reply with only one JSON object that follows this JSON schema:
+{
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "outline_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "outline_id": {"type": "string"},
+        "event_name": {"type": "string", "minLength": 1},
+        "resource": {"type": "string"},
+        "part_name": {"type": ["string", "null"], "minLength": 1},
+        "expected_end_state": {"type": "object", "minProperties": 1},
+        "neighbor_end_state": {
+          "type": "object",
+          "additionalProperties": {"type": "object"},
+          "description": "Changes to other resources' variables caused by moving the
+          event's part, by resource name: {\"<resource name>\": {\"<variable>\":
+          <value>}}. Those resources only record the change; the event's resource is
+          the one that acts."
+        },
+        "rationale": {"type": "string"}
+      },
+      "required": ["outline_id", "event_name", "resource", "expected_end_state",
+      "rationale"]
+    }
+  },
+  "properties": {
+    "plan": {"type": "string"},
+    "candidate_events": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 5,
+      "items": {"$ref": "#/$defs/outline_event"}
+    },
+    "decision": {
+      "type": ["string", "null"],
+      "enum": [null, "need_context", "recovery_complete"],
+      "description": "Use null for proposed events, need_context to request facts, or
+      recovery_complete when you judge the failure overcome."
+    },
+    "context_requests": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 8,
+      "description": "Use [] for proposed events; need_context requires 1 to 8
+      references and no candidate fields.",
+      "items": {"type": "string", "pattern": "^/"}
+    }
+  },
+  "required": ["plan"]
+}
+\end{lstlisting}
+% end recorded outline-system
+
+\subsection{Prompt differences between settings}\label{sec:differences}
+
+The framework checks candidates in the LLM's order until one passes. Both
+event-level baselines take the first candidate.
+
+\recordlabel{Prompt \enspace Baseline and Informed baseline, event-level}
+\begin{lstlisting}
+The first one becomes the next recovery event; the others are dropped.
+\end{lstlisting}
+
+\recordlabel{Prompt \enspace Informed baseline, complete Safety Rules after Recovery Goal}
+% begin recorded informed-safety
+\begin{lstlisting}[style=recorded]
+Safety Rules
+Your events, and normal production after them, must keep these rules.
+- SAFE_shared_area_mutex: At most one resource may occupy the assembly_board-v1
+destination area at any time.
+- SAFE_M1_mutex: At most one resource accessing M1 may occupy its protected area at
+any time.
+- SAFE_M2_mutex: At most one resource accessing M2 may occupy its protected area at
+any time.
+- SAFE_trim_before_assembly_board-v1_entry: A part with a trim step may enter
+assembly_board-v1 only after its trim with the required result is completed.
+- SAFE_gear_small_before_KET4_Square_4mm: KET4_Square_4mm may complete assembly only
+after assembly of gear_small is completed.
+- SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm: RGOCG4-50_Round_4mm may complete
+assembly only after assembly of KET4_Square_4mm is completed.
+- SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing: RGOCG4-50_Round_4mm must
+not complete trim with result circle until KET4_Square_4mm has completed trim with
+result square.
+\end{lstlisting}
+% end recorded informed-safety
+
+\recordlabel{Prompt \enspace All three outline-level methods, final event rule}
+\begin{lstlisting}
+- End `events` where you judge that normal production can carry on its remaining work from the state your events leave; normal production then takes over.
+\end{lstlisting}
+
+The outline-level schema keeps the event definition, takes the ordered
+sequence in \code{events}, and allows \code{null} or \code{need_context}.
+
+\recordlabel{System message \enspace Outline-level reply properties only}
+% begin recorded outline-level-properties
+\begin{lstlisting}[style=recorded]
+"properties": {
+  "plan": {"type": "string"},
+  "events": {"type": "array", "minItems": 1, "items": {"$ref":
+    "#/$defs/outline_event"}, "description": "The whole recovery outline: every
+    recovery event, in the order they happen."},
+  "decision": {"type": ["string", "null"], "enum": [null, "need_context"],
+    "description": "Use null for proposed events; use need_context only to request
+    facts without proposing events."},
+  "context_requests": {"type": "array", "minItems": 0, "maxItems": 8, "description":
+    "Use [] for proposed events; need_context requires 1 to 8 references and no
+    events.", "items": {"type": "string", "pattern": "^/"}}
+}
+\end{lstlisting}
+% end recorded outline-level-properties
+
+\Needspace{12\baselineskip}
+\section{Primitive Composition}
+\setcounter{table}{0}
+\renewcommand*{\theHtable}{B.\arabic{table}}
+\subsection{The accepted event becomes the next prompt}\label{sec:composition-case}
+
+Event~3, \code{pick_dropped_gear_small_ur5e3} (\code{RECOVERY_SEQ3}), uses
+\code{ur5e-3}'s primitives. The end state is \code{picked}, with
+\code{held_part} set to \code{gear_small}, \code{resource_location} set to
+\code{null}, and \code{part_location} set to the robot's identifier,
+\code{recovery-resource-3@localhost}.
+
+\recordlabel{Prompt \enspace Instruction for the active event}
+\begin{lstlisting}
+Author primitive_steps for ONLY the active DES transition, using only the visible primitive catalog for the active resource.
+\end{lstlisting}
+
+Composition calls~5--7 all concern this pick. On call~5 the LLM asked for the
+primitive contracts, the robot's nominal pick decompositions, its projected
+state, and the gear observation. The request included these references.
+
+\recordlabel{LLM reply \enspace Call 5, first three primitive contracts requested}
+\begin{lstlisting}
+"/primitive_contracts/compute_pick_targets",
+"/primitive_contracts/move_cartesian",
+"/primitive_contracts/grasp_part",
+\end{lstlisting}
+
+The served contract describes what the target calculation does. The moves and
+the grasp still have to be specified as separate primitive steps.
+
+\recordlabel{Prompt \enspace Call 6, served contract for \texttt{compute\_pick\_targets}}
+\begin{lstlisting}
+Compute vertical pick target positions from world object geometry and configured end-effector/TCP feedback without moving. The frames must agree.
+\end{lstlisting}
+
+\subsection{The revised and accepted program}\label{sec:pick-program}
+
+On call~6, the RA flagged two inputs to \code{compute_pick_targets}:
+\code{target_pose} and \code{target_pose_source}. The LLM had bound the coordinates to the gear's observed pose and explicitly
+named that source. The RA checked those parameters against the inputs used by
+the calculation. Its finding reached the LLM on call~7.
+
+\begin{recordbox}{Event 3 \enspace Revising the inputs to \code{compute_pick_targets}}
+{\small\bfseries LLM reply \enspace Call 6, proposed inputs}\par\smallskip
+\begin{lstlisting}
+"target_pose": {
+  "x": {"context_ref": "/parts/gear_small/observed_pose/x"},
+  "y": {"context_ref": "/parts/gear_small/observed_pose/y"},
+  "z": {"context_ref": "/parts/gear_small/observed_pose/z"},
+  "model_name": {"context_ref": "/parts/gear_small/target/model_name"}
+},
+"target_pose_source": "observed_pose"
+\end{lstlisting}
+\par\medskip
+{\small\bfseries Prompt \enspace Call 7, RA finding}\par\smallskip
+\begin{lstlisting}
+compute_pick_targets: target_pose_source 'observed_pose' differs from '', the input the composition's calculation reads
+\end{lstlisting}
+\par\medskip
+{\small\bfseries LLM reply \enspace Call 7, accepted first step}\par\smallskip
+\begin{lstlisting}
+{"primitive": "compute_pick_targets", "params": {"part_name": "gear_small"}},
+\end{lstlisting}
+\end{recordbox}
+
+With only the part name supplied, the calculation reads the recorded gear pose.
+Table~\ref{tab:pick} shows what the RA resolved for each accepted step.
+
+\begin{table}[H]
+\centering\small
+\caption{Accepted program for event~3, \code{pick_dropped_gear_small_ur5e3}. Cartesian positions $(x,y,z)$ are in metres, rounded to three decimal places.}\label{tab:pick}
+\begin{tabularx}{\linewidth}{@{}r l Y Y@{}}
+\toprule
+Step & Primitive & Written by the LLM & Resolved by the RA \\
+\midrule
+1 & \code{compute_pick_targets} & Part name \code{gear_small}. & Approach, target and retreat poses from the recorded gear position. \\
+2 & \code{move_cartesian} & References to \code{approach_pose}. & $(0.250,\,0.450,\,1.303)$ above the gear. \\
+3 & \code{move_cartesian} & References to \code{target_pose}. & $(0.250,\,0.450,\,1.253)$ at the pick target. \\
+4 & \code{grasp_part} & Part name and a reference to its model name. & Both names resolve to \code{gear_small}. \\
+5 & \code{move_cartesian} & References to \code{retreat_pose}. & $(0.250,\,0.450,\,1.303)$ with the gear held. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\recordlabel{LLM reply \enspace Call 7, step 2 binds \texttt{x} to the approach pose calculated in step 1}
+\begin{lstlisting}
+"x": {"context_ref": "event_facts.pick_targets.gear_small.approach_pose.x"},
+\end{lstlisting}
+
+\Needspace{25\baselineskip}
+\subsection{Recorded composition prompt and reply format}\label{sec:composition-prompt}
+
+On call~5, the LLM first receives the accepted gear-pick event and the
+primitive names for \code{ur5e-3}. The contracts it requests arrive on call~6.
+
+\begin{table}[h!]
+\centering\small
+\caption{Structure of the primitive composition prompt for the dropped-gear pick, call~5.}\label{tab:composition-blocks}
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{.22\linewidth}YY@{}}
+\toprule
+Recorded block & Why the LLM receives it & What we reproduce and why \\
+\midrule
+Task and Role,\newline Visible Primitive Catalog & Limit the program to one event and identify the primitives the LLM may use for the acting resource. & Opening instructions and all eight names. We omit further guidance on ordering steps and requesting facts, illustrated in B.1--B.2. \\
+\addlinespace
+Published Ref Schema, Available Capability Decompositions & Tell the LLM how to look up a contract, a recorded value or the steps of a nominal function. & We omit the 15 lookup paths and five function names. B.1 shows the requests made for this pick. \\
+\addlinespace
+Active DES Transition & Gives the starting state and the final values the robot's program must establish. & Full event. We omit the short token that repeats its identifiers. \\
+\addlinespace
+Transition Authoring Cursor, Accepted Outline Summary, Named Pose Rules & Track the active event and restrict named moves to poses declared by the resource. & Omitted. The full event identifies the pick, and the accepted moves use calculated poses. \\
+\addlinespace
+Output Contract, RA composition validation & Bind numeric parameters to their sources. A move can use the approach pose only after a step calculates it. & All eight output rules. The selected validation passages explain the target calculation and the revision in B.2. \\
+\addlinespace
+System message & Defines the JSON replies for submitting steps, requesting facts or reporting a needed revision. & Complete schema, including each step's required fields. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{recordbox}[breakable]{Prompt \enspace Primitive composition, call 5}
+% begin selection composition-instruction
+\begin{lstlisting}[style=recorded]
+Task and Role
+You are the active replanner authoring primitive_steps for a DES fallback recovery
+session.
+Current phase: Event-to-Primitive Authoring (event-local).
+Author primitive_steps for ONLY the active DES transition, using only the visible
+primitive catalog for the active resource.
+
+Visible Primitive Catalog (names only; full contract via /primitive_contracts/<name>)
+[
+  {"name": "compute_pick_targets"},
+  {"name": "compute_place_targets"},
+  {"name": "detect_parts"},
+  {"name": "grasp_part"},
+  {"name": "move_cartesian"},
+  {"name": "move_relative"},
+  {"name": "move_to_named_pose"},
+  {"name": "release_part"}
+]
+\end{lstlisting}
+% end selection composition-instruction
+\medskip
+% begin selection composition-event
+\begin{lstlisting}[style=recorded]
+Active DES Transition (full event)
+{
+  "outline_id": "RECOVERY_SEQ3",
+  "resource_jid": "recovery-resource-3@localhost",
+  "event_name": "pick_dropped_gear_small_ur5e3",
+  "description": "gear_small's measured position is 0.255 m from ur5e-3's base in xy,
+  at z 1.025, which is inside its envelope (radius 0.886 m, z 0.971(*@{\rmfamily\textendash}@*)1.121); the pick
+  target comes from the part's recorded position, so no pose is given.",
+  "part_name": "gear_small",
+  "target_ref": "recovery-resource-3@localhost",
+  "expected_start_state": {
+    "held_part": null,
+    "part_location": null,
+    "resource_location": "Buffer For Machined parts",
+    "resource_state": "placed"
+  },
+  "expected_end_state": {
+    "resource_state": "picked",
+    "held_part": "gear_small",
+    "resource_location": null,
+    "part_location": "recovery-resource-3@localhost"
+  }
+}
+\end{lstlisting}
+% end selection composition-event
+\medskip
+% begin selection composition-contract
+\begin{lstlisting}[style=recorded]
+Output Contract
+- Keep `plan` to at most two short sentences and `rationale` to one short sentence.
+- Author primitive_steps for ONLY the active DES transition shown above.
+- outline_id and resource_jid MUST exactly match the active transition.
+- primitive_steps[*].primitive MUST be a name in Visible Primitive Catalog.
+- Each step MUST include params. Every number in params is a {"context_ref": ...};
+strings and booleans may be literals from served context.
+- compute_pick_targets publishes event_facts.pick_targets.<part>;
+compute_place_targets publishes event_facts.place_targets.<part>.
+- need_context: refs in context_requests, primitive_steps empty.
+- primitive_steps_ready: non-empty primitive_steps. need_primitive_revision: say why
+in rationale.
+\end{lstlisting}
+% end selection composition-contract
+\medskip
+% begin selection composition-validation
+\begin{lstlisting}[style=recorded]
+RA composition validation: author an ordered program that establishes every
+intended resource and part postcondition from declared effects or what the checks
+find.
+
+Calculated event_facts are available only after their producing step. The owner's
+target calculations read recorded geometry and observed poses themselves.
+
+The robot target outputs include approach_pose, target_pose, and retreat_pose.
+\end{lstlisting}
+% end selection composition-validation
+\end{recordbox}
+
+The selected RA instructions explain why \code{compute_pick_targets} can read the
+gear's recorded pose and why the following move can use its output. We omit
+the passages on resource location, nominal model and evidence paths, waiting
+for resource outcomes, projected placements and assembly-slot fields. We
+also omit reminders about parameter bindings, missing facts, validation
+feedback and execution authorization. Appendix~B.2 follows the specific
+binding that the RA asked the LLM to revise.
+
+\recordlabel{System message \enspace Composition reply format}
+% begin recorded composition-system
+\begin{lstlisting}[style=recorded]
+Reply with only one JSON object that follows this JSON schema:
+{
+  "type": "object",
+  "properties": {
+    "plan": {"type": "string"},
+    "decision": {
+      "type": "string",
+      "enum": ["primitive_steps_ready", "need_context", "need_primitive_revision"]
+    },
+    "outline_id": {"type": "string"},
+    "resource_jid": {"type": "string"},
+    "context_requests": {"type": "array", "items": {"type": "string"}},
+    "rationale": {"type": "string"},
+    "notes": {"type": "array", "items": {"type": "string"}},
+    "primitive_steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {"primitive": {"type": "string"}, "params": {"type": "object"}},
+        "required": ["primitive", "params"]
+      }
+    }
+  },
+  "required": ["plan", "decision", "outline_id", "resource_jid"]
+}
+\end{lstlisting}
+% end recorded composition-system
+
+\Needspace{31\baselineskip}
+\section{Recovery Runs Executed in Gazebo}
+\setcounter{table}{0}
+\renewcommand*{\theHtable}{C.\arabic{table}}
+
+For each scenario, we compared the passing event-level Framework outlines from
+all three models and selected one with the fewest events.
+For each run, the table reports how many LLM calls were needed to compose
+the accepted events, how many primitive steps those programs contained, and
+how many events completed in Gazebo. The 29 accepted events contained 121
+primitive steps in total. Each scenario illustrates the composition of one
+event. The \hyperref[sec:pick-program]{worked pick in Appendix~B.2}
+gives the ordered steps and an example parameter binding.
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\linewidth}{@{}Y l c c c c@{}}
+\toprule
+Scenario & Model & \shortstack{Outline\\turns} & \shortstack{Composition\\calls} & \shortstack{Accepted\\primitive steps} & \shortstack{Events\\completed} \\
+\midrule
+Part slippage & Claude Opus 5.5 & 7 & 9 & 16 & 4 of 4 \\
+Conveyor breakdown & Claude Opus 5.5 & 12 & 15 & 23 & 7 of 7 \\
+ur5e-1 breakdown & GPT-6.1 Sol & 11 & 19 & 20 & 4 of 4 \\
+Machining breakdown during part processing & GPT-6.1 Sol & 20 & 49 & 62 & 14 of 14 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Part slippage}\label{sec:gazebo-slippage}
+
+\code{ur5e-4} dropped \code{gear_small} on its approach to the assembly board.
+To recover it, \code{ur5e-3} first put down the square peg it was holding.
+The live placement calculation could not resolve the buffer geometry, and the
+staging motion used the saved parameters. The accepted pick program and its
+resolved positions appear in \hyperref[tab:pick]{Table~\ref*{tab:pick} in Appendix~B.2}.
+
+\par\smallskip\noindent{\small\bfseries Accepted primitive sequence for event~3}\par\nopagebreak
+{\small
+\begin{tabularx}{\linewidth}{@{}r l Y@{}}
+1. & \code{compute_pick_targets} & Calculate the three poses for the dropped gear. \\
+2. & \code{move_cartesian} & Move to the approach pose. \\
+3. & \code{move_cartesian} & Descend to the target pose. \\
+4. & \code{grasp_part} & Grasp \code{gear_small}. \\
+5. & \code{move_cartesian} & Withdraw to the retreat pose. \\
+\end{tabularx}\par}
+
+\smallskip
+{\small
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{@{}r Y l Y@{}}
+\toprule
+Event & Accepted event name & Resource & What happened in Gazebo \\
+\midrule
+1 & \code{stage_KET4_in_buffer} & \code{ur5e-3} & Released \code{KET4_Square_4mm} in the buffer, freeing its gripper. \\
+2 & \code{retract_ur5e4_home_clear_board} & \code{ur5e-4} & Moved to its \code{home} pose, clearing the assembly board. \\
+3 & \code{pick_dropped_gear_small_ur5e3} & \code{ur5e-3} & Grasped \code{gear_small} at its measured position and withdrew with it attached. \\
+4 & \code{place_gear_small_on_board_ur5e3} & \code{ur5e-3} & Released the gear at \code{Gear_Plate/Gear_Shaft_1} and retreated. \\
+\bottomrule
+\end{tabularx}\par}
+
+\clearpage
+\subsection{Conveyor breakdown}
+
+The Conveyor became unavailable while \code{ur5e-1} held the machined
+square peg, \code{KET4_Square_4mm}. The M1 staging tray provided a handoff
+point. KMR collected the peg there and carried it directly to
+\texttt{Buffer For Machined parts}.
+
+\par\smallskip\noindent{\small\bfseries Accepted primitive sequence for event~7}\par\nopagebreak
+{\small
+\begin{tabularx}{\linewidth}{@{}r l Y@{}}
+1. & \code{move_to_named_pose} & Stow the KMR arm in the \code{transport} pose. \\
+2. & \code{move_base} & Return to Storage. \\
+\end{tabularx}\par}
+
+\smallskip
+{\small
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{@{}r Y l Y@{}}
+\toprule
+Event & Accepted event name & Resource & What happened in Gazebo \\
+\midrule
+1 & \code{place_on_M1_staging_tray} & \code{ur5e-1} & Released the square peg on the M1 staging tray. \\
+2 & \code{navigate_KMR_to_M1} & \code{KMR} & Drove to M1 to collect the staged peg. \\
+3 & \code{ur5e1_retract_home} & \code{ur5e-1} & Retracted to \code{home}, clearing access to the tray. \\
+4 & \code{kmr_pick_from_M1_staging_tray} & \code{KMR} & Grasped the peg on the tray and lifted it clear. \\
+5 & \code{kmr_move_base_to_buffer} & \code{KMR} & Carried the peg from M1 to the buffer. \\
+6 & \code{kmr_place_on_buffer_zone_1} & \code{KMR} & Released the peg in \code{zone_1} of the buffer. \\
+7 & \code{kmr_stow_arm_and_return_to_storage} & \code{KMR} & Stowed its arm in the \code{transport} pose and drove back to Storage. \\
+\bottomrule
+\end{tabularx}\par}
+
+\clearpage
+\subsection{ur5e-1 breakdown}
+
+The gripper on \code{ur5e-1} failed before it could transfer the completed
+square peg from M1 to the Conveyor. The empty arm could still retract.
+KMR took over the transfer and delivered \code{KET4_Square_4mm} to the
+original loading position.
+
+\par\smallskip\noindent{\small\bfseries Accepted primitive sequence for event~2}\par\nopagebreak
+{\small
+\begin{tabularx}{\linewidth}{@{}r l Y@{}}
+1. & \code{move_to_named_pose} & Stow the arm for travel. \\
+2. & \code{move_base} & Drive to the M1 dock. \\
+3. & \code{detect_parts} & Detect the part at M1. \\
+4. & \code{compute_pick_targets} & Calculate the pick poses. \\
+5. & \code{move_cartesian} & Move to the approach pose. \\
+6. & \code{move_cartesian} & Move to the target pose. \\
+7. & \code{grasp_part} & Grasp \code{KET4_Square_4mm}. \\
+8. & \code{move_cartesian} & Lift the peg along the calculated waypoints. \\
+9. & \code{move_to_named_pose} & Stow the arm for transport. \\
+\end{tabularx}\par}
+
+\smallskip
+{\small
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{@{}r Y l Y@{}}
+\toprule
+Event & Accepted event name & Resource & What happened in Gazebo \\
+\midrule
+1 & Retract the empty arm to its named home pose & \code{ur5e-1} & Moved the empty arm to \code{home}, clearing access to M1. \\
+2 & Retrieve the completed part from M1 with KMR & \code{KMR} & Drove to M1, grasped the square peg and stowed its arm for transport. \\
+3 & Deliver to conveyor loading position 1 using a south-facing base heading & \code{KMR} & Approached the Conveyor facing south and released the peg at loading position~1. \\
+4 & Return KMR to Storage and verify idle readiness & \code{KMR} & Stowed its arm and drove back to Storage. \\
+\bottomrule
+\end{tabularx}\par}
+
+\clearpage
+\subsection{Machining breakdown during part processing}
+
+M1 failed during the square trim of \code{KET4_Square_4mm}. M2 could run
+the square program, but it was trimming \code{RGOCG4-50_Round_4mm}.
+The recovery temporarily unloaded the round peg, finished the square peg on M2,
+then reloaded the round peg and restored the circle program.
+
+\par\smallskip\noindent{\small\bfseries Accepted primitive sequence for event~14}\par\nopagebreak
+{\small
+\begin{tabularx}{\linewidth}{@{}r l Y@{}}
+1. & \code{resume_job} & Continue the round-part job paused in event~1. \\
+\end{tabularx}\par}
+
+\smallskip
+{\small
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{@{}r Y l Y@{}}
+\toprule
+Event & Accepted event name & Resource & What happened in Gazebo \\
+\midrule
+1 & Pause M2's round-part job for temporary unloading & \code{M2} & Paused the running trim job for the round peg. \\
+2 & Unload the paused round part into M2's staging tray & \code{ur5e-2} & Lifted the round peg out of M2 and placed it on M2's staging tray. \\
+3 & Navigate to M1 and retrieve the interrupted square part & \code{KMR} & Drove to M1 and grasped the partially processed square peg. \\
+4 & Select M2's square program before loading & \code{M2} & Switched the selected program from \code{circle} to \code{square}. \\
+5 & Return ur5e-2 home to clear M2 access & \code{ur5e-2} & Moved to \code{home}, clearing the approach to M2. \\
+6 & Navigate to M2 and load the interrupted square part & \code{KMR} & Carried the square peg to M2 and released it into the machine. \\
+7 & Navigate KMR to Storage to clear M2 & \code{KMR} & Drove back to Storage, clearing the machine access area. \\
+8 & Start the square-part job on M2 & \code{M2} & Started the \code{trim} job with the required \code{square} result. \\
+9 & Await and verify completion of square trimming on M2 & \code{M2} & Recorded completion of the square trim on M2. \\
+10 & Transfer the completed square part from M2 to Conveyor & \code{ur5e-2} & Unloaded the finished square peg and placed it on the Conveyor. \\
+11 & Reload the paused round part from M2's staging tray & \code{ur5e-2} & Picked up the round peg from the staging tray and loaded it back into M2. \\
+12 & Return ur5e-2 home to clear M2 for resumed processing & \code{ur5e-2} & Withdrew to \code{home}, clearing the machine for processing. \\
+13 & Restore M2's circle program before a separate resume event & \code{M2} & Selected \code{circle} for the reloaded round peg. \\
+14 & Resume the reloaded paused round-part job & \code{M2} & Resumed the same round-part job that was paused in event~1. \\
+\bottomrule
+\end{tabularx}\par}
+\end{document}
