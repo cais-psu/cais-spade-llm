@@ -1,0 +1,44 @@
+\documentclass[preprint,12pt,authoryear]{elsarticle}
+\input{preamble}
+
+\begin{document}
+
+\begin{center}
+  {\Large\bfseries \papertitle\par}
+  \medskip
+  {\large Supplementary Material\par}
+\end{center}
+
+\newacronym{llm}{LLM}{Large Language Model}
+\newacronym{pa}{PA}{Product Agent}
+\newacronym{ra}{RA}{Resource Agent}
+\newacronym{cca}{CCA}{Central Controller Agent}
+\newacronym{ol}{OL}{outline level}
+\newacronym{el}{EL}{event level}
+
+This supplement describes the prompts that the neuro-symbolic framework sends to the~\gls{llm}.  In recovery task synthesis, the~\gls{pa} prompts the~\gls{llm} to propose ranked candidates for the next recovery event at~\gls{el}, or a complete recovery outline at~\gls{ol}. At both levels, the~\gls{ra} checks the feasibility of each proposed event,
+and the~\gls{cca} checks its safety (\FigOutline{} of the paper). In primitive composition, the~\gls{ra} prompts the~\gls{llm} to compose each accepted event from the primitives of the resource (\FigComposition{} of the paper). Appendix~A describes the structure of the recovery task synthesis prompt, and Appendix~B describes the structure of the primitive composition prompt. Each appendix includes an illustrative walkthrough from the Part slippage scenario.\footnote{The gray boxes reproduce recorded text. Minor implementation details are omitted and marked [...].} Appendix~C presents the recoveries for the four failure scenarios and their execution results in Gazebo.
+
+% ============================================================
+% Appendices: numbering set up here; each part is in its own file
+% ============================================================
+\appendix
+\renewcommand{\thesection}{Appendix~\Alph{section}}
+\renewcommand{\thesubsection}{\Alph{section}.\arabic{subsection}}
+\renewcommand{\thesubsubsection}{\thesubsection.\arabic{subsubsection}}
+\makeatletter
+\@addtoreset{table}{section}
+\@addtoreset{figure}{section}
+\makeatother
+\renewcommand{\theHtable}{\Alph{section}.\arabic{table}}
+\renewcommand{\theHfigure}{\Alph{section}.\arabic{figure}}
+\renewcommand{\thepromptbox}{\Alph{section}.\arabic{promptbox}}
+\renewcommand{\theHpromptbox}{\Alph{section}.\arabic{promptbox}}
+
+\input{appendix_a1}
+\input{appendix_a2}
+\input{appendix_b1}
+\input{appendix_b2}
+\input{appendix_c}
+
+\end{document}

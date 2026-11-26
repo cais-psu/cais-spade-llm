@@ -1,0 +1,47 @@
+% Appendix B.1, input by main.tex.
+
+\FloatBarrier
+% ============================================================
+\section{Primitive Composition}\label{sec:composition}
+% ============================================================
+
+\subsection{Prompt structure overview}\label{sec:composition-overview}
+
+In primitive composition, the~\gls{ra} prompts the~\gls{llm} to compose each accepted recovery event from the
+primitives of the resource that performs it. Regardless of the generation level, events are
+composed one at a time, in the order of the accepted outline. In each call, the~\gls{llm} requests facts, returns a program consisting of an ordered
+list of primitive steps, or reports that the event cannot be composed from the primitives.
+The~\gls{llm} supplies numeric parameters as references to facts provided by the~\gls{ra}, which resolves
+those references. The~\gls{ra} then checks whether the program reaches the event's intended end state
+and whether each step can be carried out in the cell. If the program is refused, the next prompt
+includes the validation finding so that the~\gls{llm} can revise the program. This appendix describes
+the prompt for one event. Table~\ref{tab:composition-sections} lists its sections in the order in
+which they appear.
+
+% A table that may continue on the next page, so the text runs on without gaps.
+{\footnotesize\setlength{\tabcolsep}{5pt}
+\begin{xltabular}{\linewidth}{@{}>{\raggedright\arraybackslash}p{4.4cm} >{\raggedright\arraybackslash}p{2.4cm} Y@{}}
+\toprule
+Section & In the prompt & Description \\
+\midrule
+\endfirsthead
+\toprule
+Section & In the prompt & Description (continued) \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\bottomrule
+\caption{The sections of the primitive composition prompt, in the order in which they appear.}\label{tab:composition-sections}\\
+\endlastfoot
+Task and Role & every call & Asks the~\gls{llm} to compose only the active recovery event, using its resource's primitives, and to request missing facts rather than guess them. \\
+Primitives & every call & The names of the primitives of the resource that performs the event. \\
+Knowledge Base & every call & Available lookups, such as a primitive's contract, the resource's model, a part's observed pose and target, area bounds and the geometry of the cell. \\
+Nominal functions & every call & The names of the resource's nominal functions, whose primitive steps can be requested. \\
+Requested facts & after a lookup & The facts requested by the~\gls{llm} while composing this event, such as the resource's model and primitive contracts. \\
+Validation feedback & after a refusal & The finding from checking the previous program, identifying the step or end-state value that needs revision. \\
+Active event & every call & The recovery event as accepted, including its resource and part, its starting state, its intended end state and the rationale provided by the~\gls{llm}. \\
+Predefined configurations & every call & Configurations declared by the resource, such as home or transport, that a step can reference by name. The list is empty for a resource that declares none, such as a machine. \\
+Composition Rules & every call & Requirements for the reply and an accepted program: use only the listed primitives, express every number as a reference to a requested fact, and establish every intended end-state value through declared effects or what the checks find. \\
+System message & every call & The required reply format: a short plan accompanied by a request for facts, a program of primitive steps, or a report that the event cannot be composed from the primitives. \\
+\end{xltabular}}

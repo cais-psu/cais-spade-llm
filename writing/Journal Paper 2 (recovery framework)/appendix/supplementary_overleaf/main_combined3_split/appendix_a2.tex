@@ -1,0 +1,253 @@
+% Appendix A.2, input by main.tex.
+
+\FloatBarrier
+\subsection{Illustrative walkthrough of the prompt}\label{sec:prompt-blocks}
+
+The walkthrough follows the prompt sections in Table~\ref{tab:prompt-blocks} in order, using
+examples from the \gls{el} prompts for the Part slippage scenario, with the corresponding \gls{ol} instructions shown where they differ.
+
+\subsubsection{Task and Role}\label{sec:block-task}
+
+The Task and Role section assigns the~\gls{llm} the role of recovery planner after a failure interrupts
+normal production. It requests a short plan toward the Recovery Goal, accompanied by two to five
+ranked candidate events at~\gls{el} or a complete sequence of recovery events at~\gls{ol}.
+At~\gls{el}, the first candidate that passes every check becomes the next recovery event;
+at~\gls{ol}, the outline is accepted only after all its events and recovery completion pass the checks.
+Listing~\ref{prompt:block-task} shows the section.
+
+\begin{recbox}{Task and Role}
+\begin{lstlisting}
+(*@\who{Task and Role}@*)
+You are the recovery planner. A failure interrupted normal production. Until normal production takes over, only your recovery events change the planned state; a job already running keeps running until an event pauses or stops it.
+Plan how to get from the current state to the Recovery Goal. Propose 2(*@\textendash@*)5 different ways to do the next step of that plan, most preferred first. The first one in your order that passes every check becomes the next recovery event; the others are dropped.
+Give your plan in `plan` (two short sentences) and keep each `rationale` to one.
+\end{lstlisting}
+
+\vspace{3pt}{\color{black!30}\hrule height 0.3pt}\vspace{3pt}
+\begin{lstlisting}
+(*@\who{Outline level}@*)
+Plan how to get from the current state to the Recovery Goal. Give the whole plan in `events`: every recovery event, in the order they happen.
+\end{lstlisting}
+\end{recbox}
+\promptcaption{The Task and Role section at~\gls{el}, with the replacement instruction used at~\gls{ol}.}{prompt:block-task}
+
+\subsubsection{Failure and Recovery Goal}\label{sec:block-failure}
+
+The Failure section lists what was detected and measured when the failure occurred, with one observation per line.
+The Recovery Goal section states the intended outcome of the interrupted work.
+Listing~\ref{prompt:block-failure} shows both sections.
+
+\begin{recbox}{Failure and Recovery Goal}
+\begin{lstlisting}
+(*@\who{Failure}@*)
+What was detected and measured, stated the same way for every resource.
+- ur5e-4 did not complete place_approach of gear_small (destination_location assembly_board-v1)
+- task_outcome (ur5e-4, task environment_9): goal_cancelled true, terminal_status 5, progress 0.503
+- device_fault_report (ur5e-4): resource_state failed, reported_by gripper object detection
+- state_discrepancy (ur5e-4, gear_small): expected_holder ur5e-4, measured_holder null
+- gear_small: not held, not at any station, measured at (0.250, 0.450, 1.025)
+- ur5e-4: measured pose (0.029, 0.145, 1.289), inside assembly_board-v1
+
+(*@\who{Recovery Goal}@*)
+- gear_small: part_location assembly_board-v1 (target Gear_Plate/Gear_Shaft_1) (normally ur5e-4's place_insert; ur5e-4 failed)
+\end{lstlisting}
+\end{recbox}
+\promptcaption{The Failure and Recovery Goal sections.}{prompt:block-failure}
+
+\subsubsection{Candidate Rules}\label{sec:block-rules}
+
+The Candidate Rules section (Event Rules at~\gls{ol}) gives seven rules for writing recovery events. The first specifies
+the fields of an event and restricts it to one resource, so the event can be checked against that
+resource's model. The second limits an event to locations where its resource can operate. The
+third requires the intended end state to be expressed in declared state variables. The fourth
+states how each value that holds after an event must be established. The fifth requires an event
+to state changes to another resource when it moves a part into or out of that resource. The sixth
+requires declared variable names and lookups of needed facts that are not shown. The seventh
+specifies when to end the recovery, through a completion declaration at~\gls{el} or the end of the outline at~\gls{ol}.
+Listing~\ref{prompt:block-rules} shows the section.
+
+\begin{recbox}{Candidate Rules}
+\begin{lstlisting}
+(*@\who{Candidate Rules}@*)
+- One event per candidate, by one resource: `outline_id`, `event_name` (what it achieves; new names allowed), `resource`, `part_name` (if a part is involved), `expected_end_state`, `neighbor_end_state` (if needed), `rationale` (the fact it relies on).
+- Use a resource only where it works (a reachable location, a position within its workspace bounds, or a position it moves to) and for what it handles (parts it holds, processes it runs). Working at one place says nothing about another.
+- `expected_end_state`: the new value of each declared variable the event changes, for its resource and its part only. (*@\cut@*)
+- A value holds after an event only when it already held, a declared action of the acting resource sets it, or the event's checks find it; state each value they find. (*@\cut@*)
+- `neighbor_end_state`: when moving the part changes another resource (it arrives at or leaves it), that resource's own changed variables, not the part's: {"<resource name>": {"<variable>": <value>}}. That resource does not act; variables you leave out stay as they are.
+- Use variable names exactly as declared. Look up any fact or variable you rely on that is not shown.
+- When you judge that normal production can carry on its remaining work from the state your events leave, return only `plan` and `decision: "recovery_complete"`; normal production then takes over.
+\end{lstlisting}
+
+\vspace{3pt}{\color{black!30}\hrule height 0.3pt}\vspace{3pt}
+\begin{lstlisting}
+(*@\who{Outline level}@*)
+- Each event, by one resource: `outline_id`, `event_name` (what it achieves; new names allowed), `resource`, `part_name` (if a part is involved), `expected_end_state`, `neighbor_end_state` (if needed), `rationale` (the fact it relies on).
+- End `events` where you judge that normal production can carry on its remaining work from the state your events leave; normal production then takes over.
+\end{lstlisting}
+\end{recbox}
+\promptcaption{The Candidate Rules section at~\gls{el}, and the two rules that differ at~\gls{ol}.}{prompt:block-rules}
+
+\subsubsection{Knowledge Base and requested facts}\label{sec:block-kb}
+
+The Knowledge Base section lets the~\gls{llm} request facts that are not already shown in the prompt.
+Including every fact about every resource and part in each turn would lengthen the prompt and
+use the~\gls{llm}'s context window for facts that are unnecessary for most failures. The Resources and
+Parts sections therefore summarize each resource and part, and the~\gls{llm} requests additional facts
+as needed.
+
+The~\gls{llm} requests one to eight lookups at a time instead of proposing recovery events. This limits
+how much information each request adds to the next prompt. Only the requested information is
+added, in two sections. The Requested facts section contains declared facts, such as allowed
+values, reachable places and a part's target; these facts remain unchanged across turns. The
+Requested current values section reports the state recorded at the failure or, at~\gls{el}, the state expected after accepted events. Listing~\ref{prompt:block-kb} shows the Knowledge Base
+section, and Listing~\ref{prompt:block-retrieved} shows the two sections after the~\gls{llm} requested eight facts.
+
+\begin{recbox}{Knowledge Base}
+\begin{lstlisting}
+(*@\who{Knowledge Base}@*)
+Request facts from the knowledge base by returning only `plan`, `decision: "need_context"` and 1(*@\textendash@*)8 `context_requests` from the list below; they are added to the next prompt before you propose events. When proposing events, omit `decision` and `context_requests`.
+- /resources/<name>/snapshot: every recorded value of a resource; once your events change it, its expected values after them
+- /resources/<name>/state_variables: its condition variables, their allowed values, and current values
+- /resources/<name>/pending_tasks: its remaining planned tasks
+- /resources/<name>/static_capabilities: named poses, staging areas and process options
+- /resources/<name>/pose_relations: which areas contain its measured position (one point, not its full extent), which declared places contain it, and how far it lies from each resource's workspace bounds
+- /parts/<name>/snapshot: every recorded value of a part
+- /parts/<name>/state_variables: its condition variables and current values
+- /parts/<name>/target: where the part belongs in the finished product (its assembly location and slot pose)
+- /parts/<name>/pose_relations: which areas contain its measured position (one point, not its full extent), which declared places contain it, and how far it lies from each resource's workspace bounds
+- /regions: area bounds in world coordinates
+- /geometry: station poses and sizes, robot and mobile bases, floor extent and floor obstacles (*@\cut@*)
+\end{lstlisting}
+\end{recbox}
+\promptcaption{The Knowledge Base section.}{prompt:block-kb}
+
+\begin{recbox}{Requested facts and Requested current values}
+\begin{lstlisting}
+(*@\who{Requested facts}@*)
+/resources/ur5e-3/static_capabilities: {"source": "declaration", "value": {"availability": "available", "named_poses": {"home": "home"}, "reachability": ["Buffer For Machined parts", "assembly_board-v1", "Exit"], "resource_type": "robot", "staging_areas": {}}}
+/resources/ur5e-4/static_capabilities: {"source": "declaration", "value": {"availability": "available", "named_poses": {"home": "home"}, "reachability": ["3D Printing Station", "assembly_board-v1"], "resource_type": "robot", "staging_areas": {}}}
+/resources/ur5e-4/state_variables: {"source": "declaration", "value": {"held_part": {"domain": [null], "scope": "resource"}, "part_location": {"domain": ["ur5e-4", null, "3D Printing Station", "assembly_board-v1"], "scope": "part"}, (*@\cut@*)
+/parts/gear_small/state_variables: {"source": "declaration", "value": {"current_process": {"domain": [], "domain_complete": false, (*@\cut@*)
+/parts/gear_small/target: {"source": "configuration", "value": {"board_top_z": 1.0289916, "location": "assembly_board-v1", "model_name": "gear_small", "part_height": 0.02, "slot_pose": {"x": 0.0294496, "y": 0.1448242, (*@\cut@*)
+\end{lstlisting}
+
+\vspace{3pt}{\color{black!30}\hrule height 0.3pt}\vspace{3pt}
+\begin{lstlisting}
+(*@\who{Requested current values}@*)
+/resources/ur5e-3/pending_tasks: {"source": "saved_observations", "value": [{"function_name": "place_approach", "id": "31540144bde74a99be8b89550842597e_pending_1", "params": {"destination_location": "assembly_board-v1", "part_name": "KET4_Square_4mm"}, (*@\cut@*)
+/resources/ur5e-4/state_variables: {"current_value": {"held_part": null, "pose": {"x": 0.029473916554388156, "y": 0.14485936416918307, "z": 1.2892772258183398}, "resource_location": null, "resource_state": "failed"}}
+/resources/ur5e-4/pending_tasks: {"source": "saved_observations", "value": []}
+/parts/gear_small/state_variables: {"current_value": {"current_process": null, "part_location": null, "processCompleted": [{"process": "print_part"}]}}
+/parts/gear_small/pose_relations: {"basis": (*@\cut@*) "source": "model_calculation", "value": {"by_declared_location": {}, "containing_regions": [], "envelopes": { (*@\cut@*) "ur5e-3": {"max_xy_radius_m": 0.886, "tolerance_m": 0.01, "xy_distance_m": 0.255, "z_m": 1.025, "z_range_m": [0.971, 1.121]}, "ur5e-4": {"max_xy_radius_m": 0.886, "tolerance_m": 0.01, "xy_distance_m": 0.982, "z_m": 1.025, "z_range_m": [0.971, 1.121]}}, (*@\cut@*)
+\end{lstlisting}
+\end{recbox}
+\promptcaption{The Requested facts and Requested current values sections after the~\gls{llm} requested eight facts.}{prompt:block-retrieved}
+
+\subsubsection{Events so far and Validation Feedback}\label{sec:block-events}
+
+The Events so far section appears only at~\gls{el} and lists the accepted recovery events in order.
+These events are planned but have not yet been executed; the Resources and Parts sections show
+the state expected after them. At both levels, Validation Feedback identifies the check that
+refused a proposal and the reason, including any refusal of recovery completion. For a refused
+outline, it identifies the event or completion check that failed, and the~\gls{llm} proposes a new
+complete outline. Listing~\ref{prompt:block-events} shows the two sections from the \gls{el} walkthrough
+and includes an~\gls{ra} refusal obtained by checking a candidate after the run.
+
+\begin{recbox}{Events so far and Validation Feedback}
+\begin{lstlisting}
+(*@\who{Events so far}@*)
+[
+  {
+    "outline_id": "RECOVERY_SEQ1",
+    "event_name": "stage_KET4_in_buffer",
+    "resource": "ur5e-3",
+    "part_name": "KET4_Square_4mm"
+  }
+]
+Resources and Parts already include these events. Do not propose them again.
+
+(*@\who{Validation Feedback}@*)
+These candidates were refused, and stage_KET4_in_buffer, listed after them, was applied.
+- candidate_event=c1/ur5e-3/KET4_Square_4mm | event_name=place_KET4_on_assembly_board | constraint_code=cca_safety | reason=SAFE_shared_area_mutex (At most one resource may occupy the assembly_board-v1 destination area at any time.) is broken during the event: ur5e-3 is in assembly_board-v1 while ur5e-4 is in assembly_board-v1
+\end{lstlisting}
+
+\vspace{3pt}{\color{black!30}\hrule height 0.3pt}\vspace{3pt}
+\begin{lstlisting}
+(*@\who{Validation Feedback, checked after the run for the ur5e-4 candidate the LLM ranked third}@*)
+- candidate_event=RECOVERY_SEQ3_C/ur5e-4/gear_small | event_name=ur5e-4_pick_gear_small_from_floor_position | constraint_code=ra_feasibility | reason=NEEDS_CONTEXT: ur5e-4's bounded joint search found no configuration for gear_small's observed position; reachability is unresolved
+\end{lstlisting}
+\end{recbox}
+\promptcaption{The Events so far and Validation Feedback sections after the first accepted event, with a~\gls{cca} refusal, followed by an~\gls{ra} refusal from a check performed after the run.}{prompt:block-events}
+
+\subsubsection{Resources and Parts}\label{sec:block-resources}
+
+The Resources and Parts sections describe the state of the cell and what each resource can do.
+The~\gls{llm} uses this information to choose a resource for each event and specify its intended end
+state. Each entry in the Resources section gives the resource's state and declared capabilities, such as
+reachable locations, workspace bounds and processes. It also lists the resource's actions, the
+conditions each action requires and the values it sets. The Parts section gives each part's location or holder,
+assembly target and completed processes. Both sections initially show the state recorded at the
+failure. At~\gls{el}, they are updated to show the state expected after accepted events.
+Listing~\ref{prompt:block-resources} shows both sections for the relevant resources and parts.
+
+\begin{recbox}{Resources and Parts}
+\begin{lstlisting}
+(*@\who{Resources}@*)
+Recorded at the failure. Every resource is listed the same way: its state, then the capabilities it declares (reachable locations, where it places parts, workspace bounds, positions it moves to, processes it runs, job control, its actions with what each needs and sets). A resource's condition is the variables its model declares; request `/resources/<name>/state_variables` for them and their allowed values. A value your events changed without stating it reads "not stated".
+(*@\cut@*)
+Buffer For Machined parts (resource)  idle; zone_1_part null; zone_2_part null; zone_3_part null; zone_4_part null; capabilities: moves parts in one direction: zone_1_part (*@\textrightarrow@*) zone_2_part (*@\textrightarrow@*) zone_3_part (*@\textrightarrow@*) zone_4_part; actions: detect_parts; compute_transport_targets; move_relative
+(*@\cut@*)
+ur5e-3 (robot)  picked; held_part KET4_Square_4mm; resource_location Buffer For Machined parts; pose (-0.320, 0.500, 1.501); capabilities: reachable locations Buffer For Machined parts, assembly_board-v1, Exit; workspace bounds; actions: compute_pick_targets; compute_place_targets; detect_parts; grasp_part (needs held_part null) sets resource_state picked, held_part <part_name>; move_cartesian sets pose (x, y, z); move_joints; move_relative (needs pose recorded) sets pose moved by (dx, dy, dz); move_to_named_pose (needs held_part null) sets resource_state idle, resource_location <pose_name>; release_part (needs held_part not null) sets resource_state placed, held_part null; rotate_joint; (*@\cut@*)
+ur5e-4 (robot)  failed; held_part null; resource_location null; pose (0.029, 0.145, 1.289), inside assembly_board-v1; capabilities: reachable locations 3D Printing Station, assembly_board-v1; workspace bounds; (*@\cut@*)
+
+(*@\who{Parts}@*)
+A part's condition is its variables: where it is, who holds it, and its process record (its unfinished process and the processes it completed); request `/parts/<name>/state_variables` for them.
+(*@\cut@*)
+KET4_Square_4mm  held by ur5e-3, assembly target GMC_Laser_Plate_Virtual/KET4_Square_4mm; processes: trim (*@\textrightarrow@*) square completed
+(*@\cut@*)
+gear_small  not held, not at any station, measured at (0.250, 0.450, 1.025), assembly target Gear_Plate/Gear_Shaft_1; processes: print_part completed
+\end{lstlisting}
+\end{recbox}
+\promptcaption{The Resources and Parts sections at the failure, showing the relevant resources and parts.}{prompt:block-resources}
+
+\subsubsection{System message}\label{sec:block-reply}
+
+The system message specifies a single JSON reply format for a short plan accompanied by a
+request for one to eight facts, proposed recovery events, or an indication of recovery completion.
+Proposed events are two to five ranked candidates at~\gls{el} or a complete outline at~\gls{ol},
+with the fields specified by Candidate Rules or Event Rules. Completion is indicated by a separate
+reply at~\gls{el} or by the end of the proposed outline at~\gls{ol}.
+Listing~\ref{prompt:block-reply} shows the system message.
+
+\begin{recbox}{System message}
+\begin{lstlisting}
+Reply with only one JSON object that follows this JSON schema:
+{"type": "object", "additionalProperties": false, "$defs": {"outline_event": { (*@\cut@*) "properties": {"plan": {"type": "string"}, "candidate_events": {"type": "array", "minItems": 2, "maxItems": 5, "items": {"$ref": "#/$defs/outline_event"}}, "decision": {"type": ["string", "null"], "enum": [null, "need_context", "recovery_complete"], "description": "Use null for proposed events, need_context to request facts, or recovery_complete when you judge the failure overcome."}, "context_requests": {"type": "array", "minItems": 0, "maxItems": 8, "description": "Use [] for proposed events; need_context requires 1 to 8 references and no candidate fields.", "items": {"type": "string", "pattern": "^/"}}}, "required": ["plan"]}
+\end{lstlisting}
+
+\vspace{3pt}{\color{black!30}\hrule height 0.3pt}\vspace{3pt}
+\begin{lstlisting}
+(*@\who{Outline level}@*)
+(*@\cut@*) "properties": {"plan": {"type": "string"}, "events": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/outline_event"}, "description": "The whole recovery outline: every recovery event, in the order they happen."}, "decision": {"type": ["string", "null"], "enum": [null, "need_context"], "description": "Use null for proposed events; use need_context only to request facts without proposing events."}, (*@\cut@*)
+\end{lstlisting}
+\end{recbox}
+\promptcaption{The system message at~\gls{el}, and the properties that differ at~\gls{ol}.}{prompt:block-reply}
+
+\subsubsection{Replies of the~\texorpdfstring{\gls{llm}}{LLM}}\label{sec:replies}
+
+Listing~\ref{reply:examples} shows \gls{llm} replies from three turns of the Part slippage run at~\gls{el}. Each
+responds to a prompt with the structure described above at a different stage of the recovery.
+In turn 1, the~\gls{llm} requests facts; in turn 2, it proposes candidate events; and in turn 7, it
+declares the recovery complete.
+
+\begin{recbox}{Replies of the~\gls{llm}}
+\begin{lstlisting}
+(*@\who{Turn 1}@*)
+{"plan": "First establish where gear_small lies relative to each arm's workspace and whether ur5e-4 can be recovered or ur5e-3 must take over. Then re-grasp gear_small and place it at assembly_board-v1 Gear_Shaft_1.", "decision": "need_context", "context_requests": ["/parts/gear_small/pose_relations", "/parts/gear_small/state_variables", "/resources/ur5e-4/state_variables", "/resources/ur5e-4/static_capabilities", "/resources/ur5e-3/pending_tasks", "/resources/ur5e-4/pending_tasks", "/resources/ur5e-3/static_capabilities", "/parts/gear_small/target"]}
+(*@\who{Turn 2}@*)
+{"plan": "gear_small is outside ur5e-4's work envelope but inside ur5e-3's, so ur5e-3 must recover it, and its gripper is still holding KET4_Square_4mm. First ur5e-3 puts down KET4, then it picks gear_small and places it on assembly_board-v1 at Gear_Plate/Gear_Shaft_1.", "candidate_events": [ (*@\cut@*) {"outline_id": "c2", "event_name": "stage_KET4_in_buffer", "resource": "ur5e-3", "part_name": "KET4_Square_4mm", "expected_end_state": {"resource_state": "placed", "held_part": null, "resource_location": "Buffer For Machined parts", "part_location": "Buffer For Machined parts"}, "neighbor_end_state": {"Buffer For Machined parts": {"zone_1_part": "KET4_Square_4mm"}}, "rationale": "ur5e-3 is at Buffer For Machined parts and that buffer's zone_1 is empty."}, (*@\cut@*)
+(*@\who{Turn 7}@*)
+{"plan": "gear_small has been re-picked by ur5e-3 and placed at its Gear_Plate/Gear_Shaft_1 slot on assembly_board-v1, and its assembly is recorded as completed, so the Recovery Goal holds. ur5e-4 is idle at home and ur5e-3 is free with the gripper empty, so normal production can carry on its remaining work.", "decision": "recovery_complete"}
+\end{lstlisting}
+\end{recbox}
+\promptcaption{Three \gls{llm} replies. The second reply is shortened to show only its plan and the accepted candidate.}{reply:examples}

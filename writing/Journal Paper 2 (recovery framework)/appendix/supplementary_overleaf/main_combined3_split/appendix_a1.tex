@@ -1,0 +1,48 @@
+% Appendix A.1, input by main.tex.
+
+% ============================================================
+\section{Recovery Task Synthesis}\label{sec:outline}
+% ============================================================
+
+\subsection{Prompt structure overview}\label{sec:prompt-overview}
+
+In each turn of recovery task synthesis, the~\gls{llm} requests facts, proposes recovery events, and indicates when it judges the recovery complete. The generation level specifies whether a proposal contains ranked candidates for the next recovery event (\gls{el}) or a complete recovery outline (\gls{ol}). This appendix describes the prompt structure at both levels. Table~\ref{tab:prompt-blocks} lists the prompt sections in the order.
+
+
+{\footnotesize\setlength{\tabcolsep}{5pt}
+\begin{xltabular}{\linewidth}{@{}>{\raggedright\arraybackslash}p{4.3cm} >{\raggedright\arraybackslash}p{2.4cm} Y@{}}
+\toprule
+Section & In the prompt & Description \\
+\midrule
+\endfirsthead
+\toprule
+Section & In the prompt & Description (continued) \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\bottomrule
+\caption{The sections of the prompt, in the order in which they appear.}\label{tab:prompt-blocks}\\
+\endlastfoot
+Task and Role & every turn & Asks the~\gls{llm} to plan toward the recovery goal and propose two to five ranked candidate events at~\gls{el} or a complete recovery outline at~\gls{ol}. \\
+Failure & every turn & Observations recorded when the failure occurred, such as task outcomes, fault reports, mismatches between expected and measured state, and measured positions. \\
+Recovery Goal & every turn & The intended outcome of the interrupted work and the resource that would normally perform it. \\
+Candidate Rules / Event Rules & every turn & Seven rules for writing recovery events, including one resource per event, an intended end state expressed in the resource's declared state variables, and conditions for ending the recovery. The section is named Event Rules at~\gls{ol}. \\
+Knowledge Base & every turn & Instructions for requesting facts and a list of available facts, such as recorded values and state variables, capabilities, pending tasks, a part's assembly target, the distance from a measured position to each resource's workspace, area bounds and the geometry of the cell. \\
+Requested facts & after a lookup & The declared facts requested by the~\gls{llm}. \\
+Events so far & after an accepted event (\gls{el}) & The recovery events accepted so far, in order. \\
+Validation Feedback & after a refusal & The checks and reasons for refusing candidate events, a complete recovery outline, or recovery completion. \\
+Resources & every turn & Each resource's state at the failure or after accepted events, and its declared capabilities, including the conditions each action requires and the values it sets. \\
+Parts & every turn & Each part's location, holder, assembly target and process record. \\
+Requested current values & after a lookup & The current values requested by the~\gls{llm}, such as measured positions and distances. \\
+System message & every turn & The required reply format: a short plan with a request for facts or proposed recovery events. Completion is indicated by a separate declaration at~\gls{el} or the end of the outline at~\gls{ol}. \\
+\end{xltabular}}
+
+The prompt provides facts without prescribing a recovery plan. The Failure, Resources and Parts
+sections state what was measured and what each resource declares, using the same wording for
+every resource and every failure. The~\gls{llm} can request further facts through the Knowledge Base.
+It proposes each event and its intended end state, and indicates where the recovery ends.
+The~\gls{ra} and the~\gls{cca} check the proposed events for feasibility and safety, respectively. The~\gls{cca} holds the safety rules,
+which are omitted from the prompt. The~\gls{llm} learns of a rule only when a refusal names it.
+An event states only what should hold after it. How the robot achieves that state is determined
+later, during primitive composition (Appendix~B).

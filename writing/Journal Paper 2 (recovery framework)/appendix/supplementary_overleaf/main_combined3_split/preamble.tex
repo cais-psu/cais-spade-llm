@@ -1,0 +1,130 @@
+% Packages, page style and macros, input by main.tex.
+\usepackage[letterpaper,hmargin=0.9in,top=0.76in,bottom=0.78in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern,textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs,tabularx,array}
+\usepackage{xltabular}
+\usepackage{flafter}
+\usepackage{placeins}
+\usepackage{needspace}
+\usepackage{capt-of}
+\usepackage{newfloat}
+\usepackage{listings}
+\usepackage{tikz}
+\usepackage{tcolorbox}
+\tcbuselibrary{breakable}
+\usepackage[hidelinks]{hyperref}
+\usepackage[hyperfirst=false]{glossaries}
+
+% ============================================================
+% References to the main paper: edit here if its numbering changes
+% ============================================================
+\newcommand{\papertitle}{A Neuro-Symbolic Architecture for Safe and Feasible Self-Recovery in Multi-Agent Manufacturing Systems}
+\newcommand{\FigOutline}{Fig.~5}
+\newcommand{\FigComposition}{Fig.~6}
+
+% ============================================================
+% Page and heading style (as in the template)
+% ============================================================
+\pagestyle{plain}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\raggedbottom
+\emergencystretch=2em
+\setlength{\textfloatsep}{10pt plus 2pt minus 2pt}
+\setlength{\intextsep}{8pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{0pt}
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {14pt plus 4pt minus 2pt}{6pt plus 2pt minus 2pt}{\large\bfseries\boldmath}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {10pt plus 3pt minus 2pt}{3pt plus 1pt minus 1pt}{\normalsize\bfseries}}
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{\z@}%
+  {8pt plus 2pt minus 2pt}{2pt plus 1pt minus 1pt}{\normalsize\itshape}}
+% On a page that holds only tables, they start at the top with a fixed gap between them.
+\setlength{\@fptop}{0pt}
+\setlength{\@fpsep}{12pt}
+\setlength{\@fpbot}{0pt plus 1fil}
+\makeatother
+
+% ============================================================
+% Text styles. Two families only: the serif text face, and one monospaced
+% face for names and for text copied from the records.
+%   body                      12 pt serif
+%   tables, captions, key     \footnotesize serif
+%   recorded text             9 pt monospaced, in boxes and in table cells
+%   labels inside boxes       9 pt serif bold (ours, not recorded)
+%   notes on omitted lines    9 pt serif italic, gray (ours)
+% Colour is used only for the pass and fail marks, the red bar, and the figure.
+% ============================================================
+\definecolor{markgreen}{RGB}{56,118,29}
+\definecolor{markred}{RGB}{192,0,0}
+\definecolor{cutgray}{gray}{0.40}
+
+\lstdefinestyle{record}{
+  basicstyle=\fontsize{9}{11}\selectfont\ttfamily,
+  columns=fullflexible, keepspaces=true, showstringspaces=false, upquote=true,
+  breaklines=true, breakatwhitespace=true, breakindent=9.5pt, breakautoindent=true,
+  prebreak={}, postbreak={},
+  aboveskip=0pt, belowskip=0pt,
+  escapeinside={(*@}{@*)}
+}
+\lstset{style=record}
+
+% A cut inside a recorded line, and recorded lines left out.
+\newcommand{\cut}{{\normalfont\ttfamily\color{cutgray}[...]}}
+\newcommand{\vd}{\raisebox{-0.1ex}{\vbox{\baselineskip 3pt\lineskip 0pt\lineskiplimit 0pt\hbox{.}\hbox{.}\hbox{.}}}}
+\newcommand{\skipped}[1]{{\normalfont\itshape\fontsize{9}{11}\selectfont\color{cutgray}\vd\enspace #1}}
+% A recorded name inside one of our notes or labels: plain monospaced, in the colour of the note.
+\newcommand{\secname}[1]{{\normalfont\ttfamily #1}}
+% Who wrote the lines that follow (our label, not recorded text).
+\newcommand{\who}[1]{{\normalfont\bfseries\fontsize{9}{11}\selectfont\rule{0pt}{2.6ex}#1}}
+% A bar in the margin beside the line to notice.
+\newcommand{\notebar}{\rlap{\hspace{-5pt}\textcolor{markred}{\rule[-0.35ex]{2pt}{1.9ex}}}}
+% Recorded text inside a table cell.
+\newcommand{\rec}[1]{{\fontsize{9}{11}\selectfont\ttfamily\frenchspacing #1}}
+
+% Names from the records in running text: the monospaced text face itself,
+% so every character comes from one font. A line may break after a slash only.
+% They are set slightly smaller than the text around them, so that the two faces look the same size.
+\makeatletter
+\newcommand{\codesize}{\fontsize{\dimexpr\f@size pt*92/100\relax}{\f@baselineskip}\selectfont}
+\DeclareRobustCommand{\code}[1]{{\codesize\ttfamily\frenchspacing\expandafter\code@scan\detokenize{#1}\code@end}}
+\def\code@scan#1{\ifx#1\code@end\else\code@put#1\expandafter\code@scan\fi}
+\def\code@put#1{#1\ifnum`#1=`\/ \penalty\exhyphenpenalty\fi}
+\let\code@end\relax
+\makeatother
+% A recorded name of several words (an event name), in the same face and size as \code.
+\newcommand{\recordname}[1]{{\codesize\ttfamily\frenchspacing #1}}
+
+% Verdict marks, drawn so that they look the same in every engine.
+\newcommand{\ok}{\tikz[baseline=-0.55ex]{\draw[line width=0.9pt, color=markgreen!80!black, line cap=round, line join=round] (0,0) -- (0.08,-0.09) -- (0.24,0.12);}}
+\newcommand{\no}{\tikz[baseline=-0.55ex]{\draw[line width=0.9pt, color=markred, line cap=round] (0,-0.09) -- (0.19,0.11) (0,0.11) -- (0.19,-0.09);}}
+\newcommand{\na}{--}
+
+% ============================================================
+% Gray titled boxes (as in the template). A prompt section stands where the text shows it and
+% continues on the next page when it does not fit; its numbered caption stays with its end.
+% ============================================================
+\tcbset{recstyle/.style={colback=black!2, colframe=black!40, colbacktitle=black!10, coltitle=black,
+  arc=4pt, boxrule=0.4pt, left=7pt, right=7pt, top=5pt, bottom=5pt, fonttitle=\small\bfseries}}
+\newtcolorbox{recbox}[1]{recstyle, breakable, title={#1}, title after break={#1 (continued)},
+  before skip=8pt, after={\par\nointerlineskip\nopagebreak}}
+% The caption is set in a minipage, so no page break can fall between the box and its caption.
+\newcommand{\promptcaption}[2]{\noindent\begin{minipage}{\linewidth}\captionof{promptbox}{#1}\label{#2}%
+  \end{minipage}\par\addvspace{10pt}}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+% A gray box of recorded text (a prompt excerpt or a reply) is numbered as a Listing, apart from the tables.
+\DeclareFloatingEnvironment[name=Listing, placement=htb, within=section]{promptbox}
+% Tables that may continue on the next page: caption as wide as the text, little space around.
+% (set at the start of the document, once the page geometry is in force)
+\AtBeginDocument{\setlength{\LTcapwidth}{\textwidth}}
+\makeatletter
+% Their captions are laid out like those of the other tables.
+\def\LT@makecaption#1#2#3{\LT@mcol\LT@cols c{\hbox to\z@{\hss\parbox[t]\LTcapwidth{\@makecaption{#2}{#3}}\hss}}}
+\makeatother
+\setlength{\LTpre}{6pt}
+\setlength{\LTpost}{2pt}
